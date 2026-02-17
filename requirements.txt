@@ -1,0 +1,6 @@
+streamlit
+databricks-sql-connector
+snowflake-connector-python
+google-cloud-bigquery
+packaging<25
+plotly>=5.18.0
