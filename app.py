@@ -1200,7 +1200,7 @@ def run_row_hash_validation(
                     dtype = str(r.get("data_type") or "").upper()
                     if not col:
                         continue
-                    if any(x in dtype for x in ["BINARY", "VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                    if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
                         continue
                     if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
                         continue

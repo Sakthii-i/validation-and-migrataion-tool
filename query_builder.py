@@ -496,7 +496,19 @@ def build_row_hash_query_v2(
         col_ref = _quote_col_v2(engine, col)
 
         # Skip unsupported complex types (per user-provided logic)
-        if any(x in dtype_upper for x in ["BINARY", "VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            continue
+
+        # BINARY: include as deterministic HEX string
+        if "BINARY" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
+            elif engine == "databricks":
+                expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            else:  # bigquery
+                expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
+
+            concat_parts.append(str(expr).strip())
             continue
 
         # TIMESTAMP / DATETIME
@@ -625,7 +637,18 @@ def build_row_hash_mismatch_rows_query_v2(
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["BINARY", "VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            continue
+
+        if "BINARY" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
+            elif engine == "databricks":
+                expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            else:  # bigquery
+                expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
+
+            parts.append(str(expr).strip())
             continue
 
         if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
@@ -708,7 +731,18 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["BINARY", "VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            continue
+
+        if "BINARY" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
+            elif engine == "databricks":
+                expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            else:  # bigquery
+                expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
+
+            parts.append(str(expr).strip())
             continue
 
         if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
