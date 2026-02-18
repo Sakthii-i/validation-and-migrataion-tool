@@ -7,7 +7,7 @@ from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
 from connections.snowflake import connect_snowflake
 from metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
-from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query
+from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2
 import os
 os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
@@ -62,6 +62,15 @@ if "active_page" not in st.session_state:
     st.session_state["active_page"] = "main"
 if "case_sensitive_schema" not in st.session_state:
     st.session_state["case_sensitive_schema"] = False
+
+if "browse_case_sensitive_global" not in st.session_state:
+    st.session_state["browse_case_sensitive_global"] = False
+if "manual_case_sensitive_global" not in st.session_state:
+    st.session_state["manual_case_sensitive_global"] = False
+if "csv_case_sensitive_global" not in st.session_state:
+    st.session_state["csv_case_sensitive_global"] = False
+if "config_case_sensitive_global" not in st.session_state:
+    st.session_state["config_case_sensitive_global"] = False
 
 
 def render_pie_chart(title, passed, failed):
@@ -145,15 +154,19 @@ DATA_TYPE_EQUIVALENCE = {
     "smallint": "INT",
     "tinyint": "INT",
     "byteint": "INT",
+    "int64": "INT",
     
     # Decimal types (NUMBER handled separately with column logic)
     "decimal": "DECIMAL",
     "numeric": "DECIMAL",
+    "bignumeric": "DECIMAL",
+    "number": "DECIMAL",
     
     # Float types  
     "float": "DOUBLE",
     "double": "DOUBLE",
     "real": "DOUBLE",
+    "float64": "DOUBLE",
     
     # String types
     "string": "STRING",
@@ -197,8 +210,18 @@ def normalize_datatype(dtype, column_name=None):
     if not dtype:
         return "unknown"
     
+    dtype_lower = str(dtype).lower().strip()
+
+    # Handle nested/complex Spark-style types early (e.g. struct<...>, array<...>, map<...>)
+    if dtype_lower.startswith("struct<"):
+        return "STRUCT"
+    if dtype_lower.startswith("array<"):
+        return "ARRAY"
+    if dtype_lower.startswith("map<"):
+        return "STRUCT"
+
     # Extract base type (remove precision/scale like NUMBER(10,2) → NUMBER)
-    base_type = dtype.lower().split("(")[0].strip()
+    base_type = dtype_lower.split("(")[0].strip()
     
     # Special handling for NUMBER - check column name to decide INT vs DECIMAL
     if base_type == "number" and column_name:
@@ -323,6 +346,7 @@ def run_browse_validations(
     target_selections,
     validation_type,
     include_timestamp_columns=True,
+    case_sensitive=False,
     selected_validations=None,
 ):
     if selected_validations is None:
@@ -365,7 +389,8 @@ def run_browse_validations(
                     st.session_state["engine"],
                     st.session_state["source_conn"],
                     st.session_state["target_conn"],
-                    src, tgt
+                    src, tgt,
+                    case_sensitive=case_sensitive,
                 )
                 if selected_validations.get("schema")
                 else None
@@ -399,7 +424,8 @@ def run_browse_validations(
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src, tgt,
+                        case_sensitive=case_sensitive,
                     )
                 ))
             if selected_validations.get("numeric"):
@@ -468,6 +494,8 @@ def run_csv_validations(df):
             "hash": st.session_state.get("include_hash_csv", True),
         }
 
+        case_sensitive = st.session_state.get("csv_case_sensitive_global", False)
+
         if validation_type == "shallow":
             if not (
                 selected_validations.get("row_count")
@@ -492,7 +520,8 @@ def run_csv_validations(df):
                     st.session_state["engine"],
                     st.session_state["source_conn"],
                     st.session_state["target_conn"],
-                    src, tgt
+                    src, tgt,
+                    case_sensitive=case_sensitive,
                 )
                 if selected_validations.get("schema")
                 else None
@@ -526,7 +555,8 @@ def run_csv_validations(df):
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src, tgt,
+                        case_sensitive=case_sensitive,
                     )
                 ))
             if selected_validations.get("numeric"):
@@ -580,6 +610,7 @@ def run_browse_validations(
     target_selections,
     validation_type,
     include_timestamp_columns=True,
+    case_sensitive=False,
     selected_validations=None,
 ):
     if selected_validations is None:
@@ -617,7 +648,8 @@ def run_browse_validations(
                     st.session_state["engine"],
                     st.session_state["source_conn"],
                     st.session_state["target_conn"],
-                    src, tgt
+                    src, tgt,
+                    case_sensitive=case_sensitive,
                 )
                 if selected_validations.get("schema")
                 else None
@@ -651,7 +683,8 @@ def run_browse_validations(
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src, tgt,
+                        case_sensitive=case_sensitive,
                     )
                 ))
             if selected_validations.get("numeric"):
@@ -1004,6 +1037,7 @@ def run_row_hash_validation(
             m[key] = {
                 "name": col,
                 "type": normalize_datatype(dtype, col),
+                "raw_type": dtype,
             }
         return m
 
@@ -1020,11 +1054,46 @@ def run_row_hash_validation(
     schema_excluded = sorted(set(src_map.keys()) ^ set(tgt_map.keys()))
     timestamp_excluded = []
 
+    def canonical_type(src_type: str, tgt_type: str) -> str:
+        s = (src_type or "").upper()
+        t = (tgt_type or "").upper()
+        pair = {s, t}
+
+        if "TIMESTAMP" in pair:
+            return "TIMESTAMP"
+        if "DATE" in pair:
+            return "DATE"
+        if "BOOLEAN" in pair:
+            return "BOOLEAN"
+        if "BINARY" in pair:
+            return "BINARY"
+
+        # Preserve complex types when both sides support them.
+        if "STRUCT" in pair or "ARRAY" in pair:
+            return "STRUCT" if "STRUCT" in pair else "ARRAY"
+
+        if "DOUBLE" in pair:
+            return "DOUBLE"
+        if "DECIMAL" in pair:
+            return "DECIMAL"
+        if "INT" in pair:
+            return "INT"
+        if "STRING" in pair:
+            return "STRING"
+
+        # Fallback: prefer source normalized type, else target.
+        return s or t or "STRING"
+
     src_columns = []
     tgt_columns = []
     for k in common_keys:
         s = src_map[k]
         t = tgt_map[k]
+
+        # Force both sides to use the same canonical datatype
+        canon = canonical_type(s.get("type"), t.get("type"))
+        s = {"name": s.get("name"), "type": canon, "raw_type": s.get("raw_type")}
+        t = {"name": t.get("name"), "type": canon, "raw_type": t.get("raw_type")}
 
         if (not include_timestamp_columns) and (
             s.get("type") == "TIMESTAMP" or t.get("type") == "TIMESTAMP"
@@ -1046,6 +1115,7 @@ def run_row_hash_validation(
             f"Excluded TIMESTAMP columns ({len(timestamp_excluded)})"
         ):
             st.write(", ".join(timestamp_excluded))
+
 
     if schema_excluded:
         with st.expander(
@@ -1074,8 +1144,8 @@ def run_row_hash_validation(
         src_rows = execute_query(engine, source_conn, src_query)
         tgt_rows = execute_query("Databricks", target_conn, tgt_query)
 
-    src_hashes = {get_hash(r) for r in src_rows}
-    tgt_hashes = {get_hash(r) for r in tgt_rows}
+    src_hashes = {h for r in src_rows if (h := get_hash(r)) is not None}
+    tgt_hashes = {h for r in tgt_rows if (h := get_hash(r)) is not None}
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Source Hash Count", len(src_hashes))
@@ -1091,28 +1161,98 @@ def run_row_hash_validation(
         missing_in_target = src_hashes - tgt_hashes
         extra_in_target = tgt_hashes - src_hashes
         
-        st.error(f"❌ Hash Validation Failed")
-        
-        if missing_in_target:
-            st.error(f"**{len(missing_in_target)} row(s) missing in target** (present in source but not in target)")
-            with st.expander(f"Show missing hashes ({len(missing_in_target)} rows)"):
-                for i, h in enumerate(list(missing_in_target)[:10]):  # Show first 10
-                    st.code(f"Hash {i+1}: {h}")
-                if len(missing_in_target) > 10:
-                    st.caption(f"... and {len(missing_in_target) - 10} more")
-        
-        if extra_in_target:
-            st.error(f"**{len(extra_in_target)} extra row(s) in target** (present in target but not in source)")
-            with st.expander(f"Show extra hashes ({len(extra_in_target)} rows)"):
-                for i, h in enumerate(list(extra_in_target)[:10]):  # Show first 10
-                    st.code(f"Hash {i+1}: {h}")
-                if len(extra_in_target) > 10:
-                    st.caption(f"... and {len(extra_in_target) - 10} more")
+        st.error("❌ Hash Validation Failed")
+
+        m1, m2 = st.columns(2)
+        m1.metric("Missing in Target", len(missing_in_target))
+        m2.metric("Extra in Target", len(extra_in_target))
         
         # Summary statistics
         total_unique = len(src_hashes | tgt_hashes)
         matching = len(src_hashes & tgt_hashes)
         st.info(f"**Summary:** {matching} of {total_unique} unique rows match ({100*matching/total_unique:.1f}%)")
+
+        # Print where hashing failed: show sample mismatched signatures
+        st.subheader("Where Hashing Failed (Sample)")
+        try:
+            # Build the exact schema_rows used for hashing (common columns only)
+            src_schema_rows_for_hash = [
+                {
+                    "column_name": c.get("name"),
+                    "data_type": (c.get("raw_type") or c.get("type") or ""),
+                }
+                for c in (src_columns or [])
+                if c.get("name")
+            ]
+            tgt_schema_rows_for_hash = [
+                {
+                    "column_name": c.get("name"),
+                    "data_type": (c.get("raw_type") or c.get("type") or ""),
+                }
+                for c in (tgt_columns or [])
+                if c.get("name")
+            ]
+
+            def _included_signature_cols(schema_rows_for_hash):
+                included = []
+                for r in schema_rows_for_hash:
+                    col = r.get("column_name")
+                    dtype = str(r.get("data_type") or "").upper()
+                    if not col:
+                        continue
+                    if any(x in dtype for x in ["BINARY", "VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                        continue
+                    if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+                        continue
+                    included.append(str(col))
+                return included
+
+            sig_cols = _included_signature_cols(src_schema_rows_for_hash)
+            if sig_cols:
+                st.caption("Signature column order (included in hash)")
+                st.code(" | ".join(sig_cols))
+        except Exception:
+            pass
+
+        if missing_in_target:
+            st.caption("Source-only rows (present in source, missing in target) — sample")
+            try:
+                missing_hashes = [str(h).upper() for h in missing_in_target if h]
+                q = build_row_hash_mismatch_rows_query_v2(
+                    engine,
+                    src["catalog"],
+                    src["schema"],
+                    src["table"],
+                    schema_rows=src_schema_rows_for_hash,
+                    hash_values=missing_hashes,
+                    include_timestamp=include_timestamp_columns,
+                    timestamp_mode=None,
+                    limit=25,
+                )
+                rows = execute_query(engine, source_conn, q)
+                st.dataframe(rows, use_container_width=True)
+            except Exception as e:
+                st.error(f"Failed to fetch source-only sample rows: {e}")
+
+        if extra_in_target:
+            st.caption("Target-only rows (present in target, missing in source) — sample")
+            try:
+                extra_hashes = [str(h).upper() for h in extra_in_target if h]
+                q = build_row_hash_mismatch_rows_query_v2(
+                    "databricks",
+                    tgt["catalog"],
+                    tgt["schema"],
+                    tgt["table"],
+                    schema_rows=tgt_schema_rows_for_hash,
+                    hash_values=extra_hashes,
+                    include_timestamp=include_timestamp_columns,
+                    timestamp_mode=None,
+                    limit=25,
+                )
+                rows = execute_query("Databricks", target_conn, q)
+                st.dataframe(rows, use_container_width=True)
+            except Exception as e:
+                st.error(f"Failed to fetch target-only sample rows: {e}")
         
         return False
 def approx_equal(a, b, tol=1e-6):
@@ -1383,254 +1523,11 @@ def run_checks_in_order(checks):
             stop = True
 
     return results
-    
-# =========================================================
-# Step 6: Validation Selection & Execution (MULTI TABLE)
-# =========================================================
-if (
-    st.session_state.get("engine")
-    and "source_conn" in st.session_state
-    and "target_conn" in st.session_state
-    and st.session_state.get("source_selections")
-    and st.session_state.get("target_selections")
-):
-    schema_possible = (
-        (   
-            st.session_state.get("source_selections")
-            and st.session_state.get("target_selections")
-        )
-        or "validation_config" in st.session_state
-    )
-        
-    source_selections = st.session_state["source_selections"]
-    target_selections = st.session_state["target_selections"]
 
-    if len(source_selections) != len(target_selections):
-        st.error("❌ Number of source and target tables must match")
-        st.stop()
-
-    st.divider()
-    
-
-
-
-
-
-    st.subheader("🧩 Validation Plan (Per Table)")
-
-    validation_plan = []
-
-    if (
-        st.session_state.get("source_selections")
-        and st.session_state.get("target_selections")
-    ):
-        # Check if ANY validation includes schema
-        schema_required = False
-
-        # From validation plan (manual / browse)
-        if st.session_state.get("validation_plan"):
-            schema_required = True
-
-        # From config-driven / CSV
-        if "validation_config" in st.session_state:
-            schema_required = True
-
-        if schema_required:
-            st.divider()
-            st.subheader("⚙️ Schema Validation Options")
-
-            st.session_state["case_sensitive_schema"] = st.checkbox(
-                "Case-sensitive schema validation",
-                value=st.session_state["case_sensitive_schema"],
-                help="If enabled, column names must match exactly (case-sensitive)"
-            )
-
-
-    
-
-    for i, (src, tgt) in enumerate(zip(source_selections, target_selections)):
-        col1, col2, col3 = st.columns([4, 4, 2])
-
-        with col1:
-            st.code(f"SRC: {src['schema']}.{src['table']}")
-
-        with col2:
-            st.code(f"TGT: {tgt['schema']}.{tgt['table']}")
-
-        with col3:
-            vtype = st.selectbox(
-                "Validation",
-                ["shallow", "deep"],
-                key=f"validation_type_{i}"
-            )
-
-        validation_plan.append({
-            "source": src,
-            "target": tgt,
-            "validation_type": vtype
-        })
-
-        # ✅ ADD THIS LINE
-        st.session_state["validation_plan"] = validation_plan
-
-    deep_required = any(
-        p.get("validation_type") == "deep" for p in validation_plan
-    )
-    if deep_required:
-        st.divider()
-        st.subheader("⚙️ Deep Validation Options")
-        st.caption("Select which validations to run for DEEP tables")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.checkbox(
-                "Row Count",
-                key="include_row_count_plan",
-                value=st.session_state.get("include_row_count_plan", True),
-            )
-        with c2:
-            st.checkbox(
-                "Schema",
-                key="include_schema_plan",
-                value=st.session_state.get("include_schema_plan", True),
-            )
-        with c3:
-            st.checkbox(
-                "Numeric",
-                key="include_numeric_plan",
-                value=st.session_state.get("include_numeric_plan", True),
-            )
-        with c4:
-            st.checkbox(
-                "Hash",
-                key="include_hash_plan",
-                value=st.session_state.get("include_hash_plan", True),
-            )
-
-        if st.session_state.get("include_hash_plan"):
-            st.checkbox(
-                "Include TIMESTAMP columns in row hash",
-                value=st.session_state.get(
-                    "include_timestamp_in_hash_plan", True
-                ),
-                key="include_timestamp_in_hash_plan",
-                help=(
-                    "If unchecked, columns with TIMESTAMP datatype are excluded "
-                    "from the row hash calculation."
-                ),
-            )
-        else:
-            st.caption("TIMESTAMP option appears when Hash is selected")
-
-
-    # =============================
-    # RUN VALIDATIONS
-    # =============================
-    if st.button("🚀 Run Validations", use_container_width=True):
-
-        for plan in st.session_state["validation_plan"]:
-
-            src = plan["source"]
-            tgt = plan["target"]
-            vtype = plan["validation_type"]
-
-            st.divider()
-            st.markdown(
-                f"## 🔍 {src['schema']}.{src['table']} → "
-                f"{tgt['schema']}.{tgt['table']} ({vtype.upper()})"
-            )
-
-            checks = []
-
-            # Shallow + deep: include selected methods only
-            if st.session_state.get("include_row_count_plan", True):
-                checks.append((
-                    "Row Count Validation",
-                    lambda s=src, t=tgt: run_row_count(
-                        st.session_state["engine"],
-                        st.session_state.get("source_conn"),
-                        st.session_state["target_conn"],
-                        s, t
-                    )
-                ))
-
-            if st.session_state.get("include_schema_plan", True):
-                checks.append((
-                    "Schema Validation",
-                    lambda s=src, t=tgt: run_schema_validation(
-                        st.session_state["engine"],
-                        st.session_state.get("source_conn"),
-                        st.session_state["target_conn"],
-                        s, t
-                    )
-                ))
-
-            # Deep-only checks
-            if vtype == "deep":
-                checks.extend([
-                    (
-                        "Numeric Statistics Validation",
-                        lambda s=src, t=tgt: run_numeric_validation(
-                            st.session_state["engine"],
-                            st.session_state.get("source_conn"),
-                            st.session_state["target_conn"],
-                            s, t
-                        )
-                    ),
-                    (
-                        "Row Hash Validation",
-                        lambda s=src, t=tgt: run_row_hash_validation(
-                            st.session_state["engine"],
-                            st.session_state.get("source_conn"),
-                            st.session_state["target_conn"],
-                            s,
-                            t,
-                            include_timestamp_columns=st.session_state.get(
-                                "include_timestamp_in_hash_plan", True
-                            ),
-                        )
-                    )
-                ])
-
-                # Filter deep-only methods based on selection
-                checks = [
-                    c for c in checks
-                    if (
-                        (c[0] != "Numeric Statistics Validation")
-                        or st.session_state.get("include_numeric_plan", True)
-                    )
-                    and (
-                        (c[0] != "Row Hash Validation")
-                        or st.session_state.get("include_hash_plan", True)
-                    )
-                ]
-
-            results = run_checks_in_order(checks)
-
-            validation_record = generate_validation_record(
-                validation_type=vtype,
-                src=src,
-                tgt=tgt,
-                row_selected=bool_to_status(
-                    results.get("Row Count Validation")
-                ),
-                schema_selected=bool_to_status(
-                    results.get("Schema Validation")
-                ),
-                numeric_selected=(
-                    bool_to_status(results.get("Numeric Statistics Validation"))
-                    if vtype == "deep" else None
-                ),
-                hash_selected=(
-                    bool_to_status(results.get("Row Hash Validation"))
-                    if vtype == "deep" else None
-                ),
-            )
-
-            insert_validation_result(
-                st.session_state["target_conn"],
-                validation_record
-            )
+# NOTE: The legacy "Validation Plan (Per Table)" UI was removed.
+# Manual/Browse/CSV/Config tabs now run validations directly, and this
+# block caused an extra component to appear at the top after running
+# Browse validations.
 st.markdown(
     """
     <style>
@@ -1691,7 +1588,10 @@ def run_validation(src, tgt, validation_type, metrics):
                     st.session_state["engine"],
                     st.session_state["source_conn"],
                     st.session_state["target_conn"],
-                    src, tgt
+                    src, tgt,
+                    case_sensitive=st.session_state.get(
+                        "config_case_sensitive_global", False
+                    ),
                 )
                 if selected_validations.get("schema")
                 else None
@@ -1725,7 +1625,10 @@ def run_validation(src, tgt, validation_type, metrics):
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src, tgt,
+                        case_sensitive=st.session_state.get(
+                            "config_case_sensitive_global", False
+                        ),
                     )
                 ))
             if selected_validations.get("numeric"):
@@ -1776,34 +1679,39 @@ def run_validation(src, tgt, validation_type, metrics):
 
 
 # =========================================================
-# MAIN DASHBOARD (CENTERED)
+# LANDING BANNER (ONLY WHEN NOT CONFIGURED)
 # =========================================================
-icon_base64 = load_icon("reconciliation.png")
+_active_page = st.session_state.get("active_page", "main")
 
-st.markdown(
-    f"""
-    <div style="
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        gap:12px;
-        margin-top:10px;
-    ">
-        <img src="data:image/png;base64,{icon_base64}" width="55"/>
-        <h1 style="margin:0;">Reconciliation Framework</h1>
-    </div>
+# Keep the banner visible on the main validation experience so
+# switching modes (e.g., shallow/deep) doesn't cause the header space
+# to disappear after connections are established.
+if _active_page in ("main", "validation"):
+    icon_base64 = load_icon("reconciliation.png")
 
-    <p style="text-align:center; font-size: 16px; margin-top:6px;">
-        Validate <b>data consistency and completeness</b><br>
-        across heterogeneous analytical engines.<br>
-        <i>Configure source and target systems, then validate data parity.</i>
-    </p>
-    """,
-    unsafe_allow_html=True
-)
+    st.markdown(
+        f"""
+        <div style="
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap:12px;
+            margin-top:10px;
+        ">
+            <img src="data:image/png;base64,{icon_base64}" width="55"/>
+            <h1 style="margin:0;">Reconciliation Framework</h1>
+        </div>
 
+        <p style="text-align:center; font-size: 16px; margin-top:6px;">
+            Validate <b>data consistency and completeness</b><br>
+            across heterogeneous analytical engines.<br>
+            <i>Configure source and target systems, then validate data parity.</i>
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
-st.divider()
+    st.divider()
 
 # =========================================================
 # SIDEBAR — FRAMEWORK INFO
@@ -2051,6 +1959,12 @@ DEFAULT_SESSION_KEYS = {
     "include_timestamp_in_hash_csv": True,
     "include_timestamp_in_hash_config": True,
 
+    # Schema case sensitivity (per tab)
+    "browse_case_sensitive_global": False,
+    "manual_case_sensitive_global": False,
+    "csv_case_sensitive_global": False,
+    "config_case_sensitive_global": False,
+
     # Per-flow validation method toggles
     "include_row_count_plan": True,
     "include_schema_plan": True,
@@ -2192,6 +2106,16 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
             ),
         )
 
+    st.checkbox(
+        "Case-sensitive schema validation",
+        key="config_case_sensitive_global",
+        value=st.session_state.get("config_case_sensitive_global", False),
+        help=(
+            "If enabled, column names must match exactly (case-sensitive). "
+            "If disabled, schema matching is case-insensitive."
+        ),
+    )
+
     config_text = st.text_area(
         "Edit validation config and click Submit",
         value=json.dumps(DEFAULT_CONFIG, indent=2),
@@ -2229,59 +2153,86 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 
  with tab_manual:
     validation_type = st.radio(
-      "Validation Type",
-      ["shallow", "deep"],
-      horizontal=True,
-      key="manual_validation_type"
+        "Validation Type",
+        ["shallow", "deep"],
+        horizontal=True,
+        key="manual_validation_type"
     )
 
-    st.caption("Validation Methods")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.checkbox(
-            "Row Count",
-            key="include_row_count_manual",
-            value=st.session_state.get("include_row_count_manual", True),
-        )
-    with c2:
-        st.checkbox(
-            "Schema",
-            key="include_schema_manual",
-            value=st.session_state.get("include_schema_manual", True),
-        )
-    with c3:
-        st.checkbox(
-            "Numeric",
-            key="include_numeric_manual",
-            value=st.session_state.get("include_numeric_manual", True),
-            disabled=(validation_type != "deep"),
-        )
-    with c4:
-        st.checkbox(
-            "Hash",
-            key="include_hash_manual",
-            value=st.session_state.get("include_hash_manual", True),
-            disabled=(validation_type != "deep"),
+    # =========================
+    # VALIDATION OPTIONS
+    # =========================
+    if validation_type == "deep":
+
+        st.subheader("⚙️ Select Deep Validations (Global Mode)")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            row_check = st.checkbox(
+                "Row Count Validation",
+                value=False,
+                key="manual_global_row"
+            )
+            schema_check = st.checkbox(
+                "Schema Validation",
+                value=False,
+                key="manual_global_schema"
+            )
+
+        with col2:
+            numeric_check = st.checkbox(
+                "Numeric Statistics Validation",
+                value=False,
+                key="manual_global_numeric"
+            )
+            hash_check = st.checkbox(
+                "Row Hash Validation",
+                value=False,
+                key="manual_global_hash"
+            )
+
+        if hash_check:
+            st.checkbox(
+                "Include TIMESTAMP columns in row hash",
+                value=st.session_state.get(
+                    "include_timestamp_in_hash_manual", True
+                ),
+                key="include_timestamp_in_hash_manual",
+                help=(
+                    "If unchecked, columns with TIMESTAMP datatype are excluded "
+                    "from the row hash calculation."
+                ),
+            )
+
+        override_mode = st.checkbox(
+            "⚙️ Override validations per table",
+            value=False,
+            key="manual_override"
         )
 
-    if (
-        validation_type == "deep"
-        and st.session_state.get("include_hash_manual")
-    ):
-        st.checkbox(
-            "Include TIMESTAMP columns in row hash",
-            value=st.session_state.get(
-                "include_timestamp_in_hash_manual", True
-            ),
-            key="include_timestamp_in_hash_manual",
-            help=(
-                "If unchecked, columns with TIMESTAMP datatype are excluded "
-                "from the row hash calculation."
-            ),
-        )
+    else:
+        # SHALLOW MODE
+        st.info("Shallow mode will automatically run:")
+        st.markdown("• ✅ Row Count Validation")
+        st.markdown("• ✅ Schema Validation")
+
+        row_check = True
+        schema_check = True
+        numeric_check = False
+        hash_check = False
+        override_mode = False
+
+    manual_case_sensitive_global = st.checkbox(
+        "Case-sensitive schema validation (global)",
+        key="manual_case_sensitive_global",
+        value=st.session_state.get("manual_case_sensitive_global", False),
+        help=(
+            "Default schema matching mode for all tables in this run. "
+            "If per-table override is enabled, that table pair uses the opposite of this setting."
+        ),
+    )
 
     st.divider()
-    left, right = st.columns(2)
     st.subheader("✍️ Enter Table Paths (Multiple Supported)")
     st.caption("Enter one table per line OR comma-separated\nFormat: catalog.schema.table")
 
@@ -2348,43 +2299,294 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 "table": tgt_tbl
             })
 
-        if not errors:
-            st.session_state["source_selections"] = source_selections
-            st.session_state["target_selections"] = target_selections
+        if errors:
+            st.stop()
 
-            st.success(f"✅ Loaded {len(source_selections)} table pairs")
+        st.session_state["source_selections"] = source_selections
+        st.session_state["target_selections"] = target_selections
 
-            st.subheader("🔍 Preview")
-            for s, t in zip(source_selections, target_selections):
-                st.code(
-                    f"SRC: {s['catalog']}.{s['schema']}.{s['table']}\n"
-                    f"TGT: {t['catalog']}.{t['schema']}.{t['table']}"
-                )
+        st.success(f"✅ Loaded {len(source_selections)} table pairs")
+
+        table_pairs = list(zip(source_selections, target_selections))
+
+        # ====================================================
+        # OVERRIDE UI PER TABLE
+        # ====================================================
+        per_table_validations = {}
+        if validation_type == "deep" and override_mode and table_pairs:
+
+            st.divider()
+            st.markdown("## 🛠 Override Validations Per Table")
+
+            for i, (src, tgt) in enumerate(table_pairs):
+
+                table_id = f"manual_{src['schema']}_{src['table']}_{i}"
+
+                with st.container():
+
+                    st.markdown(
+                        f"### 🔹 {src['schema']}.{src['table']} → "
+                        f"{tgt['schema']}.{tgt['table']}"
+                    )
+
+                    colA, colB = st.columns(2)
+
+                    with colA:
+                        r = st.checkbox(
+                            "Row Count",
+                            value=False,
+                            key=f"{table_id}_row"
+                        )
+                        s = st.checkbox(
+                            "Schema",
+                            value=False,
+                            key=f"{table_id}_schema"
+                        )
+
+                    with colB:
+                        n = st.checkbox(
+                            "Numeric Stats",
+                            value=False,
+                            key=f"{table_id}_numeric"
+                        )
+                        h = st.checkbox(
+                            "Row Hash",
+                            value=False,
+                            key=f"{table_id}_hash"
+                        )
+
+                    case_override = st.checkbox(
+                        "Override case sensitivity",
+                        value=False,
+                        key=f"{table_id}_case_override",
+                        help=(
+                            "If checked, this table pair uses the opposite of the global "
+                            "case-sensitive setting."
+                        ),
+                    )
+
+                    effective_case_sensitive = (
+                        (not manual_case_sensitive_global)
+                        if case_override
+                        else manual_case_sensitive_global
+                    )
+                    st.caption(
+                        "Schema case sensitivity: "
+                        f"{'ON' if effective_case_sensitive else 'OFF'}"
+                        + (" (Override)" if case_override else "")
+                    )
+
+                    per_table_validations[table_id] = {
+                        "row": r,
+                        "schema": s,
+                        "numeric": n,
+                        "hash": h,
+                        "case_override": case_override,
+                        "src": src,
+                        "tgt": tgt
+                    }
+
+            st.session_state["manual_per_table_validations"] = per_table_validations
+
+            override_count = sum(
+                1
+                for v in per_table_validations.values()
+                if v.get("case_override")
+            )
+            st.info(
+                "Case sensitivity default: "
+                f"{'ON' if manual_case_sensitive_global else 'OFF'}"
+                f" | Overrides: {override_count}/{len(per_table_validations)}"
+            )
+
+        # =========================
+        # RUN BUTTON
+        # =========================
         if st.button("🚀 Run Manual Validations", use_container_width=True):
+
             try:
-                run_browse_validations(
-                    st.session_state.get("source_selections"),
-                    st.session_state.get("target_selections"),
-                    validation_type,
-                    include_timestamp_columns=st.session_state.get(
-                        "include_timestamp_in_hash_manual", True
-                    ),
-                    selected_validations={
-                        "row_count": st.session_state.get(
-                            "include_row_count_manual", True
-                        ),
-                        "schema": st.session_state.get(
-                            "include_schema_manual", True
-                        ),
-                        "numeric": st.session_state.get(
-                            "include_numeric_manual", True
-                        ),
-                        "hash": st.session_state.get(
-                            "include_hash_manual", True
-                        ),
-                    },
-                )
-                st.success("🎉 All Browse validations completed")
+
+                # =========================
+                # OVERRIDE MODE
+                # =========================
+                if validation_type == "deep" and override_mode:
+
+                    for table_id, config in st.session_state.get(
+                        "manual_per_table_validations", {}
+                    ).items():
+
+                        src = config["src"]
+                        tgt = config["tgt"]
+
+                        st.divider()
+                        st.markdown(
+                            f"## 🔍 {src['schema']}.{src['table']} → "
+                            f"{tgt['schema']}.{tgt['table']}"
+                        )
+
+                        checks = []
+
+                        case_override = bool(config.get("case_override"))
+                        effective_case_sensitive = (
+                            (not manual_case_sensitive_global)
+                            if case_override
+                            else manual_case_sensitive_global
+                        )
+                        st.caption(
+                            "Schema case sensitivity: "
+                            f"{'ON' if effective_case_sensitive else 'OFF'}"
+                            + (" (Override)" if case_override else "")
+                        )
+
+                        # If nothing selected for table → use global
+                        if not any([
+                            config["row"],
+                            config["schema"],
+                            config["numeric"],
+                            config["hash"]
+                        ]):
+
+                            effective_row = row_check
+                            effective_schema = schema_check
+                            effective_numeric = numeric_check
+                            effective_hash = hash_check
+
+                        else:
+                            effective_row = config["row"]
+                            effective_schema = config["schema"]
+                            effective_numeric = config["numeric"]
+                            effective_hash = config["hash"]
+
+                        if effective_row:
+                            checks.append(("Row Count Validation", lambda s=src, t=tgt:
+                                run_row_count(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s, t
+                                )))
+
+                        if effective_schema:
+                            checks.append(("Schema Validation", lambda s=src, t=tgt:
+                                run_schema_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s, t,
+                                    case_sensitive=effective_case_sensitive,
+                                )))
+
+                        if effective_numeric:
+                            checks.append(("Numeric Statistics Validation", lambda s=src, t=tgt:
+                                run_numeric_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s, t
+                                )))
+
+                        if effective_hash:
+                            checks.append(("Row Hash Validation", lambda s=src, t=tgt:
+                                run_row_hash_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s,
+                                    t,
+                                    include_timestamp_columns=st.session_state.get(
+                                        "include_timestamp_in_hash_manual", True
+                                    ),
+                                )))
+
+                        if checks:
+                            run_checks_in_order(checks)
+                        else:
+                            st.warning("⚠️ No validations selected.")
+
+                # =========================
+                # NORMAL MODE
+                # =========================
+                else:
+
+                    for src, tgt in table_pairs:
+
+                        st.divider()
+                        st.markdown(
+                            f"## 🔍 {src['schema']}.{src['table']} → "
+                            f"{tgt['schema']}.{tgt['table']}"
+                        )
+
+                        checks = []
+
+                        if validation_type == "shallow":
+
+                            checks.extend([
+                                ("Row Count Validation",
+                                 lambda s=src, t=tgt: run_row_count(
+                                     st.session_state["engine"],
+                                     st.session_state["source_conn"],
+                                     st.session_state["target_conn"],
+                                     s, t
+                                 )),
+                                ("Schema Validation",
+                                 lambda s=src, t=tgt: run_schema_validation(
+                                     st.session_state["engine"],
+                                     st.session_state["source_conn"],
+                                     st.session_state["target_conn"],
+                                     s, t,
+                                     case_sensitive=manual_case_sensitive_global,
+                                 )),
+                            ])
+
+                        else:
+                            if row_check:
+                                checks.append(("Row Count Validation",
+                                    lambda s=src, t=tgt: run_row_count(
+                                        st.session_state["engine"],
+                                        st.session_state["source_conn"],
+                                        st.session_state["target_conn"],
+                                        s, t
+                                    )))
+
+                            if schema_check:
+                                checks.append(("Schema Validation",
+                                    lambda s=src, t=tgt: run_schema_validation(
+                                        st.session_state["engine"],
+                                        st.session_state["source_conn"],
+                                        st.session_state["target_conn"],
+                                        s, t,
+                                        case_sensitive=manual_case_sensitive_global,
+                                    )))
+
+                            if numeric_check:
+                                checks.append(("Numeric Statistics Validation",
+                                    lambda s=src, t=tgt: run_numeric_validation(
+                                        st.session_state["engine"],
+                                        st.session_state["source_conn"],
+                                        st.session_state["target_conn"],
+                                        s, t
+                                    )))
+
+                            if hash_check:
+                                checks.append(("Row Hash Validation",
+                                    lambda s=src, t=tgt: run_row_hash_validation(
+                                        st.session_state["engine"],
+                                        st.session_state["source_conn"],
+                                        st.session_state["target_conn"],
+                                        s,
+                                        t,
+                                        include_timestamp_columns=st.session_state.get(
+                                            "include_timestamp_in_hash_manual", True
+                                        ),
+                                    )))
+
+                        if checks:
+                            run_checks_in_order(checks)
+                        else:
+                            st.warning("⚠️ No validations selected.")
+
+                st.success("🎉 Manual validations completed")
+
             except Exception as e:
                 st.error(str(e))
 
@@ -2392,12 +2594,53 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 with tab_csv:
     st.subheader("📂 Upload CSV for Multiple Tables")
 
+    # ===============================
+    # CSV FORMAT GUIDE (Before Upload)
+    # ===============================
+    st.markdown("""
+    ### 📘 CSV Format Guide
+
+    #### ✅ Required Columns
+    - validation_type (shallow / deep)
+    - source_catalog
+    - source_schema
+    - source_table
+    - target_catalog
+    - target_schema
+    - target_table
+    - metrics (required only for deep)
+
+    ---
+    #### 📊 Allowed Metrics (for deep validation)
+    - `row_count`
+    - `schema`
+    - `numeric`
+    - `hash`
+
+    ---
+    #### 📝 Example (Deep)
+    ```
+    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,metrics
+    deep,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo,"row_count,schema,hash"
+    ```
+
+    #### 📝 Example (Shallow)
+    ```
+    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
+    shallow,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo
+    ```
+    """)
+
+    st.divider()
+
     uploaded_file = st.file_uploader(
         "Upload reconciliation CSV",
         type=["csv"]
     )
+
     if uploaded_file:
-        st.divider()
+        df = pd.read_csv(uploaded_file)
+
         st.subheader("⚙️ Validation Settings")
 
         st.caption("Validation Methods")
@@ -2440,250 +2683,517 @@ with tab_csv:
                 ),
             )
 
+        st.checkbox(
+            "Case-sensitive schema validation",
+            key="csv_case_sensitive_global",
+            value=st.session_state.get("csv_case_sensitive_global", False),
+            help=(
+                "If enabled, column names must match exactly (case-sensitive). "
+                "If disabled, schema matching is case-insensitive."
+            ),
+        )
 
-    if uploaded_file and st.button("🚀 Run CSV Validations", use_container_width=True):
-        df = pd.read_csv(uploaded_file)
+        st.subheader("🔍 Preview Uploaded CSV")
+        st.dataframe(df, use_container_width=True)
 
-
-        try:
-            validate_csv(df)
-            run_csv_validations(df)
-            st.success("🎉 All CSV validations completed")
-        except Exception as e:
-            st.error(str(e))
+        if st.button("🚀 Run CSV Validations", use_container_width=True):
+            try:
+                validate_csv(df)
+                run_csv_validations(df)
+                st.success("🎉 All CSV validations completed")
+            except Exception as e:
+                st.error(f"❌ {str(e)}")
 
 
 
 
 with tab_browse:
+    st.subheader("📂 Select Tables from Catalog")
+    st.subheader("⚙️ Validation Settings")
 
-            st.subheader("📂 Select Tables from Catalog")
-            
-            st.subheader("⚙️ Validation Settings")
+    validation_type = st.radio(
+        "Validation Type",
+        ["shallow", "deep"],
+        horizontal=True,
+        key="browse_validation_type"
+    )
 
-            validation_type = st.radio(
-                "Validation Type",
-                ["shallow", "deep"],
-                horizontal=True,
-                key="browse_validation_type"
+    browse_case_sensitive_global = st.checkbox(
+        "Case-sensitive schema validation (global)",
+        key="browse_case_sensitive_global",
+        value=st.session_state.get("browse_case_sensitive_global", False),
+        help=(
+            "Default schema matching mode for all tables in this run. "
+            "If per-table override is enabled, that table pair uses the opposite of this setting."
+        ),
+    )
+
+    # ===============================
+    # GLOBAL DEEP CHECKBOXES
+    # ===============================
+    if validation_type == "deep":
+
+        st.markdown("### Select Deep Validation Metrics (Global Mode)")
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            browse_row_check = st.checkbox(
+                "Row Count Validation",
+                value=False,
+                key="browse_global_row"
+            )
+            browse_schema_check = st.checkbox(
+                "Schema Validation",
+                value=False,
+                key="browse_global_schema"
             )
 
-            st.caption("Validation Methods")
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.checkbox(
-                    "Row Count",
-                    key="include_row_count_browse",
-                    value=st.session_state.get(
-                        "include_row_count_browse", True
-                    ),
-                )
-            with c2:
-                st.checkbox(
-                    "Schema",
-                    key="include_schema_browse",
-                    value=st.session_state.get(
-                        "include_schema_browse", True
-                    ),
-                )
-            with c3:
-                st.checkbox(
-                    "Numeric",
-                    key="include_numeric_browse",
-                    value=st.session_state.get(
-                        "include_numeric_browse", True
-                    ),
-                    disabled=(validation_type != "deep"),
-                )
-            with c4:
-                st.checkbox(
-                    "Hash",
-                    key="include_hash_browse",
-                    value=st.session_state.get(
-                        "include_hash_browse", True
-                    ),
-                    disabled=(validation_type != "deep"),
+        with colB:
+            browse_numeric_check = st.checkbox(
+                "Numeric Statistics Validation",
+                value=False,
+                key="browse_global_numeric"
+            )
+            browse_hash_check = st.checkbox(
+                "Row Hash Validation",
+                value=False,
+                key="browse_global_hash"
+            )
+
+        if browse_hash_check:
+            st.checkbox(
+                "Include TIMESTAMP columns in row hash",
+                value=st.session_state.get(
+                    "include_timestamp_in_hash_browse", True
+                ),
+                key="include_timestamp_in_hash_browse",
+                help=(
+                    "If unchecked, columns with TIMESTAMP datatype are excluded "
+                    "from the row hash calculation."
+                ),
+            )
+
+        override_mode = st.checkbox(
+            "⚙️ Override validations per table",
+            value=False,
+            key="browse_override"
+        )
+
+    else:
+        override_mode = False
+        st.info("Shallow mode will run Row Count and Schema validation automatically.")
+
+        browse_row_check = True
+        browse_schema_check = True
+        browse_numeric_check = False
+        browse_hash_check = False
+
+    st.divider()
+    left, right = st.columns(2)
+
+    # =================================================
+    # SOURCE METADATA
+    # =================================================
+    with left:
+
+        st.markdown("### 🧩 Source")
+
+        catalogs = get_catalogs(
+            st.session_state["engine"],
+            st.session_state["source_conn"]
+        )
+
+        selected_catalog = st.selectbox(
+            "Catalog",
+            catalogs,
+            key="src_catalog"
+        )
+
+        schemas = get_schemas(
+            st.session_state["engine"],
+            st.session_state["source_conn"],
+            selected_catalog
+        )
+
+        selected_schemas = st.multiselect(
+            "Schema(s)",
+            schemas,
+            key="src_schemas"
+        )
+
+        source_selections = []
+
+        for sch in selected_schemas:
+            tables = get_tables(
+                st.session_state["engine"],
+                st.session_state["source_conn"],
+                selected_catalog,
+                sch
+            )
+
+            selected_tables = st.multiselect(
+                f"Tables in {sch}",
+                tables,
+                key=f"src_tables_{sch}"
+            )
+
+            for tbl in selected_tables:
+                source_selections.append({
+                    "catalog": selected_catalog,
+                    "schema": sch,
+                    "table": tbl
+                })
+
+        st.session_state["source_selections"] = source_selections
+
+    # =================================================
+    # TARGET METADATA
+    # =================================================
+    with right:
+
+        st.markdown("### 🎯 Databricks")
+
+        dbx_catalogs = get_catalogs(
+            "Databricks",
+            st.session_state["target_conn"]
+        )
+
+        selected_dbx_catalog = st.selectbox(
+            "Catalog",
+            dbx_catalogs,
+            key="tgt_catalog"
+        )
+
+        dbx_schemas = get_schemas(
+            "Databricks",
+            st.session_state["target_conn"],
+            selected_dbx_catalog
+        )
+
+        selected_dbx_schemas = st.multiselect(
+            "Schema(s)",
+            dbx_schemas,
+            key="tgt_schemas"
+        )
+
+        target_selections = []
+
+        for sch in selected_dbx_schemas:
+            tables = get_tables(
+                "Databricks",
+                st.session_state["target_conn"],
+                selected_dbx_catalog,
+                sch
+            )
+
+            selected_tables = st.multiselect(
+                f"Tables in {sch}",
+                tables,
+                key=f"tgt_tables_{sch}"
+            )
+
+            for tbl in selected_tables:
+                target_selections.append({
+                    "catalog": selected_dbx_catalog,
+                    "schema": sch,
+                    "table": tbl
+                })
+
+        st.session_state["target_selections"] = target_selections
+
+    # =================================================
+    # OVERRIDE UI (PER TABLE)
+    # =================================================
+    table_pairs = list(zip(
+        st.session_state.get("source_selections", []),
+        st.session_state.get("target_selections", [])
+    ))
+
+    per_table_validations = {}
+
+    if validation_type == "deep" and override_mode and table_pairs:
+
+        st.divider()
+        st.markdown("## 🛠 Override Validations Per Table")
+
+        for i, (src, tgt) in enumerate(table_pairs):
+
+            table_id = f"browse_{src['schema']}_{src['table']}_{i}"
+
+            with st.container():
+
+                st.markdown(
+                    f"### 🔹 {src['schema']}.{src['table']} → "
+                    f"{tgt['schema']}.{tgt['table']}"
                 )
 
-            if (
-                validation_type == "deep"
-                and st.session_state.get("include_hash_browse")
-            ):
-                st.checkbox(
-                    "Include TIMESTAMP columns in row hash",
-                    value=st.session_state.get(
-                        "include_timestamp_in_hash_browse", True
-                    ),
-                    key="include_timestamp_in_hash_browse",
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    r = st.checkbox(
+                        "Row Count",
+                        value=False,
+                        key=f"{table_id}_row"
+                    )
+                    s = st.checkbox(
+                        "Schema",
+                        value=False,
+                        key=f"{table_id}_schema"
+                    )
+
+                with col2:
+                    n = st.checkbox(
+                        "Numeric Stats",
+                        value=False,
+                        key=f"{table_id}_numeric"
+                    )
+                    h = st.checkbox(
+                        "Row Hash",
+                        value=False,
+                        key=f"{table_id}_hash"
+                    )
+
+                case_override = st.checkbox(
+                    "Override case sensitivity",
+                    value=False,
+                    key=f"{table_id}_case_override",
                     help=(
-                        "If unchecked, columns with TIMESTAMP datatype are excluded "
-                        "from the row hash calculation."
+                        "If checked, this table pair uses the opposite of the global "
+                        "case-sensitive setting."
                     ),
                 )
 
-            st.divider()
-            left, right = st.columns(2)
-        # -----------------------------
-        # SOURCE METADATA (FIXED)
-        # -----------------------------
-            with left:
-                        st.markdown("### 🧩 Source")
+                effective_case_sensitive = (
+                    (not browse_case_sensitive_global)
+                    if case_override
+                    else browse_case_sensitive_global
+                )
+                st.caption(
+                    "Schema case sensitivity: "
+                    f"{'ON' if effective_case_sensitive else 'OFF'}"
+                    + (" (Override)" if case_override else "")
+                )
 
-                        src_cat, src_sch, src_tbl = parse_table_path(
-                            st.session_state.get("src_table_path")
-                        )
+                per_table_validations[table_id] = {
+                    "row": r,
+                    "schema": s,
+                    "numeric": n,
+                    "hash": h,
+                    "case_override": case_override,
+                    "src": src,
+                    "tgt": tgt
+                }
 
-                        if not st.session_state.get("engine") or not st.session_state.get("source_conn"):
-                            st.info("🔌 Please establish connections to load source metadata")
-              
-                        else:
-                            # ---------- Catalog ----------
-                            catalogs = get_catalogs(
-                                st.session_state["engine"],
-                                st.session_state["source_conn"]
-                            )
+        st.session_state["browse_per_table_validations"] = per_table_validations
 
-                            selected_catalog = st.selectbox(
-                                "Catalog",
-                                catalogs,
-                                index=catalogs.index(src_cat) if src_cat in catalogs else 0,
-                                key="src_catalog"
-                            )
+        override_count = sum(
+            1
+            for v in per_table_validations.values()
+            if v.get("case_override")
+        )
+        st.info(
+            "Case sensitivity default: "
+            f"{'ON' if browse_case_sensitive_global else 'OFF'}"
+            f" | Overrides: {override_count}/{len(per_table_validations)}"
+        )
 
-                            # ---------- Schemas ----------
-                            schemas = get_schemas(
+    # =================================================
+    # RUN BUTTON
+    # =================================================
+    if st.button("🚀 Run Browse Validations", use_container_width=True):
+
+        try:
+            if not st.session_state.get("source_selections") or not st.session_state.get("target_selections"):
+                st.error("❌ Please select source and target tables")
+                st.stop()
+
+            if len(st.session_state["source_selections"]) != len(st.session_state["target_selections"]):
+                st.error("❌ Source and Target table counts must match")
+                st.stop()
+
+            # ==========================
+            # OVERRIDE MODE
+            # ==========================
+            if validation_type == "deep" and override_mode:
+
+                for table_id, config in st.session_state.get(
+                    "browse_per_table_validations", {}
+                ).items():
+
+                    src = config["src"]
+                    tgt = config["tgt"]
+
+                    st.divider()
+                    st.markdown(
+                        f"## 🔍 {src['schema']}.{src['table']} → "
+                        f"{tgt['schema']}.{tgt['table']}"
+                    )
+
+                    checks = []
+
+                    case_override = bool(config.get("case_override"))
+                    effective_case_sensitive = (
+                        (not browse_case_sensitive_global)
+                        if case_override
+                        else browse_case_sensitive_global
+                    )
+                    st.caption(
+                        "Schema case sensitivity: "
+                        f"{'ON' if effective_case_sensitive else 'OFF'}"
+                        + (" (Override)" if case_override else "")
+                    )
+
+                    # If nothing selected → fallback to global
+                    if not any([
+                        config["row"],
+                        config["schema"],
+                        config["numeric"],
+                        config["hash"]
+                    ]):
+
+                        effective_row = browse_row_check
+                        effective_schema = browse_schema_check
+                        effective_numeric = browse_numeric_check
+                        effective_hash = browse_hash_check
+
+                    else:
+                        effective_row = config["row"]
+                        effective_schema = config["schema"]
+                        effective_numeric = config["numeric"]
+                        effective_hash = config["hash"]
+
+                    if effective_row:
+                        checks.append(("Row Count Validation",
+                            lambda s=src, t=tgt: run_row_count(
                                 st.session_state["engine"],
                                 st.session_state["source_conn"],
-                                selected_catalog
-                            )
+                                st.session_state["target_conn"],
+                                s, t
+                            )))
 
-                            selected_schemas = st.multiselect(
-                                "Schema(s)",
-                                schemas,
-                                default=[src_sch] if src_sch in schemas else [],
-                                key="src_schemas"
-                            )
+                    if effective_schema:
+                        checks.append(("Schema Validation",
+                            lambda s=src, t=tgt: run_schema_validation(
+                                st.session_state["engine"],
+                                st.session_state["source_conn"],
+                                st.session_state["target_conn"],
+                                s, t,
+                                case_sensitive=effective_case_sensitive,
+                            )))
 
-                            # ---------- Tables ----------
-                            source_selections = []
+                    if effective_numeric:
+                        checks.append(("Numeric Statistics Validation",
+                            lambda s=src, t=tgt: run_numeric_validation(
+                                st.session_state["engine"],
+                                st.session_state["source_conn"],
+                                st.session_state["target_conn"],
+                                s, t
+                            )))
 
-                            for sch in selected_schemas:
-                                tables = get_tables(
+                    if effective_hash:
+                        checks.append(("Row Hash Validation",
+                            lambda s=src, t=tgt: run_row_hash_validation(
+                                st.session_state["engine"],
+                                st.session_state["source_conn"],
+                                st.session_state["target_conn"],
+                                s,
+                                t,
+                                include_timestamp_columns=st.session_state.get(
+                                    "include_timestamp_in_hash_browse", True
+                                ),
+                            )))
+
+                    if checks:
+                        run_checks_in_order(checks)
+                    else:
+                        st.warning("⚠️ No validations selected.")
+
+            # ==========================
+            # NORMAL MODE
+            # ==========================
+            else:
+
+                for src, tgt in table_pairs:
+
+                    st.divider()
+                    st.markdown(
+                        f"## 🔍 {src['schema']}.{src['table']} → "
+                        f"{tgt['schema']}.{tgt['table']}"
+                    )
+
+                    checks = []
+
+                    if validation_type == "shallow":
+
+                        checks.extend([
+                            ("Row Count Validation",
+                             lambda s=src, t=tgt: run_row_count(
+                                 st.session_state["engine"],
+                                 st.session_state["source_conn"],
+                                 st.session_state["target_conn"],
+                                 s, t
+                             )),
+                            ("Schema Validation",
+                             lambda s=src, t=tgt: run_schema_validation(
+                                 st.session_state["engine"],
+                                 st.session_state["source_conn"],
+                                 st.session_state["target_conn"],
+                                 s, t,
+                                 case_sensitive=browse_case_sensitive_global,
+                             )),
+                        ])
+
+                    else:
+
+                        if browse_row_check:
+                            checks.append(("Row Count Validation",
+                                lambda s=src, t=tgt: run_row_count(
                                     st.session_state["engine"],
                                     st.session_state["source_conn"],
-                                    selected_catalog,
-                                    sch
-                                )
+                                    st.session_state["target_conn"],
+                                    s, t
+                                )))
 
-                                selected_tables = st.multiselect(
-                                    f"Tables in {sch}",
-                                    tables,
-                                    key=f"src_tables_{sch}"
-                                )
+                        if browse_schema_check:
+                            checks.append(("Schema Validation",
+                                lambda s=src, t=tgt: run_schema_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s, t,
+                                    case_sensitive=browse_case_sensitive_global,
+                                )))
 
-                                for tbl in selected_tables:
-                                    source_selections.append({
-                                        "catalog": selected_catalog,
-                                        "schema": sch,
-                                        "table": tbl
-                                    })
+                        if browse_numeric_check:
+                            checks.append(("Numeric Statistics Validation",
+                                lambda s=src, t=tgt: run_numeric_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s, t
+                                )))
 
-                            if source_selections:
-                                st.success("🧩 Selected Source Tables")
-                                for t in source_selections:
-                                    st.code(f"{t['catalog']}.{t['schema']}.{t['table']}")
+                        if browse_hash_check:
+                            checks.append(("Row Hash Validation",
+                                lambda s=src, t=tgt: run_row_hash_validation(
+                                    st.session_state["engine"],
+                                    st.session_state["source_conn"],
+                                    st.session_state["target_conn"],
+                                    s,
+                                    t,
+                                    include_timestamp_columns=st.session_state.get(
+                                        "include_timestamp_in_hash_browse", True
+                                    ),
+                                )))
 
-                            st.session_state["source_selections"] = source_selections
+                    if checks:
+                        run_checks_in_order(checks)
+                    else:
+                        st.warning("⚠️ No validations selected.")
 
-                    # -----------------------------
-                    # TARGET METADATA (MULTI-SCHEMA + MULTI-TABLE)
-                    # -----------------------------
-            with right:
-                        st.markdown("### 🎯 Databricks")
+            st.success("🎉 Browse validations completed")
 
-                        tgt_cat, tgt_sch, tgt_tbl = parse_table_path(
-                            st.session_state.get("tgt_table_path")
-                        )
-
-                        dbx_catalogs = get_catalogs(
-                            "Databricks",
-                            st.session_state["target_conn"]
-                        )
-
-                        selected_dbx_catalog = st.selectbox(
-                            "Catalog",
-                            dbx_catalogs,
-                            index=dbx_catalogs.index(tgt_cat) if tgt_cat in dbx_catalogs else 0
-                        )
-
-                        dbx_schemas = get_schemas(
-                            "Databricks",
-                            st.session_state["target_conn"],
-                            selected_dbx_catalog
-                        )
-
-                        selected_dbx_schemas = st.multiselect(
-                            "Schema(s)",
-                            dbx_schemas,
-                            default=[tgt_sch] if tgt_sch in dbx_schemas else []
-                        )
-
-                        target_selections = []
-
-                        for sch in selected_dbx_schemas:
-                            tables = get_tables(
-                                "Databricks",
-                                st.session_state["target_conn"],
-                                selected_dbx_catalog,
-                                sch
-                            )
-
-                            selected_tables = st.multiselect(
-                                f"Tables in {sch}",
-                                tables,
-                                key=f"tgt_tables_{sch}"
-                            )
-
-                            for tbl in selected_tables:
-                                target_selections.append({
-                                    "catalog": selected_dbx_catalog,
-                                    "schema": sch,
-                                    "table": tbl
-                                })
-
-                        if target_selections:
-                            st.success("🎯 Selected Target Tables")
-                            for t in target_selections:
-                                st.code(f"{t['catalog']}.{t['schema']}.{t['table']}")
-
-                        # Persist
-                        st.session_state["target_selections"] = target_selections
-                        
-            if st.button("🚀 Run Browse Validations", use_container_width=True):
-                try:
-                    run_browse_validations(
-                        st.session_state.get("source_selections"),
-                        st.session_state.get("target_selections"),
-                        validation_type,
-                        include_timestamp_columns=st.session_state.get(
-                            "include_timestamp_in_hash_browse", True
-                        ),
-                        selected_validations={
-                            "row_count": st.session_state.get(
-                                "include_row_count_browse", True
-                            ),
-                            "schema": st.session_state.get(
-                                "include_schema_browse", True
-                            ),
-                            "numeric": st.session_state.get(
-                                "include_numeric_browse", True
-                            ),
-                            "hash": st.session_state.get(
-                                "include_hash_browse", True
-                            ),
-                        },
-                    )
-                    st.success("🎉 All Browse validations completed")
-                except Exception as e:
-                    st.error(str(e))
+        except Exception as e:
+            st.error(str(e))
   
