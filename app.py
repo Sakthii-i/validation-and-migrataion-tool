@@ -2355,6 +2355,22 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                             key=f"{table_id}_hash"
                         )
 
+                    table_has_any_selection = any([r, s, n, h])
+                    hash_applicable = bool(h or ((not table_has_any_selection) and hash_check))
+                    include_ts = None
+                    if hash_applicable:
+                        include_ts = st.checkbox(
+                            "Include TIMESTAMP columns in row hash",
+                            value=st.session_state.get(
+                                "include_timestamp_in_hash_manual", True
+                            ),
+                            key=f"{table_id}_include_ts",
+                            help=(
+                                "If unchecked, columns with TIMESTAMP/DATETIME datatype are excluded "
+                                "from the row hash calculation for this table pair."
+                            ),
+                        )
+
                     case_override = st.checkbox(
                         "Override case sensitivity",
                         value=False,
@@ -2382,6 +2398,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                         "numeric": n,
                         "hash": h,
                         "case_override": case_override,
+                        "include_timestamp": include_ts,
                         "src": src,
                         "tgt": tgt
                     }
@@ -2486,6 +2503,11 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                 )))
 
                         if effective_hash:
+                            effective_include_timestamp = config.get("include_timestamp")
+                            if effective_include_timestamp is None:
+                                effective_include_timestamp = st.session_state.get(
+                                    "include_timestamp_in_hash_manual", True
+                                )
                             checks.append(("Row Hash Validation", lambda s=src, t=tgt:
                                 run_row_hash_validation(
                                     st.session_state["engine"],
@@ -2493,9 +2515,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     st.session_state["target_conn"],
                                     s,
                                     t,
-                                    include_timestamp_columns=st.session_state.get(
-                                        "include_timestamp_in_hash_manual", True
-                                    ),
+                                    include_timestamp_columns=effective_include_timestamp,
                                 )))
 
                         if checks:
@@ -2954,6 +2974,22 @@ with tab_browse:
                         key=f"{table_id}_hash"
                     )
 
+                table_has_any_selection = any([r, s, n, h])
+                hash_applicable = bool(h or ((not table_has_any_selection) and browse_hash_check))
+                include_ts = None
+                if hash_applicable:
+                    include_ts = st.checkbox(
+                        "Include TIMESTAMP columns in row hash",
+                        value=st.session_state.get(
+                            "include_timestamp_in_hash_browse", True
+                        ),
+                        key=f"{table_id}_include_ts",
+                        help=(
+                            "If unchecked, columns with TIMESTAMP/DATETIME datatype are excluded "
+                            "from the row hash calculation for this table pair."
+                        ),
+                    )
+
                 case_override = st.checkbox(
                     "Override case sensitivity",
                     value=False,
@@ -2981,6 +3017,7 @@ with tab_browse:
                     "numeric": n,
                     "hash": h,
                     "case_override": case_override,
+                    "include_timestamp": include_ts,
                     "src": src,
                     "tgt": tgt
                 }
@@ -3092,6 +3129,11 @@ with tab_browse:
                             )))
 
                     if effective_hash:
+                        effective_include_timestamp = config.get("include_timestamp")
+                        if effective_include_timestamp is None:
+                            effective_include_timestamp = st.session_state.get(
+                                "include_timestamp_in_hash_browse", True
+                            )
                         checks.append(("Row Hash Validation",
                             lambda s=src, t=tgt: run_row_hash_validation(
                                 st.session_state["engine"],
@@ -3099,9 +3141,7 @@ with tab_browse:
                                 st.session_state["target_conn"],
                                 s,
                                 t,
-                                include_timestamp_columns=st.session_state.get(
-                                    "include_timestamp_in_hash_browse", True
-                                ),
+                                include_timestamp_columns=effective_include_timestamp,
                             )))
 
                     if checks:
