@@ -1,10 +1,11 @@
-
 import streamlit as st
 import pandas as pd
 import uuid
 from datetime import datetime
+import psycopg2
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
+from connections.postgres import POSTGRES_CONFIG
 from connections.snowflake import connect_snowflake
 from metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
 from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2
@@ -96,19 +97,17 @@ def render_pie_chart(title, passed, failed):
 
     st.plotly_chart(fig, use_container_width=True)
 
-def get_dashboard_dbx_conn():
+def get_dashboard_postgres_conn():
     """
-    Static Databricks connection for dashboard metrics
-    (Independent of validation UI)
+    Returns a psycopg2 connection to the hardcoded NeonDB Postgres database.
     """
-    DASHBOARD_DBX_HOST = "dbc-a3d893f2-6b53.cloud.databricks.com"
-    DASHBOARD_DBX_HTTP_PATH = "/sql/1.0/warehouses/24e7458d4f627152"
-    DASHBOARD_DBX_TOKEN = "dapi391b3aef63658eb332cc27f165e24ade"
-
-    return connect_databricks(
-        DASHBOARD_DBX_HOST,
-        DASHBOARD_DBX_HTTP_PATH,
-        DASHBOARD_DBX_TOKEN
+    return psycopg2.connect(
+        host=POSTGRES_CONFIG["host"],
+        port=POSTGRES_CONFIG["port"],
+        dbname=POSTGRES_CONFIG["db"],
+        user=POSTGRES_CONFIG["user"],
+        password=POSTGRES_CONFIG["password"],
+        sslmode=POSTGRES_CONFIG["sslmode"],
     )
 
 
@@ -131,6 +130,14 @@ def execute_query(engine, conn, query):
         cur = conn.cursor()
         cur.execute(query)
         cols = [c[0] for c in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        return [dict(zip(cols, row)) for row in rows]
+
+    elif engine in ["postgres", "postgresql"]:
+        cur = conn.cursor()
+        cur.execute(query)
+        cols = [c[0] for c in cur.description] if cur.description else []
         rows = cur.fetchall()
         cur.close()
         return [dict(zip(cols, row)) for row in rows]
@@ -286,29 +293,94 @@ def generate_validation_record(
             else (hash_selected if hash_selected else None)
         ),
     }
-def insert_validation_result(conn, record):
-    conn = get_dashboard_dbx_conn()
-    cur = conn.cursor()
-    """
-    Inserts validation metadata into Databricks table
-    """
-    insert_sql = f"""
-    INSERT INTO table_validation.results.validation_results
-    VALUES (
-        '{record["validation_id"]}',
-        '{record["timestamp"]}',
-        '{record["src_table_name"]}',
-        '{record["tgt_table_name"]}',
-        '{record["validation_type"]}',
-        {sql_value(record["row_count"])},
-        {sql_value(record["schema_check"])},
-        {sql_value(record["numeric_check"])},
-        {sql_value(record["hash_validation"])}
-    )
-    """
+def ensure_validation_table(pg_conn):
+    """Create schema and validation_results table if they don't exist."""
+    ddl = """
+    CREATE SCHEMA IF NOT EXISTS table_validation;
 
-    cur.execute(insert_sql)
+    CREATE TABLE IF NOT EXISTS table_validation.validation_results (
+        validation_id TEXT PRIMARY KEY,
+        validation_ts TIMESTAMPTZ,
+        src_table_name TEXT,
+        tgt_table_name TEXT,
+        validation_type TEXT,
+        row_count TEXT,
+        schema_check TEXT,
+        numeric_check TEXT,
+        hash_validation TEXT
+    );
+    """
+    cur = pg_conn.cursor()
+    # Execute each statement separately because psycopg2 doesn't allow multiple
+    # statements in a single execute when autocommit is off.
+    for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
+        cur.execute(stmt)
+    pg_conn.commit()
     cur.close()
+
+def insert_validation_result(conn, record):
+    try:
+        # Use hardcoded Postgres config to insert validation results
+        pg = get_dashboard_postgres_conn()
+
+        # ensure table exists before inserting
+        try:
+            ensure_validation_table(pg)
+        except Exception as e:
+            st.warning(f"Could not create validation table: {e}")
+            # continue to attempt insert
+
+        cur = pg.cursor()
+        insert_sql = """
+        INSERT INTO table_validation.validation_results (
+            validation_id,
+            validation_ts,
+            src_table_name,
+            tgt_table_name,
+            validation_type,
+            row_count,
+            schema_check,
+            numeric_check,
+            hash_validation
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        params = (
+            record.get("validation_id"),
+            record.get("timestamp"),
+            record.get("src_table_name"),
+            record.get("tgt_table_name"),
+            record.get("validation_type"),
+            record.get("row_count"),
+            record.get("schema_check"),
+            record.get("numeric_check"),
+            record.get("hash_validation"),
+        )
+
+        cur.execute(insert_sql, params)
+        pg.commit()
+
+        cur.close()
+        pg.close()
+
+        st.session_state["last_insert_id"] = record.get("validation_id")
+        return record.get("validation_id")
+
+    except Exception as e:
+        st.error(f"Insert to Postgres failed: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            if cur:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if pg:
+                pg.close()
+        except Exception:
+            pass
+        return None
 
 def sql_value(val):
     if val is None:
@@ -341,134 +413,6 @@ def validate_csv(df):
         raise ValueError("validation_type must be shallow or deep")
 
         
-def run_browse_validations(
-    source_selections,
-    target_selections,
-    validation_type,
-    include_timestamp_columns=True,
-    case_sensitive=False,
-    selected_validations=None,
-):
-    if selected_validations is None:
-        selected_validations = {
-            "row_count": True,
-            "schema": True,
-            "numeric": True,
-            "hash": True,
-        }
-    if not source_selections or not target_selections:
-        raise Exception("Source and Target selections cannot be empty")
-
-    if len(source_selections) != len(target_selections):
-        raise Exception(
-            "Number of source tables must match number of target tables"
-        )
-
-    for idx, (src, tgt) in enumerate(zip(source_selections, target_selections)):
-        st.markdown(f"### ▶ Processing table pair {idx + 1}")
-
-        st.code(
-            f"SRC: {src['catalog']}.{src['schema']}.{src['table']}\n"
-            f"TGT: {tgt['catalog']}.{tgt['schema']}.{tgt['table']}"
-        )
-
-        if validation_type == "shallow":
-            row_res = (
-                run_row_count(
-                    st.session_state["engine"],
-                    st.session_state["source_conn"],
-                    st.session_state["target_conn"],
-                    src, tgt
-                )
-                if selected_validations.get("row_count")
-                else None
-            )
-
-            schema_res = (
-                run_schema_validation(
-                    st.session_state["engine"],
-                    st.session_state["source_conn"],
-                    st.session_state["target_conn"],
-                    src, tgt,
-                    case_sensitive=case_sensitive,
-                )
-                if selected_validations.get("schema")
-                else None
-            )
-
-            record = generate_validation_record(
-                "shallow",
-                src, tgt,
-                bool_to_status(row_res),
-                bool_to_status(schema_res),
-                "N/A",
-                "N/A"
-            )
-
-        else:  # deep
-            checks = []
-            if selected_validations.get("row_count"):
-                checks.append((
-                    "Row Count Validation",
-                    lambda: run_row_count(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt
-                    )
-                ))
-            if selected_validations.get("schema"):
-                checks.append((
-                    "Schema Validation",
-                    lambda: run_schema_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt,
-                        case_sensitive=case_sensitive,
-                    )
-                ))
-            if selected_validations.get("numeric"):
-                checks.append((
-                    "Numeric Statistics Validation",
-                    lambda: run_numeric_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt
-                    )
-                ))
-            if selected_validations.get("hash"):
-                checks.append((
-                    "Row Hash Validation",
-                    lambda: run_row_hash_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src,
-                        tgt,
-                        include_timestamp_columns=include_timestamp_columns,
-                    )
-                ))
-
-            results_map = run_checks_in_order(checks)
-
-            record = generate_validation_record(
-                "deep",
-                src, tgt,
-                bool_to_status(results_map.get("Row Count Validation")),
-                bool_to_status(results_map.get("Schema Validation")),
-                bool_to_status(results_map.get("Numeric Statistics Validation")),
-                bool_to_status(results_map.get("Row Hash Validation")),
-            )
-
-        insert_validation_result(
-            st.session_state["target_conn"],
-            record
-        )
-
-        st.success("✅ Validation completed")
-
 def run_csv_validations(df):
     for idx, row in df.iterrows():
         st.markdown(f"### ▶ Processing row {idx + 1}")
@@ -599,12 +543,16 @@ def run_csv_validations(df):
                 bool_to_status(results_map.get("Row Hash Validation")),
             )
 
-        insert_validation_result(
+        insert_id = insert_validation_result(
             st.session_state["target_conn"],
             record
         )
 
         st.success("✅ Validation completed")
+        if insert_id:
+            st.info(f"Postgres insert committed: {insert_id}")
+        else:
+            st.error("Postgres insert failed — check logs or credentials")
 def run_browse_validations(
     source_selections,
     target_selections,
@@ -721,7 +669,7 @@ def run_browse_validations(
                 bool_to_status(results_map.get("Row Hash Validation")),
             )
 
-        insert_validation_result(
+        insert_id = insert_validation_result(
             st.session_state["target_conn"],
             record
         )
@@ -731,6 +679,10 @@ def run_browse_validations(
             f"{src['catalog']}.{src['schema']}.{src['table']} → "
             f"{tgt['catalog']}.{tgt['schema']}.{tgt['table']}"
         )
+        if insert_id:
+            st.info(f"Postgres insert committed: {insert_id}")
+        else:
+            st.error("Postgres insert failed — check logs or credentials")
 
 # =========================================================
 # GLOBAL STYLES
@@ -767,7 +719,11 @@ def parse_config_tables(config):
 # =========================================================
 def run_shallow_validation(engine, source_conn, target_conn, src_sel, tgt_sel):
     st.info("Select Validation Metrics")
-    key="schema_check"
+    key = "schema_check"
+
+    # default selections (safe defaults to avoid undefined names)
+    row_count_check = True
+    schema_check = True
 
     metrics = {"row_count": row_count_check}
 
@@ -1672,7 +1628,7 @@ def run_validation(src, tgt, validation_type, metrics):
                 bool_to_status(results.get("Row Hash Validation")),
             )
 
-        insert_validation_result(
+        insert_id = insert_validation_result(
             st.session_state["target_conn"],
             record
         )
@@ -1763,7 +1719,7 @@ if st.session_state["active_page"] == "dashboard":
 
     st.divider()
 
-    DASHBOARD_TABLE = "table_validation.results.validation_results"
+    DASHBOARD_TABLE = "table_validation.validation_results"
 
     dashboard_query = f"""
         SELECT
@@ -1780,10 +1736,10 @@ if st.session_state["active_page"] == "dashboard":
             SUM(CASE WHEN hash_validation = 'FAIL' THEN 1 ELSE 0 END) AS row_hash_fail
         FROM {DASHBOARD_TABLE}
     """
-    dashboard_conn = get_dashboard_dbx_conn()
+    dashboard_conn = get_dashboard_postgres_conn()
 
     result = execute_query(
-        "Databricks",
+        "postgres",
         dashboard_conn,
         dashboard_query
     )[0]
@@ -1859,10 +1815,10 @@ if st.session_state["active_page"] == "results":
 
     st.title("📋 Validation Results")
 
-    st.caption("All validation executions captured from Databricks")
+    st.caption("All validation executions captured from PostgreSQl")
 
-    # 🔹 STATIC Databricks connection (dashboard/results use only)
-    results_conn = get_dashboard_dbx_conn()
+    # 🔹 Postgres connection (dashboard/results use only)
+    results_conn = get_dashboard_postgres_conn()
     
     RESULTS_QUERY = """
         SELECT
@@ -1875,11 +1831,11 @@ if st.session_state["active_page"] == "results":
             hash_validation,
             numeric_check,
             schema_check
-        FROM table_validation.results.validation_results
+        FROM table_validation.validation_results
         ORDER BY validation_ts DESC
     """
 
-    results = execute_query("databricks", results_conn, RESULTS_QUERY)
+    results = execute_query("postgres", results_conn, RESULTS_QUERY)
 
     if not results:
         st.warning("No validation results found.")
@@ -1921,13 +1877,22 @@ with left:
         project_id = st.text_input("GCP Project ID")
         dataset_location = st.text_input("Dataset Location", value="US")
         bq_key_path = st.text_input("Service Account Key Path")
-
+        # persist BigQuery creds in session
+        st.session_state["project_id"] = project_id
+        st.session_state["dataset_location"] = dataset_location
+        st.session_state["bq_key_path"] = bq_key_path
     elif source_engine == "Snowflake":
         sf_account = st.text_input("Account")
         sf_user = st.text_input("Username")
         sf_password = st.text_input("Password", type="password")
         sf_warehouse = st.text_input("Warehouse")
         sf_role = st.text_input("Role")
+        # persist Snowflake creds in session
+        st.session_state["sf_account"] = sf_account
+        st.session_state["sf_user"] = sf_user
+        st.session_state["sf_password"] = sf_password
+        st.session_state["sf_warehouse"] = sf_warehouse
+        st.session_state["sf_role"] = sf_role
 
 # -----------------------------
 # DATABRICKS CREDENTIALS
@@ -1938,6 +1903,11 @@ with right:
     dbx_server = st.text_input("Databricks Server Hostname")
     dbx_http_path = st.text_input("HTTP Path")
     dbx_token = st.text_input("Access Token", type="password")
+    # persist Databricks creds in session
+    st.session_state["dbx_server"] = dbx_server
+    st.session_state["dbx_http_path"] = dbx_http_path
+    st.session_state["dbx_token"] = dbx_token
+
 # =============================
 # SESSION STATE INITIALIZATION
 # =============================
@@ -2519,7 +2489,23 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                 )))
 
                         if checks:
-                            run_checks_in_order(checks)
+                            results_map = run_checks_in_order(checks)
+                            record = generate_validation_record(
+                                "deep",
+                                src, tgt,
+                                bool_to_status(results_map.get("Row Count Validation")),
+                                bool_to_status(results_map.get("Schema Validation")),
+                                bool_to_status(results_map.get("Numeric Statistics Validation")),
+                                bool_to_status(results_map.get("Row Hash Validation")),
+                            )
+                            insert_id = insert_validation_result(
+                                st.session_state["target_conn"],
+                                record
+                            )
+                            if insert_id:
+                                st.info(f"Postgres insert committed: {insert_id}")
+                            else:
+                                st.error("Postgres insert failed — check logs or credentials")
                         else:
                             st.warning("⚠️ No validations selected.")
 
@@ -2601,7 +2587,23 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     )))
 
                         if checks:
-                            run_checks_in_order(checks)
+                            results_map = run_checks_in_order(checks)
+                            record = generate_validation_record(
+                                validation_type,
+                                src, tgt,
+                                bool_to_status(results_map.get("Row Count Validation")),
+                                bool_to_status(results_map.get("Schema Validation")),
+                                bool_to_status(results_map.get("Numeric Statistics Validation")),
+                                bool_to_status(results_map.get("Row Hash Validation")),
+                            )
+                            insert_id = insert_validation_result(
+                                st.session_state["target_conn"],
+                                record
+                            )
+                            if insert_id:
+                                st.info(f"Postgres insert committed: {insert_id}")
+                            else:
+                                st.error("Postgres insert failed — check logs or credentials")
                         else:
                             st.warning("⚠️ No validations selected.")
 
@@ -3145,7 +3147,23 @@ with tab_browse:
                             )))
 
                     if checks:
-                        run_checks_in_order(checks)
+                        results_map = run_checks_in_order(checks)
+                        record = generate_validation_record(
+                            "deep",
+                            src, tgt,
+                            bool_to_status(results_map.get("Row Count Validation")),
+                            bool_to_status(results_map.get("Schema Validation")),
+                            bool_to_status(results_map.get("Numeric Statistics Validation")),
+                            bool_to_status(results_map.get("Row Hash Validation")),
+                        )
+                        insert_id = insert_validation_result(
+                            st.session_state["target_conn"],
+                            record
+                        )
+                        if insert_id:
+                            st.info(f"Postgres insert committed: {insert_id}")
+                        else:
+                            st.error("Postgres insert failed — check logs or credentials")
                     else:
                         st.warning("⚠️ No validations selected.")
 
@@ -3228,7 +3246,23 @@ with tab_browse:
                                 )))
 
                     if checks:
-                        run_checks_in_order(checks)
+                        results_map = run_checks_in_order(checks)
+                        record = generate_validation_record(
+                            validation_type,
+                            src, tgt,
+                            bool_to_status(results_map.get("Row Count Validation")),
+                            bool_to_status(results_map.get("Schema Validation")),
+                            bool_to_status(results_map.get("Numeric Statistics Validation")),
+                            bool_to_status(results_map.get("Row Hash Validation")),
+                        )
+                        insert_id = insert_validation_result(
+                            st.session_state["target_conn"],
+                            record
+                        )
+                        if insert_id:
+                            st.info(f"Postgres insert committed: {insert_id}")
+                        else:
+                            st.error("Postgres insert failed — check logs or credentials")
                     else:
                         st.warning("⚠️ No validations selected.")
 
@@ -3236,4 +3270,3 @@ with tab_browse:
 
         except Exception as e:
             st.error(str(e))
-  
