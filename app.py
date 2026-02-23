@@ -2771,7 +2771,7 @@ with tab_csv:
 
     # Define the canonical template columns
     template_columns = [
-        "validation_type",
+        "validation_type  ",
         "source_catalog",
         "source_schema",
         "source_table",
