@@ -2571,40 +2571,67 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 
 
 with tab_csv:
-        # ------------------------------
-    # 📄 CSV Template Preview (UI)
-    # ------------------------------
+
     st.subheader("📄 CSV Template Format")
 
+    # Define the canonical template columns
     template_columns = [
-        "validation_type",      # shallow / deep
+        "validation_type",
         "source_catalog",
         "source_schema",
         "source_table",
         "target_catalog",
         "target_schema",
         "target_table",
-        "metrics",              # deep only: row_count,schema,numeric,hash
-        "case_sensitive",       # yes / no
-        "include_timestamp"     # yes / no
+        "metrics",
+        "case_sensitive",
+        "include_timestamp",
     ]
 
-    template_df = pd.DataFrame(columns=template_columns)
+    # Build sample rows: one for deep and one for shallow (horizontal display)
+    deep_sample = [
+        "deep",               # validation_type
+        "SNOWFLAKE_LEARNING_DB",  # source_catalog
+        "PUBLIC",             # source_schema
+        "DATATYPE_DEMO2",     # source_table
+        "workspace",          # target_catalog
+        "public",             # target_schema
+        "datatype_demo",      # target_table
+        "row_count,schema,numeric,hash",  # metrics
+        "no",                 # case_sensitive
+        "yes",                # include_timestamp
+    ]
 
+    shallow_sample = [
+        "shallow",            # validation_type
+        "SNOWFLAKE_LEARNING_DB",  # source_catalog
+        "PUBLIC",             # source_schema
+        "DATATYPE_DEMO2",           # source_table
+        "workspace",          # target_catalog
+        "public",             # target_schema
+        "datatype_demo",           # target_table
+        "",                   # metrics (empty for shallow)
+        "no",                 # case_sensitive
+        "yes",                # include_timestamp
+    ]
+
+    # Build a two-row DataFrame with columns as headers and sample rows
+    template_df = pd.DataFrame([deep_sample, shallow_sample], columns=template_columns)
+
+    # Display the template horizontally (column headers across, two sample rows)
     st.dataframe(template_df, use_container_width=True)
 
-    # Download button
-    csv_template = template_df.to_csv(index=False)
+    # Provide a downloadable CSV that contains only the header (column names)
+    header_only_csv = ",".join(template_columns) + "\n"
 
     st.download_button(
-        label="⬇ Download CSV Template",
-        data=csv_template,
-        file_name="reconciliation_template.csv",
+        label="⬇ Download CSV Template (header-only)",
+        data=header_only_csv,
+        file_name="reconciliation_template_header_only.csv",
         mime="text/csv",
     )
-    st.subheader("📂 Upload CSV for Multiple Tables")
 
-    
+    st.subheader("📂 Upload CSV for Multiple Tables")
 
     st.divider()
 
@@ -2614,7 +2641,8 @@ with tab_csv:
     )
 
     if uploaded_file:
-        df = pd.read_csv(uploaded_file)
+        # 🔥 IMPORTANT: Ignore commented lines
+        df = pd.read_csv(uploaded_file, comment="#")
 
         st.subheader("🔍 Preview Uploaded CSV")
         st.dataframe(df, use_container_width=True)
