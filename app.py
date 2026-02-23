@@ -1158,16 +1158,211 @@ def run_row_hash_validation(
         return True
     else:
         c3.error("❌ HASH MISMATCH")
+        st.warning(
+            "💡 **Column comparison below:** "
+            "Rows are split by column to identify which field(s) have different values."
+        )
 
-        # Basic mismatch analysis (no UI debug details)
+        # Detailed mismatch analysis
         missing_in_target = src_hashes - tgt_hashes
         extra_in_target = tgt_hashes - src_hashes
 
         m1, m2 = st.columns(2)
         m1.metric("Missing in Target", len(missing_in_target))
         m2.metric("Extra in Target", len(extra_in_target))
+        
+        # Summary statistics
+        total_unique = len(src_hashes | tgt_hashes)
+        matching = len(src_hashes & tgt_hashes)
+        if total_unique > 0:
+            st.info(f"**Summary:** {matching} of {total_unique} unique rows match ({100*matching/total_unique:.1f}%)")
 
-    return False
+        st.subheader("Column-Level Breakdown (Sample Rows)")
+        
+        # Build schema rows for display
+        try:
+            src_schema_rows_for_hash = [
+                {
+                    "column_name": c.get("name"),
+                    "data_type": (c.get("raw_type") or c.get("type") or ""),
+                }
+                for c in (src_columns or [])
+                if c.get("name")
+            ]
+            tgt_schema_rows_for_hash = [
+                {
+                    "column_name": c.get("name"),
+                    "data_type": (c.get("raw_type") or c.get("type") or ""),
+                }
+                for c in (tgt_columns or [])
+                if c.get("name")
+            ]
+
+            def _included_signature_cols(schema_rows_for_hash):
+                included = []
+                for r in schema_rows_for_hash:
+                    col = r.get("column_name")
+                    dtype = str(r.get("data_type") or "").upper()
+                    if not col:
+                        continue
+                    if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                        continue
+                    if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+                        continue
+                    included.append(str(col))
+                return included
+
+            sig_cols = _included_signature_cols(src_schema_rows_for_hash)
+            
+            if sig_cols:
+                st.caption("Columns included in hash (in order):")
+                st.code(" | ".join(sig_cols), language="text")
+            
+            df_missing = None
+            df_extra = None
+
+            if missing_in_target and len(missing_in_target) > 0:
+                st.subheader("🔴 Source-Only Rows (in source, NOT in target)")
+                try:
+                    missing_hashes = [str(h).upper() for h in list(missing_in_target)[:50] if h]
+                    if missing_hashes:
+                        q = build_row_hash_mismatch_rows_query_v2(
+                            engine,
+                            src["catalog"],
+                            src["schema"],
+                            src["table"],
+                            schema_rows=src_schema_rows_for_hash,
+                            hash_values=missing_hashes,
+                            include_timestamp=include_timestamp_columns,
+                            timestamp_mode=None,
+                            limit=10,
+                        )
+                        rows = execute_query(engine, source_conn, q)
+
+                        if rows:
+                            df_missing = pd.DataFrame(rows)
+                            # Find row_signature column (case-insensitive)
+                            sig_col = None
+                            for col in df_missing.columns:
+                                if col.lower() == 'row_signature':
+                                    sig_col = col
+                                    break
+                            
+                            if sig_col and sig_cols:
+                                parts = df_missing[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
+                                if parts.shape[1] >= len(sig_cols):
+                                    parts.columns = sig_cols[:parts.shape[1]]
+                                    df_missing = pd.concat([df_missing.drop(columns=[sig_col]), parts], axis=1)
+                            st.dataframe(df_missing, use_container_width=True, height=200)
+                        else:
+                            st.info("No sample rows found")
+                except Exception as e:
+                    st.error(f"Could not fetch source-only rows: {str(e)[:200]}")
+
+            if extra_in_target and len(extra_in_target) > 0:
+                st.subheader("🟢 Target-Only Rows (in target, NOT in source)")
+                try:
+                    extra_hashes = [str(h).upper() for h in list(extra_in_target)[:50] if h]
+                    if extra_hashes:
+                        q = build_row_hash_mismatch_rows_query_v2(
+                            "databricks",
+                            tgt["catalog"],
+                            tgt["schema"],
+                            tgt["table"],
+                            schema_rows=tgt_schema_rows_for_hash,
+                            hash_values=extra_hashes,
+                            include_timestamp=include_timestamp_columns,
+                            timestamp_mode=None,
+                            limit=10,
+                        )
+                        rows = execute_query("Databricks", target_conn, q)
+
+                        if rows:
+                            df_extra = pd.DataFrame(rows)
+                            # Find row_signature column (case-insensitive)
+                            sig_col = None
+                            for col in df_extra.columns:
+                                if col.lower() == 'row_signature':
+                                    sig_col = col
+                                    break
+                            
+                            if sig_col and sig_cols:
+                                parts = df_extra[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
+                                if parts.shape[1] >= len(sig_cols):
+                                    parts.columns = sig_cols[:parts.shape[1]]
+                                    df_extra = pd.concat([df_extra.drop(columns=[sig_col]), parts], axis=1)
+                            st.dataframe(df_extra, use_container_width=True, height=200)
+                        else:
+                            st.info("No sample rows found")
+                except Exception as e:
+                    st.error(f"Could not fetch target-only rows: {str(e)[:200]}")
+
+            # Automatic column diff if both samples exist
+            if df_missing is not None and df_extra is not None and len(sig_cols) > 0:
+                if len(df_missing) > 0 and len(df_extra) > 0:
+                    try:
+                        # Parse signatures for both dataframes (case-insensitive column lookup)
+                        def get_signature_col(df):
+                            for col in df.columns:
+                                if col.lower() == 'row_signature':
+                                    return col
+                            return None
+                        
+                        sig_col_missing = get_signature_col(df_missing)
+                        sig_col_extra = get_signature_col(df_extra)
+                        
+                        # If signature exists but columns not parsed, parse them now
+                        if sig_col_missing and 'row_signature' not in df_missing.columns:
+                            parts = df_missing[sig_col_missing].astype(str).str.split(r"\|", expand=True, regex=True)
+                            if parts.shape[1] >= len(sig_cols):
+                                parts.columns = sig_cols[:parts.shape[1]]
+                                df_missing = pd.concat([df_missing.drop(columns=[sig_col_missing]), parts], axis=1)
+                        
+                        if sig_col_extra and 'row_signature' not in df_extra.columns:
+                            parts = df_extra[sig_col_extra].astype(str).str.split(r"\|", expand=True, regex=True)
+                            if parts.shape[1] >= len(sig_cols):
+                                parts.columns = sig_cols[:parts.shape[1]]
+                                df_extra = pd.concat([df_extra.drop(columns=[sig_col_extra]), parts], axis=1)
+                        
+                        # Get available columns from dataframe
+                        available_cols = [c for c in sig_cols if c in df_missing.columns and c in df_extra.columns]
+                        
+                        if available_cols:
+                            row_s = df_missing.iloc[0][available_cols]
+                            row_t = df_extra.iloc[0][available_cols]
+                            
+                            diff_cols = [c for c in available_cols if str(row_s.get(c, "")).strip() != str(row_t.get(c, "")).strip()]
+                            
+                            if diff_cols:
+                                st.error(f"🔴 **Hash is mismatching because of column(s): {', '.join([f'`{c}`' for c in diff_cols])}**")
+                                st.subheader("Column Value Comparison")
+                                
+                                # Create detailed comparison for each differing column
+                                for col in diff_cols:
+                                    try:
+                                        src_val = row_s.get(col, "N/A")
+                                        tgt_val = row_t.get(col, "N/A")
+                                        st.markdown(f"**Column: `{col}`**")
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.markdown(f"📊 **SOURCE:** `{src_val}`")
+                                        with col2:
+                                            st.markdown(f"📊 **TARGET:** `{tgt_val}`")
+                                        st.divider()
+                                    except Exception as e:
+                                        st.warning(f"Could not display column {col}: {str(e)[:100]}")
+                            else:
+                                st.info("✓ Sample rows have matching column values; hash mismatch stems from row presence rather than value differences.")
+                        else:
+                            st.warning("Could not extract column values from signature rows for comparison.")
+                    except Exception as e:
+                        st.error(f"Error comparing rows: {str(e)[:300]}")
+
+
+        except Exception as e:
+            st.warning(f"Could not build detailed column breakdown: {str(e)[:200]}")
+
+        return False
 def approx_equal(a, b, tol=1e-6):
     if a is None or b is None:
         return False
