@@ -1158,105 +1158,16 @@ def run_row_hash_validation(
         return True
     else:
         c3.error("❌ HASH MISMATCH")
-        
-        # Detailed mismatch analysis
+
+        # Basic mismatch analysis (no UI debug details)
         missing_in_target = src_hashes - tgt_hashes
         extra_in_target = tgt_hashes - src_hashes
-        
-        st.error("❌ Hash Validation Failed")
 
         m1, m2 = st.columns(2)
         m1.metric("Missing in Target", len(missing_in_target))
         m2.metric("Extra in Target", len(extra_in_target))
-        
-        # Summary statistics
-        total_unique = len(src_hashes | tgt_hashes)
-        matching = len(src_hashes & tgt_hashes)
-        st.info(f"**Summary:** {matching} of {total_unique} unique rows match ({100*matching/total_unique:.1f}%)")
 
-        # Print where hashing failed: show sample mismatched signatures
-        st.subheader("Where Hashing Failed (Sample)")
-        try:
-            # Build the exact schema_rows used for hashing (common columns only)
-            src_schema_rows_for_hash = [
-                {
-                    "column_name": c.get("name"),
-                    "data_type": (c.get("raw_type") or c.get("type") or ""),
-                }
-                for c in (src_columns or [])
-                if c.get("name")
-            ]
-            tgt_schema_rows_for_hash = [
-                {
-                    "column_name": c.get("name"),
-                    "data_type": (c.get("raw_type") or c.get("type") or ""),
-                }
-                for c in (tgt_columns or [])
-                if c.get("name")
-            ]
-
-            def _included_signature_cols(schema_rows_for_hash):
-                included = []
-                for r in schema_rows_for_hash:
-                    col = r.get("column_name")
-                    dtype = str(r.get("data_type") or "").upper()
-                    if not col:
-                        continue
-                    if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-                        continue
-                    if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
-                        continue
-                    included.append(str(col))
-                return included
-
-            sig_cols = _included_signature_cols(src_schema_rows_for_hash)
-            if sig_cols:
-                st.caption("Signature column order (included in hash)")
-                st.code(" | ".join(sig_cols))
-        except Exception:
-            pass
-
-        if missing_in_target:
-            st.caption("Source-only rows (present in source, missing in target) — sample")
-            try:
-                missing_hashes = [str(h).upper() for h in missing_in_target if h]
-                q = build_row_hash_mismatch_rows_query_v2(
-                    engine,
-                    src["catalog"],
-                    src["schema"],
-                    src["table"],
-                    schema_rows=src_schema_rows_for_hash,
-                    hash_values=missing_hashes,
-                    include_timestamp=include_timestamp_columns,
-                    timestamp_mode=None,
-                    limit=25,
-                )
-                rows = execute_query(engine, source_conn, q)
-                st.dataframe(rows, use_container_width=True)
-            except Exception as e:
-                st.error(f"Failed to fetch source-only sample rows: {e}")
-
-        if extra_in_target:
-            st.caption("Target-only rows (present in target, missing in source) — sample")
-            try:
-                extra_hashes = [str(h).upper() for h in extra_in_target if h]
-                q = build_row_hash_mismatch_rows_query_v2(
-                    "databricks",
-                    tgt["catalog"],
-                    tgt["schema"],
-                    tgt["table"],
-                    schema_rows=tgt_schema_rows_for_hash,
-                    hash_values=extra_hashes,
-                    include_timestamp=include_timestamp_columns,
-                    timestamp_mode=None,
-                    limit=25,
-                )
-                rows = execute_query("Databricks", target_conn, q)
-                st.dataframe(rows, use_container_width=True)
-            except Exception as e:
-                st.error(f"Failed to fetch target-only sample rows: {e}")
-        
-        return False
+    return False
 def approx_equal(a, b, tol=1e-6):
     if a is None or b is None:
         return False
