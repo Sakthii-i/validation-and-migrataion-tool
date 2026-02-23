@@ -395,15 +395,17 @@ def bool_to_status(val):
     return None
 
 def validate_csv(df):
+    
     required_cols = {
         "source_catalog", "source_schema", "source_table",
         "target_catalog", "target_schema", "target_table",
-        "validation_type"
+        "validation_type",
+        "case_sensitive"   # ✅ NEW REQUIRED COLUMN
     }
 
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing columns: {missing_cols}")
 
     invalid_types = df[
         ~df["validation_type"].str.lower().isin(["shallow", "deep"])
@@ -412,11 +414,28 @@ def validate_csv(df):
     if not invalid_types.empty:
         raise ValueError("validation_type must be shallow or deep")
 
+    # Validate case_sensitive column
+    valid_case_values = {"yes", "no", "true", "false", "1", "0"}
+
+    invalid_case = df[
+        ~df["case_sensitive"].astype(str).str.lower().isin(valid_case_values)
+    ]
+
+    if not invalid_case.empty:
+        raise ValueError(
+            "case_sensitive must be yes/no/true/false/1/0"
+        )
+
         
 def run_csv_validations(df):
+
+
     for idx, row in df.iterrows():
         st.markdown(f"### ▶ Processing row {idx + 1}")
 
+        # --------------------------
+        # Build Source & Target
+        # --------------------------
         src = {
             "catalog": row["source_catalog"],
             "schema": row["source_schema"],
@@ -429,127 +448,149 @@ def run_csv_validations(df):
             "table": row["target_table"]
         }
 
-        validation_type = row["validation_type"].lower()
+        validation_type = str(row["validation_type"]).strip().lower()
 
-        selected_validations = {
-            "row_count": st.session_state.get("include_row_count_csv", True),
-            "schema": st.session_state.get("include_schema_csv", True),
-            "numeric": st.session_state.get("include_numeric_csv", True),
-            "hash": st.session_state.get("include_hash_csv", True),
-        }
+        # --------------------------
+        # 🔑 NEW: Read Case Sensitive from CSV
+        # --------------------------
+        case_value = str(row["case_sensitive"]).strip().lower()
 
-        case_sensitive = st.session_state.get("csv_case_sensitive_global", False)
+        case_sensitive = case_value in ["yes", "true", "1"]
 
-        if validation_type == "shallow":
-            if not (
-                selected_validations.get("row_count")
-                or selected_validations.get("schema")
-            ):
-                st.warning("⚠️ No validation methods selected; skipping")
+        # --------------------------
+        # Determine Metrics
+        # --------------------------
+        if validation_type == "deep":
+
+            if "metrics" not in row or pd.isna(row["metrics"]):
+                st.error("❌ Deep validation requires 'metrics' column.")
                 continue
 
-            row_res = (
-                run_row_count(
-                    st.session_state["engine"],
-                    st.session_state["source_conn"],
-                    st.session_state["target_conn"],
-                    src, tgt
-                )
-                if selected_validations.get("row_count")
-                else None
+            metrics_list = [
+                m.strip().lower()
+                for m in str(row["metrics"]).split(",")
+                if m.strip()
+            ]
+
+            selected_validations = {
+                "row_count": "row_count" in metrics_list,
+                "schema": "schema" in metrics_list,
+                "numeric": "numeric" in metrics_list,
+                "hash": "hash" in metrics_list,
+            }
+
+            if not any(selected_validations.values()):
+                st.warning("⚠️ No valid metrics specified. Skipping row.")
+                continue
+
+        else:  # shallow
+            selected_validations = {
+                "row_count": True,
+                "schema": True,
+                "numeric": False,
+                "hash": False,
+            }
+
+        include_timestamp = True
+
+        # --------------------------
+        # SHALLOW
+        # --------------------------
+        if validation_type == "shallow":
+
+            row_res = run_row_count(
+                st.session_state["engine"],
+                st.session_state["source_conn"],
+                st.session_state["target_conn"],
+                src, tgt
             )
 
-            schema_res = (
-                run_schema_validation(
-                    st.session_state["engine"],
-                    st.session_state["source_conn"],
-                    st.session_state["target_conn"],
-                    src, tgt,
-                    case_sensitive=case_sensitive,
-                )
-                if selected_validations.get("schema")
-                else None
+            schema_res = run_schema_validation(
+                st.session_state["engine"],
+                st.session_state["source_conn"],
+                st.session_state["target_conn"],
+                src, tgt,
+                case_sensitive=case_sensitive,   # ✅ USING CSV VALUE
             )
 
             record = generate_validation_record(
                 "shallow",
-                src, tgt,
+                src,
+                tgt,
                 bool_to_status(row_res),
                 bool_to_status(schema_res),
                 "N/A",
                 "N/A"
             )
 
-        else:  # deep
-            checks = []
-            if selected_validations.get("row_count"):
-                checks.append((
-                    "Row Count Validation",
-                    lambda: run_row_count(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt
-                    )
-                ))
-            if selected_validations.get("schema"):
-                checks.append((
-                    "Schema Validation",
-                    lambda: run_schema_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt,
-                        case_sensitive=case_sensitive,
-                    )
-                ))
-            if selected_validations.get("numeric"):
-                checks.append((
-                    "Numeric Statistics Validation",
-                    lambda: run_numeric_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src, tgt
-                    )
-                ))
-            if selected_validations.get("hash"):
-                checks.append((
-                    "Row Hash Validation",
-                    lambda: run_row_hash_validation(
-                        st.session_state["engine"],
-                        st.session_state["source_conn"],
-                        st.session_state["target_conn"],
-                        src,
-                        tgt,
-                        include_timestamp_columns=st.session_state.get(
-                            "include_timestamp_in_hash_csv", True
-                        ),
-                    )
-                ))
+        # --------------------------
+        # DEEP
+        # --------------------------
+        else:
 
-            if not checks:
-                st.warning("⚠️ No validation methods selected; skipping")
-                continue
+            checks = []
+
+            if selected_validations["row_count"]:
+                checks.append(("Row Count Validation",
+                    lambda s=src, t=tgt: run_row_count(
+                        st.session_state["engine"],
+                        st.session_state["source_conn"],
+                        st.session_state["target_conn"],
+                        s, t
+                    )))
+
+            if selected_validations["schema"]:
+                checks.append(("Schema Validation",
+                    lambda s=src, t=tgt: run_schema_validation(
+                        st.session_state["engine"],
+                        st.session_state["source_conn"],
+                        st.session_state["target_conn"],
+                        s, t,
+                        case_sensitive=case_sensitive,  # ✅ USING CSV VALUE
+                    )))
+
+            if selected_validations["numeric"]:
+                checks.append(("Numeric Statistics Validation",
+                    lambda s=src, t=tgt: run_numeric_validation(
+                        st.session_state["engine"],
+                        st.session_state["source_conn"],
+                        st.session_state["target_conn"],
+                        s, t
+                    )))
+
+            if selected_validations["hash"]:
+                checks.append(("Row Hash Validation",
+                    lambda s=src, t=tgt: run_row_hash_validation(
+                        st.session_state["engine"],
+                        st.session_state["source_conn"],
+                        st.session_state["target_conn"],
+                        s,
+                        t,
+                        include_timestamp_columns=include_timestamp,
+                    )))
 
             results_map = run_checks_in_order(checks)
 
             record = generate_validation_record(
                 "deep",
-                src, tgt,
+                src,
+                tgt,
                 bool_to_status(results_map.get("Row Count Validation")),
                 bool_to_status(results_map.get("Schema Validation")),
                 bool_to_status(results_map.get("Numeric Statistics Validation")),
                 bool_to_status(results_map.get("Row Hash Validation")),
             )
 
+        # --------------------------
+        # Insert Result
+        # --------------------------
         insert_id = insert_validation_result(
             st.session_state["target_conn"],
             record
         )
 
-        st.success("✅ Validation completed")
         if insert_id:
+            st.success("✅ Validation completed")
             st.info(f"Postgres insert committed: {insert_id}")
         else:
             st.error("Postgres insert failed — check logs or credentials")
@@ -2631,6 +2672,7 @@ with tab_csv:
     - target_schema
     - target_table
     - metrics (required only for deep)
+    - case_sensitive (yes / no)  ← NEW COLUMN
 
     ---
     #### 📊 Allowed Metrics (for deep validation)
@@ -2651,7 +2693,8 @@ with tab_csv:
     validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
     shallow,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo
     ```
-    """)
+    """
+    )
 
     st.divider()
 
@@ -2662,58 +2705,6 @@ with tab_csv:
 
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
-
-        st.subheader("⚙️ Validation Settings")
-
-        st.caption("Validation Methods")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.checkbox(
-                "Row Count",
-                key="include_row_count_csv",
-                value=st.session_state.get("include_row_count_csv", True),
-            )
-        with c2:
-            st.checkbox(
-                "Schema",
-                key="include_schema_csv",
-                value=st.session_state.get("include_schema_csv", True),
-            )
-        with c3:
-            st.checkbox(
-                "Numeric",
-                key="include_numeric_csv",
-                value=st.session_state.get("include_numeric_csv", True),
-            )
-        with c4:
-            st.checkbox(
-                "Hash",
-                key="include_hash_csv",
-                value=st.session_state.get("include_hash_csv", True),
-            )
-
-        if st.session_state.get("include_hash_csv"):
-            st.checkbox(
-                "Include TIMESTAMP columns in row hash",
-                key="include_timestamp_in_hash_csv",
-                value=st.session_state.get(
-                    "include_timestamp_in_hash_csv", True
-                ),
-                help=(
-                    "If unchecked, columns with TIMESTAMP datatype are excluded "
-                    "from the row hash calculation."
-                ),
-            )
-
-        st.checkbox(
-            "Case-sensitive schema validation",
-            key="csv_case_sensitive_global",
-            value=st.session_state.get("csv_case_sensitive_global", False),
-            help=(
-                "If enabled, column names must match exactly (case-sensitive). "
-                "If disabled, schema matching is case-insensitive."
-            ),
-        )
 
         st.subheader("🔍 Preview Uploaded CSV")
         st.dataframe(df, use_container_width=True)
