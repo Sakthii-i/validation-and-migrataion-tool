@@ -2571,47 +2571,40 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 
 
 with tab_csv:
+        # ------------------------------
+    # 📄 CSV Template Preview (UI)
+    # ------------------------------
+    st.subheader("📄 CSV Template Format")
+
+    template_columns = [
+        "validation_type",      # shallow / deep
+        "source_catalog",
+        "source_schema",
+        "source_table",
+        "target_catalog",
+        "target_schema",
+        "target_table",
+        "metrics",              # deep only: row_count,schema,numeric,hash
+        "case_sensitive",       # yes / no
+        "include_timestamp"     # yes / no
+    ]
+
+    template_df = pd.DataFrame(columns=template_columns)
+
+    st.dataframe(template_df, use_container_width=True)
+
+    # Download button
+    csv_template = template_df.to_csv(index=False)
+
+    st.download_button(
+        label="⬇ Download CSV Template",
+        data=csv_template,
+        file_name="reconciliation_template.csv",
+        mime="text/csv",
+    )
     st.subheader("📂 Upload CSV for Multiple Tables")
 
-    # ===============================
-    # CSV FORMAT GUIDE (Before Upload)
-    # ===============================
-    st.markdown("""
-    ### 📘 CSV Format Guide
-
-    #### ✅ Required Columns
-    - validation_type (shallow / deep)
-    - source_catalog
-    - source_schema
-    - source_table
-    - target_catalog
-    - target_schema
-    - target_table
-    - metrics (required only for deep)
-    - case_sensitive (yes / no)  
-    include_timestamp (yes / no) 
-
-    ---
-    #### 📊 Allowed Metrics (for deep validation)
-    - `row_count`
-    - `schema`
-    - `numeric`
-    - `hash`
-
-    ---
-    #### 📝 Example (Deep)
-    ```
-    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,metrics,case_sensitive,include_timestamp
-    deep,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo,"row_count,schema,hash",no,yes"
-    ```
-
-    #### 📝 Example (Shallow)
-    ```
-    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
-    shallow,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo
-    ```
-    """
-    )
+    
 
     st.divider()
 
