@@ -2836,7 +2836,7 @@ with tab_csv:
     )
 
     if uploaded_file:
-        # 🔥 IMPORTANT: Ignore commented lines
+        # 🔥 IMPORTANT: Ignore _commented _lines
         df = pd.read_csv(uploaded_file, comment="#")
 
         st.subheader("🔍 Preview Uploaded CSV")
