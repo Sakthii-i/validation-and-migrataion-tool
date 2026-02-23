@@ -396,35 +396,34 @@ def bool_to_status(val):
 
 def validate_csv(df):
     
+   
+
     required_cols = {
-        "source_catalog", "source_schema", "source_table",
-        "target_catalog", "target_schema", "target_table",
+        "source_catalog",
+        "source_schema",
+        "source_table",
+        "target_catalog",
+        "target_schema",
+        "target_table",
         "validation_type",
-        "case_sensitive"   # ✅ NEW REQUIRED COLUMN
+        "case_sensitive",
+        "include_timestamp",   # ✅ NEW
     }
 
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing columns: {missing_cols}")
 
-    invalid_types = df[
-        ~df["validation_type"].str.lower().isin(["shallow", "deep"])
-    ]
-
-    if not invalid_types.empty:
+    if not df["validation_type"].str.lower().isin(["shallow", "deep"]).all():
         raise ValueError("validation_type must be shallow or deep")
 
-    # Validate case_sensitive column
-    valid_case_values = {"yes", "no", "true", "false", "1", "0"}
+    valid_bool = {"yes", "no", "true", "false", "1", "0"}
 
-    invalid_case = df[
-        ~df["case_sensitive"].astype(str).str.lower().isin(valid_case_values)
-    ]
+    if not df["case_sensitive"].astype(str).str.lower().isin(valid_bool).all():
+        raise ValueError("case_sensitive must be yes/no/true/false/1/0")
 
-    if not invalid_case.empty:
-        raise ValueError(
-            "case_sensitive must be yes/no/true/false/1/0"
-        )
+    if not df["include_timestamp"].astype(str).str.lower().isin(valid_bool).all():
+        raise ValueError("include_timestamp must be yes/no/true/false/1/0")
 
         
 def run_csv_validations(df):
@@ -456,6 +455,12 @@ def run_csv_validations(df):
         case_value = str(row["case_sensitive"]).strip().lower()
 
         case_sensitive = case_value in ["yes", "true", "1"]
+
+        # --------------------------
+        # 🔑 Read include_timestamp from CSV  ✅ INSERT HERE
+        # --------------------------
+        ts_value = str(row["include_timestamp"]).strip().lower()
+        include_timestamp = ts_value in ["yes", "true", "1"]
 
         # --------------------------
         # Determine Metrics
@@ -491,7 +496,7 @@ def run_csv_validations(df):
                 "hash": False,
             }
 
-        include_timestamp = True
+        
 
         # --------------------------
         # SHALLOW
@@ -2672,7 +2677,8 @@ with tab_csv:
     - target_schema
     - target_table
     - metrics (required only for deep)
-    - case_sensitive (yes / no)  ← NEW COLUMN
+    - case_sensitive (yes / no)  
+    include_timestamp (yes / no) 
 
     ---
     #### 📊 Allowed Metrics (for deep validation)
@@ -2684,8 +2690,8 @@ with tab_csv:
     ---
     #### 📝 Example (Deep)
     ```
-    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,metrics
-    deep,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo,"row_count,schema,hash"
+    validation_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,metrics,case_sensitive,include_timestamp
+    deep,SNOWFLAKE_DB,PUBLIC,DATATYPE_DEMO,workspace,default,datatype_demo,"row_count,schema,hash",no,yes"
     ```
 
     #### 📝 Example (Shallow)
