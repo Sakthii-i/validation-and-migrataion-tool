@@ -112,9 +112,22 @@ def get_dashboard_postgres_conn():
     )
 
 
+DATE_FILTER_OPTIONS = [
+    "All time",
+    "Today",
+    "Past 3 days",
+    "Past 15 days",
+    "Past 30 days",
+    "Custom",
+]
+
+
 def _compute_date_range(filter_key: str, custom_start=None, custom_end=None):
-    """Returns (start_date, end_date) as datetime.date objects."""
+    """Returns (start_date, end_date) as datetime.date objects, or (None, None) for no filter."""
     today = datetime.utcnow().date()
+
+    if filter_key == "All time":
+        return None, None
 
     if filter_key == "Today":
         return today, today
@@ -137,6 +150,8 @@ def _compute_date_range(filter_key: str, custom_start=None, custom_end=None):
 
 def _build_validation_ts_where_clause(start_date, end_date):
     """Build a SQL WHERE clause filtering by validation_ts (inclusive date range)."""
+    if start_date is None or end_date is None:
+        return "TRUE"
     start_s = start_date.isoformat()
     end_s = end_date.isoformat()
     return f"validation_ts::date BETWEEN '{start_s}' AND '{end_s}'"
@@ -1974,7 +1989,7 @@ if st.session_state["active_page"] == "dashboard":
     st.divider()
 
     if "dashboard_date_filter" not in st.session_state:
-        st.session_state["dashboard_date_filter"] = "Past 30 days"
+        st.session_state["dashboard_date_filter"] = "All time"
     if "dashboard_custom_start" not in st.session_state:
         st.session_state["dashboard_custom_start"] = datetime.utcnow().date() - timedelta(days=29)
     if "dashboard_custom_end" not in st.session_state:
@@ -1988,9 +2003,11 @@ if st.session_state["active_page"] == "dashboard":
             with st.popover("🔎 Filter", use_container_width=True):
                 st.session_state["dashboard_date_filter"] = st.selectbox(
                     "Date range",
-                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
-                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
-                        st.session_state["dashboard_date_filter"]
+                    DATE_FILTER_OPTIONS,
+                    index=(
+                        DATE_FILTER_OPTIONS.index(st.session_state["dashboard_date_filter"])
+                        if st.session_state["dashboard_date_filter"] in DATE_FILTER_OPTIONS
+                        else 0
                     ),
                 )
                 if st.session_state["dashboard_date_filter"] == "Custom":
@@ -2008,9 +2025,11 @@ if st.session_state["active_page"] == "dashboard":
             with st.expander("🔎 Filter", expanded=False):
                 st.session_state["dashboard_date_filter"] = st.selectbox(
                     "Date range",
-                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
-                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
-                        st.session_state["dashboard_date_filter"]
+                    DATE_FILTER_OPTIONS,
+                    index=(
+                        DATE_FILTER_OPTIONS.index(st.session_state["dashboard_date_filter"])
+                        if st.session_state["dashboard_date_filter"] in DATE_FILTER_OPTIONS
+                        else 0
                     ),
                 )
                 if st.session_state["dashboard_date_filter"] == "Custom":
@@ -2031,7 +2050,10 @@ if st.session_state["active_page"] == "dashboard":
         st.session_state.get("dashboard_custom_end"),
     )
     where_clause = _build_validation_ts_where_clause(start_date, end_date)
-    st.caption(f"Showing results from {start_date.isoformat()} to {end_date.isoformat()}")
+    if start_date is None or end_date is None:
+        st.caption("Showing all time validations")
+    else:
+        st.caption(f"Showing results from {start_date.isoformat()} to {end_date.isoformat()}")
 
     DASHBOARD_TABLE = "table_validation.validation_results"
 
@@ -2061,10 +2083,6 @@ if st.session_state["active_page"] == "dashboard":
 
 
     result = normalize_result(result)
-    # Initialize the session counter once from DB baseline (do not overwrite afterwards)
-    if not st.session_state.get("total_validation_runs_counter_initialized", False):
-        st.session_state["total_validation_runs_counter"] = result.get("total_runs", 0)
-        st.session_state["total_validation_runs_counter_initialized"] = True
     row_fail = result["row_count_fail"]
     schema_fail = result["schema_fail"]
     numeric_fail = result["numeric_fail"]
@@ -2076,7 +2094,7 @@ if st.session_state["active_page"] == "dashboard":
     c1.metric("📂 Tables Validated", result["tables_validated"])
     c2.metric(
         "🧪 Total Validation Runs",
-        st.session_state.get("total_validation_runs_counter", result.get("total_runs", 0)),
+        result.get("total_runs", 0),
     )
     c3.metric("✅ Row Count Passed", result["row_count_pass"])
 
@@ -2156,9 +2174,11 @@ if st.session_state["active_page"] == "results":
             with st.popover("🔎 Filter", use_container_width=True):
                 st.session_state["results_date_filter"] = st.selectbox(
                     "Date range",
-                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
-                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
-                        st.session_state["results_date_filter"]
+                    DATE_FILTER_OPTIONS,
+                    index=(
+                        DATE_FILTER_OPTIONS.index(st.session_state["results_date_filter"])
+                        if st.session_state["results_date_filter"] in DATE_FILTER_OPTIONS
+                        else DATE_FILTER_OPTIONS.index("Past 30 days")
                     ),
                     key="results_date_filter_select",
                 )
@@ -2177,9 +2197,11 @@ if st.session_state["active_page"] == "results":
             with st.expander("🔎 Filter", expanded=False):
                 st.session_state["results_date_filter"] = st.selectbox(
                     "Date range",
-                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
-                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
-                        st.session_state["results_date_filter"]
+                    DATE_FILTER_OPTIONS,
+                    index=(
+                        DATE_FILTER_OPTIONS.index(st.session_state["results_date_filter"])
+                        if st.session_state["results_date_filter"] in DATE_FILTER_OPTIONS
+                        else DATE_FILTER_OPTIONS.index("Past 30 days")
                     ),
                     key="results_date_filter_select",
                 )
@@ -2202,7 +2224,10 @@ if st.session_state["active_page"] == "results":
     )
     results_where = _build_validation_ts_where_clause(r_start, r_end)
     with results_left:
-        st.caption(f"Showing results from {r_start.isoformat()} to {r_end.isoformat()}")
+        if r_start is None or r_end is None:
+            st.caption("Showing all time validations")
+        else:
+            st.caption(f"Showing results from {r_start.isoformat()} to {r_end.isoformat()}")
     
     RESULTS_QUERY = f"""
         SELECT
