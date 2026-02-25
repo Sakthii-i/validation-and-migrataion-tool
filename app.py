@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
@@ -109,6 +109,36 @@ def get_dashboard_postgres_conn():
         password=POSTGRES_CONFIG["password"],
         sslmode=POSTGRES_CONFIG["sslmode"],
     )
+
+
+def _compute_date_range(filter_key: str, custom_start=None, custom_end=None):
+    """Returns (start_date, end_date) as datetime.date objects."""
+    today = datetime.utcnow().date()
+
+    if filter_key == "Today":
+        return today, today
+    if filter_key == "Past 3 days":
+        return today - timedelta(days=2), today
+    if filter_key == "Past 15 days":
+        return today - timedelta(days=14), today
+    if filter_key == "Past 30 days":
+        return today - timedelta(days=29), today
+
+    # Custom
+    if custom_start is None:
+        custom_start = today
+    if custom_end is None:
+        custom_end = today
+    if custom_start > custom_end:
+        custom_start, custom_end = custom_end, custom_start
+    return custom_start, custom_end
+
+
+def _build_validation_ts_where_clause(start_date, end_date):
+    """Build a SQL WHERE clause filtering by validation_ts (inclusive date range)."""
+    start_s = start_date.isoformat()
+    end_s = end_date.isoformat()
+    return f"validation_ts::date BETWEEN '{start_s}' AND '{end_s}'"
 
 
 # ✅ ADD THIS
@@ -1871,6 +1901,66 @@ if st.session_state["active_page"] == "dashboard":
 
     st.divider()
 
+    if "dashboard_date_filter" not in st.session_state:
+        st.session_state["dashboard_date_filter"] = "Past 30 days"
+    if "dashboard_custom_start" not in st.session_state:
+        st.session_state["dashboard_custom_start"] = datetime.utcnow().date() - timedelta(days=29)
+    if "dashboard_custom_end" not in st.session_state:
+        st.session_state["dashboard_custom_end"] = datetime.utcnow().date()
+
+    header_left, header_right = st.columns([0.75, 0.25])
+    with header_right:
+        # Prefer popover (filter icon UX). Fall back to expander if running on older Streamlit.
+        popover = getattr(st, "popover", None)
+        if callable(popover):
+            with st.popover("🔎 Filter", use_container_width=True):
+                st.session_state["dashboard_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["dashboard_date_filter"]
+                    ),
+                )
+                if st.session_state["dashboard_date_filter"] == "Custom":
+                    st.session_state["dashboard_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["dashboard_custom_start"],
+                        key="dashboard_custom_start_picker",
+                    )
+                    st.session_state["dashboard_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["dashboard_custom_end"],
+                        key="dashboard_custom_end_picker",
+                    )
+        else:
+            with st.expander("🔎 Filter", expanded=False):
+                st.session_state["dashboard_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["dashboard_date_filter"]
+                    ),
+                )
+                if st.session_state["dashboard_date_filter"] == "Custom":
+                    st.session_state["dashboard_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["dashboard_custom_start"],
+                        key="dashboard_custom_start_picker",
+                    )
+                    st.session_state["dashboard_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["dashboard_custom_end"],
+                        key="dashboard_custom_end_picker",
+                    )
+
+    start_date, end_date = _compute_date_range(
+        st.session_state["dashboard_date_filter"],
+        st.session_state.get("dashboard_custom_start"),
+        st.session_state.get("dashboard_custom_end"),
+    )
+    where_clause = _build_validation_ts_where_clause(start_date, end_date)
+    st.caption(f"Showing results from {start_date.isoformat()} to {end_date.isoformat()}")
+
     DASHBOARD_TABLE = "table_validation.validation_results"
 
     dashboard_query = f"""
@@ -1887,6 +1977,7 @@ if st.session_state["active_page"] == "dashboard":
             SUM(CASE WHEN numeric_check = 'FAIL' THEN 1 ELSE 0 END) AS numeric_fail,
             SUM(CASE WHEN hash_validation = 'FAIL' THEN 1 ELSE 0 END) AS row_hash_fail
         FROM {DASHBOARD_TABLE}
+        WHERE {where_clause}
     """
     dashboard_conn = get_dashboard_postgres_conn()
 
@@ -1971,8 +2062,70 @@ if st.session_state["active_page"] == "results":
 
     # 🔹 Postgres connection (dashboard/results use only)
     results_conn = get_dashboard_postgres_conn()
+
+    if "results_date_filter" not in st.session_state:
+        st.session_state["results_date_filter"] = "Past 30 days"
+    if "results_custom_start" not in st.session_state:
+        st.session_state["results_custom_start"] = datetime.utcnow().date() - timedelta(days=29)
+    if "results_custom_end" not in st.session_state:
+        st.session_state["results_custom_end"] = datetime.utcnow().date()
+
+    results_left, results_right = st.columns([0.75, 0.25])
+    with results_right:
+        popover = getattr(st, "popover", None)
+        if callable(popover):
+            with st.popover("🔎 Filter", use_container_width=True):
+                st.session_state["results_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["results_date_filter"]
+                    ),
+                    key="results_date_filter_select",
+                )
+                if st.session_state["results_date_filter"] == "Custom":
+                    st.session_state["results_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["results_custom_start"],
+                        key="results_custom_start_picker",
+                    )
+                    st.session_state["results_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["results_custom_end"],
+                        key="results_custom_end_picker",
+                    )
+        else:
+            with st.expander("🔎 Filter", expanded=False):
+                st.session_state["results_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["results_date_filter"]
+                    ),
+                    key="results_date_filter_select",
+                )
+                if st.session_state["results_date_filter"] == "Custom":
+                    st.session_state["results_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["results_custom_start"],
+                        key="results_custom_start_picker",
+                    )
+                    st.session_state["results_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["results_custom_end"],
+                        key="results_custom_end_picker",
+                    )
+
+    r_start, r_end = _compute_date_range(
+        st.session_state["results_date_filter"],
+        st.session_state.get("results_custom_start"),
+        st.session_state.get("results_custom_end"),
+    )
+    results_where = _build_validation_ts_where_clause(r_start, r_end)
+    with results_left:
+        st.caption(f"Showing results from {r_start.isoformat()} to {r_end.isoformat()}")
     
-    RESULTS_QUERY = """
+    RESULTS_QUERY = f"""
         SELECT
             validation_id,
             validation_ts,
@@ -1984,6 +2137,7 @@ if st.session_state["active_page"] == "results":
             numeric_check,
             schema_check
         FROM table_validation.validation_results
+        WHERE {results_where}
         ORDER BY validation_ts DESC
     """
 
