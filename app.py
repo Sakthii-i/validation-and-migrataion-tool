@@ -14,6 +14,7 @@ os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
 import base64
 import json
+import re
 
 DEFAULT_CONFIG = {
   "validation_framework": {
@@ -151,6 +152,70 @@ def normalize_result(row: dict):
     to handle engine-specific casing differences
     """
     return {k.lower(): v for k, v in row.items()}
+
+
+def friendly_error(exc) -> str:
+    """
+    Convert exceptions into a cleaned, user-friendly message.
+
+    Behavior:
+    - Map common DB/Databricks/Postgres errors to helpful messages
+    - Strip SQLSTATE codes, Databricks prefixes, line/position refs, Java classpaths
+    - Truncate to 200 chars and provide a generic fallback message
+    """
+    s = "" if exc is None else str(exc)
+
+    # Specific mappings (best-effort)
+    low = s.lower()
+    # Column unresolved / SQLSTATE 42703
+    if re.search(r"unresolved_column|sqlstate\s*:?\s*42703|cannot be resolved|column .*not found", low, re.I):
+        # try to extract a column name
+        m = re.search(r"['\"]?([a-zA-Z_][a-zA-Z0-9_]*)['\"]?\s*(?:cannot be resolved|not found|was not found)", s, re.I)
+        if not m:
+            m = re.search(r"column\s+([a-zA-Z_][a-zA-Z0-9_]*)", s, re.I)
+        if m:
+            col = m.group(1)
+            return f"Column '{col}' not found in target table. Run Schema Validation first to identify mismatches."
+        return "Column not found in target table. Run Schema Validation first to identify mismatches."
+
+    # Table not found
+    if re.search(r"table not found|table_not_found|does not exist|table .*does not exist", low, re.I):
+        return "Table not found — check catalog, schema, table name"
+
+    # Permission issues
+    if re.search(r"permission denied|access denied|insufficient privilege|not authorized|authorization failed", low, re.I):
+        return "Permission denied — check credentials have SELECT access"
+
+    # Query timeout
+    if re.search(r"timed out|timeout|query.*timed out", low, re.I):
+        return "Query timed out — table may be too large"
+
+    # Postgres socket/connect issues
+    if re.search(r"could not connect to server|socket|could not connect|connection refused|no such file or directory", low, re.I):
+        return "Could not connect to database — check your credentials"
+
+    # General cleanup steps
+    # 1) strip SQLSTATE fragments
+    s = re.sub(r";?\s*SQLSTATE: ?[0-9A-Z]+;?", "", s, flags=re.I)
+    # 2) strip databricks/unresolved prefixes like [UNRESOLVED_COLUMN.WITH_SUGGESTION]
+    s = re.sub(r"\[[A-Z0-9_\.\-]+\]", "", s)
+    # 3) strip line/pos references
+    s = re.sub(r"line\s*\d+\s*pos\s*\d+", "", s, flags=re.I)
+    s = re.sub(r"line\s*\d+", "", s, flags=re.I)
+    s = re.sub(r"pos\s*\d+", "", s, flags=re.I)
+    # 4) strip Java classpaths (simple heuristic)
+    s = re.sub(r"org\.apache[\.\w\$]*", "", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if not s:
+        return "An unexpected error occurred — check your table names and connection."
+
+    # Truncate to 200 chars
+    if len(s) > 200:
+        s = s[:197].rstrip() + "..."
+
+    return s
 
 st.set_page_config(page_title="Reconciliation Framework", layout="wide")
 DATA_TYPE_EQUIVALENCE = {
@@ -327,7 +392,7 @@ def insert_validation_result(conn, record):
         try:
             ensure_validation_table(pg)
         except Exception as e:
-            st.warning(f"Could not create validation table: {e}")
+            st.warning(f"Could not create validation table: {friendly_error(e)}")
             # continue to attempt insert
 
         cur = pg.cursor()
@@ -367,7 +432,7 @@ def insert_validation_result(conn, record):
         return record.get("validation_id")
 
     except Exception as e:
-        st.error(f"Insert to Postgres failed: {e}")
+        st.error(f"Insert to Postgres failed: {friendly_error(e)}")
         import traceback
         traceback.print_exc()
         try:
@@ -1257,7 +1322,7 @@ def run_row_hash_validation(
                         else:
                             st.info("No sample rows found")
                 except Exception as e:
-                    st.error(f"Could not fetch source-only rows: {str(e)[:200]}")
+                    st.error(f"Could not fetch source-only rows: {friendly_error(e)}")
 
             if extra_in_target and len(extra_in_target) > 0:
                 st.subheader("🟢 Target-Only Rows (in target, NOT in source)")
@@ -1295,7 +1360,7 @@ def run_row_hash_validation(
                         else:
                             st.info("No sample rows found")
                 except Exception as e:
-                    st.error(f"Could not fetch target-only rows: {str(e)[:200]}")
+                    st.error(f"Could not fetch target-only rows: {friendly_error(e)}")
 
             # Automatic column diff if both samples exist
             if df_missing is not None and df_extra is not None and len(sig_cols) > 0:
@@ -1350,17 +1415,17 @@ def run_row_hash_validation(
                                             st.markdown(f"📊 **TARGET:** `{tgt_val}`")
                                         st.divider()
                                     except Exception as e:
-                                        st.warning(f"Could not display column {col}: {str(e)[:100]}")
+                                        st.warning(f"Could not display column {col}: {friendly_error(e)}")
                             else:
                                 st.info("✓ Sample rows have matching column values; hash mismatch stems from row presence rather than value differences.")
                         else:
                             st.warning("Could not extract column values from signature rows for comparison.")
                     except Exception as e:
-                        st.error(f"Error comparing rows: {str(e)[:300]}")
+                        st.error(f"Error comparing rows: {friendly_error(e)}")
 
 
         except Exception as e:
-            st.warning(f"Could not build detailed column breakdown: {str(e)[:200]}")
+            st.warning(f"Could not build detailed column breakdown: {friendly_error(e)}")
 
         return False
 def approx_equal(a, b, tol=1e-6):
@@ -2161,7 +2226,7 @@ if connect_clicked:
 
 
     except Exception as e:
-        st.error(f"❌ Connection failed: {e}")
+        st.error(f"❌ Connection failed: {friendly_error(e)}")
 if not st.session_state.get("source_conn") or not st.session_state.get("target_conn"):
     st.info("🔌 Please establish connections to continue")
     st.stop()
@@ -2249,7 +2314,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
             st.session_state["validation_config"] = json.loads(config_text)
             st.success("Config loaded successfully")
         except Exception as e:
-            st.error(f"Invalid JSON: {e}")
+            st.error(f"Invalid JSON: {friendly_error(e)}")
     if "validation_config" in st.session_state:
 
         tables = parse_config_tables(st.session_state["validation_config"])
@@ -2762,7 +2827,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 st.success("🎉 Manual validations completed")
 
             except Exception as e:
-                st.error(str(e))
+                st.error(friendly_error(e))
 
 
 with tab_csv:
@@ -2848,7 +2913,7 @@ with tab_csv:
                 run_csv_validations(df)
                 st.success("🎉 All CSV validations completed")
             except Exception as e:
-                st.error(f"❌ {str(e)}")
+                st.error(f"❌ {friendly_error(e)}")
 
 
 
@@ -3393,4 +3458,4 @@ with tab_browse:
             st.success("🎉 Browse validations completed")
 
         except Exception as e:
-            st.error(str(e))
+            st.error(friendly_error(e))
