@@ -145,6 +145,12 @@ def _build_validation_ts_where_clause(start_date, end_date):
 def missing(values):
     return any(v is None or v == "" for v in values)
 
+
+def _trim_text(val):
+    if isinstance(val, str):
+        return val.strip()
+    return val
+
 def execute_query(engine, conn, query):
     """
     Executes query and returns result as dict / list of dicts
@@ -2180,19 +2186,19 @@ with left:
     st.markdown("### 🧩 Source Engine")
 
     if source_engine == "BigQuery":
-        project_id = st.text_input("GCP Project ID")
-        dataset_location = st.text_input("Dataset Location", value="US")
-        bq_key_path = st.text_input("Service Account Key Path")
+        project_id = _trim_text(st.text_input("GCP Project ID"))
+        dataset_location = _trim_text(st.text_input("Dataset Location", value="US"))
+        bq_key_path = _trim_text(st.text_input("Service Account Key Path"))
         # persist BigQuery creds in session
         st.session_state["project_id"] = project_id
         st.session_state["dataset_location"] = dataset_location
         st.session_state["bq_key_path"] = bq_key_path
     elif source_engine == "Snowflake":
-        sf_account = st.text_input("Account")
-        sf_user = st.text_input("Username")
-        sf_password = st.text_input("Password", type="password")
-        sf_warehouse = st.text_input("Warehouse")
-        sf_role = st.text_input("Role")
+        sf_account = _trim_text(st.text_input("Account"))
+        sf_user = _trim_text(st.text_input("Username"))
+        sf_password = _trim_text(st.text_input("Password", type="password"))
+        sf_warehouse = _trim_text(st.text_input("Warehouse"))
+        sf_role = _trim_text(st.text_input("Role"))
         # persist Snowflake creds in session
         st.session_state["sf_account"] = sf_account
         st.session_state["sf_user"] = sf_user
@@ -2206,9 +2212,9 @@ with left:
 with right:
     st.markdown("### 🎯 Databricks")
 
-    dbx_server = st.text_input("Databricks Server Hostname")
-    dbx_http_path = st.text_input("HTTP Path")
-    dbx_token = st.text_input("Access Token", type="password")
+    dbx_server = _trim_text(st.text_input("Databricks Server Hostname"))
+    dbx_http_path = _trim_text(st.text_input("HTTP Path"))
+    dbx_token = _trim_text(st.text_input("Access Token", type="password"))
     # persist Databricks creds in session
     st.session_state["dbx_server"] = dbx_server
     st.session_state["dbx_http_path"] = dbx_http_path
