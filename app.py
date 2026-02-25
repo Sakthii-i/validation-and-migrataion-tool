@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
@@ -14,6 +14,7 @@ os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
 import base64
 import json
+import re
 
 DEFAULT_CONFIG = {
   "validation_framework": {
@@ -111,9 +112,45 @@ def get_dashboard_postgres_conn():
     )
 
 
+def _compute_date_range(filter_key: str, custom_start=None, custom_end=None):
+    """Returns (start_date, end_date) as datetime.date objects."""
+    today = datetime.utcnow().date()
+
+    if filter_key == "Today":
+        return today, today
+    if filter_key == "Past 3 days":
+        return today - timedelta(days=2), today
+    if filter_key == "Past 15 days":
+        return today - timedelta(days=14), today
+    if filter_key == "Past 30 days":
+        return today - timedelta(days=29), today
+
+    # Custom
+    if custom_start is None:
+        custom_start = today
+    if custom_end is None:
+        custom_end = today
+    if custom_start > custom_end:
+        custom_start, custom_end = custom_end, custom_start
+    return custom_start, custom_end
+
+
+def _build_validation_ts_where_clause(start_date, end_date):
+    """Build a SQL WHERE clause filtering by validation_ts (inclusive date range)."""
+    start_s = start_date.isoformat()
+    end_s = end_date.isoformat()
+    return f"validation_ts::date BETWEEN '{start_s}' AND '{end_s}'"
+
+
 # ✅ ADD THIS
 def missing(values):
     return any(v is None or v == "" for v in values)
+
+
+def _trim_text(val):
+    if isinstance(val, str):
+        return val.strip()
+    return val
 
 def execute_query(engine, conn, query):
     """
@@ -151,6 +188,70 @@ def normalize_result(row: dict):
     to handle engine-specific casing differences
     """
     return {k.lower(): v for k, v in row.items()}
+
+
+def friendly_error(exc) -> str:
+    """
+    Convert exceptions into a cleaned, user-friendly message.
+
+    Behavior:
+    - Map common DB/Databricks/Postgres errors to helpful messages
+    - Strip SQLSTATE codes, Databricks prefixes, line/position refs, Java classpaths
+    - Truncate to 200 chars and provide a generic fallback message
+    """
+    s = "" if exc is None else str(exc)
+
+    # Specific mappings (best-effort)
+    low = s.lower()
+    # Column unresolved / SQLSTATE 42703
+    if re.search(r"unresolved_column|sqlstate\s*:?\s*42703|cannot be resolved|column .*not found", low, re.I):
+        # try to extract a column name
+        m = re.search(r"['\"]?([a-zA-Z_][a-zA-Z0-9_]*)['\"]?\s*(?:cannot be resolved|not found|was not found)", s, re.I)
+        if not m:
+            m = re.search(r"column\s+([a-zA-Z_][a-zA-Z0-9_]*)", s, re.I)
+        if m:
+            col = m.group(1)
+            return f"Column '{col}' not found in target table. Run Schema Validation first to identify mismatches."
+        return "Column not found in target table. Run Schema Validation first to identify mismatches."
+
+    # Table not found
+    if re.search(r"table not found|table_not_found|does not exist|table .*does not exist", low, re.I):
+        return "Table not found — check catalog, schema, table name"
+
+    # Permission issues
+    if re.search(r"permission denied|access denied|insufficient privilege|not authorized|authorization failed", low, re.I):
+        return "Permission denied — check credentials have SELECT access"
+
+    # Query timeout
+    if re.search(r"timed out|timeout|query.*timed out", low, re.I):
+        return "Query timed out — table may be too large"
+
+    # Postgres socket/connect issues
+    if re.search(r"could not connect to server|socket|could not connect|connection refused|no such file or directory", low, re.I):
+        return "Could not connect to database — check your credentials"
+
+    # General cleanup steps
+    # 1) strip SQLSTATE fragments
+    s = re.sub(r";?\s*SQLSTATE: ?[0-9A-Z]+;?", "", s, flags=re.I)
+    # 2) strip databricks/unresolved prefixes like [UNRESOLVED_COLUMN.WITH_SUGGESTION]
+    s = re.sub(r"\[[A-Z0-9_\.\-]+\]", "", s)
+    # 3) strip line/pos references
+    s = re.sub(r"line\s*\d+\s*pos\s*\d+", "", s, flags=re.I)
+    s = re.sub(r"line\s*\d+", "", s, flags=re.I)
+    s = re.sub(r"pos\s*\d+", "", s, flags=re.I)
+    # 4) strip Java classpaths (simple heuristic)
+    s = re.sub(r"org\.apache[\.\w\$]*", "", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if not s:
+        return "An unexpected error occurred — check your table names and connection."
+
+    # Truncate to 200 chars
+    if len(s) > 200:
+        s = s[:197].rstrip() + "..."
+
+    return s
 
 st.set_page_config(page_title="Reconciliation Framework", layout="wide")
 DATA_TYPE_EQUIVALENCE = {
@@ -328,7 +429,7 @@ def insert_validation_result(conn, record):
         try:
             ensure_validation_table(pg)
         except Exception as e:
-            st.warning(f"Could not create validation table: {e}")
+            st.warning(f"Could not create validation table: {friendly_error(e)}")
             # continue to attempt insert
 
         cur = pg.cursor()
@@ -368,7 +469,7 @@ def insert_validation_result(conn, record):
         return record.get("validation_id")
 
     except Exception as e:
-        st.error(f"Insert to Postgres failed: {e}")
+        st.error(f"Insert to Postgres failed: {friendly_error(e)}")
         import traceback
         traceback.print_exc()
         try:
@@ -1258,7 +1359,7 @@ def run_row_hash_validation(
                         else:
                             st.info("No sample rows found")
                 except Exception as e:
-                    st.error(f"Could not fetch source-only rows: {str(e)[:200]}")
+                    st.error(f"Could not fetch source-only rows: {friendly_error(e)}")
 
             if extra_in_target and len(extra_in_target) > 0:
                 st.subheader("🟢 Target-Only Rows (in target, NOT in source)")
@@ -1296,7 +1397,7 @@ def run_row_hash_validation(
                         else:
                             st.info("No sample rows found")
                 except Exception as e:
-                    st.error(f"Could not fetch target-only rows: {str(e)[:200]}")
+                    st.error(f"Could not fetch target-only rows: {friendly_error(e)}")
 
             # Automatic column diff if both samples exist
             if df_missing is not None and df_extra is not None and len(sig_cols) > 0:
@@ -1351,17 +1452,17 @@ def run_row_hash_validation(
                                             st.markdown(f"📊 **TARGET:** `{tgt_val}`")
                                         st.divider()
                                     except Exception as e:
-                                        st.warning(f"Could not display column {col}: {str(e)[:100]}")
+                                        st.warning(f"Could not display column {col}: {friendly_error(e)}")
                             else:
                                 st.info("✓ Sample rows have matching column values; hash mismatch stems from row presence rather than value differences.")
                         else:
                             st.warning("Could not extract column values from signature rows for comparison.")
                     except Exception as e:
-                        st.error(f"Error comparing rows: {str(e)[:300]}")
+                        st.error(f"Error comparing rows: {friendly_error(e)}")
 
 
         except Exception as e:
-            st.warning(f"Could not build detailed column breakdown: {str(e)[:200]}")
+            st.warning(f"Could not build detailed column breakdown: {friendly_error(e)}")
 
         return False
 def approx_equal(a, b, tol=1e-6):
@@ -1872,6 +1973,66 @@ if st.session_state["active_page"] == "dashboard":
 
     st.divider()
 
+    if "dashboard_date_filter" not in st.session_state:
+        st.session_state["dashboard_date_filter"] = "Past 30 days"
+    if "dashboard_custom_start" not in st.session_state:
+        st.session_state["dashboard_custom_start"] = datetime.utcnow().date() - timedelta(days=29)
+    if "dashboard_custom_end" not in st.session_state:
+        st.session_state["dashboard_custom_end"] = datetime.utcnow().date()
+
+    header_left, header_right = st.columns([0.75, 0.25])
+    with header_right:
+        # Prefer popover (filter icon UX). Fall back to expander if running on older Streamlit.
+        popover = getattr(st, "popover", None)
+        if callable(popover):
+            with st.popover("🔎 Filter", use_container_width=True):
+                st.session_state["dashboard_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["dashboard_date_filter"]
+                    ),
+                )
+                if st.session_state["dashboard_date_filter"] == "Custom":
+                    st.session_state["dashboard_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["dashboard_custom_start"],
+                        key="dashboard_custom_start_picker",
+                    )
+                    st.session_state["dashboard_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["dashboard_custom_end"],
+                        key="dashboard_custom_end_picker",
+                    )
+        else:
+            with st.expander("🔎 Filter", expanded=False):
+                st.session_state["dashboard_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["dashboard_date_filter"]
+                    ),
+                )
+                if st.session_state["dashboard_date_filter"] == "Custom":
+                    st.session_state["dashboard_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["dashboard_custom_start"],
+                        key="dashboard_custom_start_picker",
+                    )
+                    st.session_state["dashboard_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["dashboard_custom_end"],
+                        key="dashboard_custom_end_picker",
+                    )
+
+    start_date, end_date = _compute_date_range(
+        st.session_state["dashboard_date_filter"],
+        st.session_state.get("dashboard_custom_start"),
+        st.session_state.get("dashboard_custom_end"),
+    )
+    where_clause = _build_validation_ts_where_clause(start_date, end_date)
+    st.caption(f"Showing results from {start_date.isoformat()} to {end_date.isoformat()}")
+
     DASHBOARD_TABLE = "table_validation.validation_results"
 
     dashboard_query = f"""
@@ -1888,6 +2049,7 @@ if st.session_state["active_page"] == "dashboard":
             SUM(CASE WHEN numeric_check = 'FAIL' THEN 1 ELSE 0 END) AS numeric_fail,
             SUM(CASE WHEN hash_validation = 'FAIL' THEN 1 ELSE 0 END) AS row_hash_fail
         FROM {DASHBOARD_TABLE}
+        WHERE {where_clause}
     """
     dashboard_conn = get_dashboard_postgres_conn()
 
@@ -1979,8 +2141,70 @@ if st.session_state["active_page"] == "results":
 
     # 🔹 Postgres connection (dashboard/results use only)
     results_conn = get_dashboard_postgres_conn()
+
+    if "results_date_filter" not in st.session_state:
+        st.session_state["results_date_filter"] = "Past 30 days"
+    if "results_custom_start" not in st.session_state:
+        st.session_state["results_custom_start"] = datetime.utcnow().date() - timedelta(days=29)
+    if "results_custom_end" not in st.session_state:
+        st.session_state["results_custom_end"] = datetime.utcnow().date()
+
+    results_left, results_right = st.columns([0.75, 0.25])
+    with results_right:
+        popover = getattr(st, "popover", None)
+        if callable(popover):
+            with st.popover("🔎 Filter", use_container_width=True):
+                st.session_state["results_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["results_date_filter"]
+                    ),
+                    key="results_date_filter_select",
+                )
+                if st.session_state["results_date_filter"] == "Custom":
+                    st.session_state["results_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["results_custom_start"],
+                        key="results_custom_start_picker",
+                    )
+                    st.session_state["results_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["results_custom_end"],
+                        key="results_custom_end_picker",
+                    )
+        else:
+            with st.expander("🔎 Filter", expanded=False):
+                st.session_state["results_date_filter"] = st.selectbox(
+                    "Date range",
+                    ["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"],
+                    index=["Today", "Past 3 days", "Past 15 days", "Past 30 days", "Custom"].index(
+                        st.session_state["results_date_filter"]
+                    ),
+                    key="results_date_filter_select",
+                )
+                if st.session_state["results_date_filter"] == "Custom":
+                    st.session_state["results_custom_start"] = st.date_input(
+                        "Start date",
+                        value=st.session_state["results_custom_start"],
+                        key="results_custom_start_picker",
+                    )
+                    st.session_state["results_custom_end"] = st.date_input(
+                        "End date",
+                        value=st.session_state["results_custom_end"],
+                        key="results_custom_end_picker",
+                    )
+
+    r_start, r_end = _compute_date_range(
+        st.session_state["results_date_filter"],
+        st.session_state.get("results_custom_start"),
+        st.session_state.get("results_custom_end"),
+    )
+    results_where = _build_validation_ts_where_clause(r_start, r_end)
+    with results_left:
+        st.caption(f"Showing results from {r_start.isoformat()} to {r_end.isoformat()}")
     
-    RESULTS_QUERY = """
+    RESULTS_QUERY = f"""
         SELECT
             validation_id,
             validation_ts,
@@ -1992,6 +2216,7 @@ if st.session_state["active_page"] == "results":
             numeric_check,
             schema_check
         FROM table_validation.validation_results
+        WHERE {results_where}
         ORDER BY validation_ts DESC
     """
 
@@ -2034,19 +2259,19 @@ with left:
     st.markdown("### 🧩 Source Engine")
 
     if source_engine == "BigQuery":
-        project_id = st.text_input("GCP Project ID")
-        dataset_location = st.text_input("Dataset Location", value="US")
-        bq_key_path = st.text_input("Service Account Key Path")
+        project_id = _trim_text(st.text_input("GCP Project ID"))
+        dataset_location = _trim_text(st.text_input("Dataset Location", value="US"))
+        bq_key_path = _trim_text(st.text_input("Service Account Key Path"))
         # persist BigQuery creds in session
         st.session_state["project_id"] = project_id
         st.session_state["dataset_location"] = dataset_location
         st.session_state["bq_key_path"] = bq_key_path
     elif source_engine == "Snowflake":
-        sf_account = st.text_input("Account")
-        sf_user = st.text_input("Username")
-        sf_password = st.text_input("Password", type="password")
-        sf_warehouse = st.text_input("Warehouse")
-        sf_role = st.text_input("Role")
+        sf_account = _trim_text(st.text_input("Account"))
+        sf_user = _trim_text(st.text_input("Username"))
+        sf_password = _trim_text(st.text_input("Password", type="password"))
+        sf_warehouse = _trim_text(st.text_input("Warehouse"))
+        sf_role = _trim_text(st.text_input("Role"))
         # persist Snowflake creds in session
         st.session_state["sf_account"] = sf_account
         st.session_state["sf_user"] = sf_user
@@ -2060,9 +2285,9 @@ with left:
 with right:
     st.markdown("### 🎯 Databricks")
 
-    dbx_server = st.text_input("Databricks Server Hostname")
-    dbx_http_path = st.text_input("HTTP Path")
-    dbx_token = st.text_input("Access Token", type="password")
+    dbx_server = _trim_text(st.text_input("Databricks Server Hostname"))
+    dbx_http_path = _trim_text(st.text_input("HTTP Path"))
+    dbx_token = _trim_text(st.text_input("Access Token", type="password"))
     # persist Databricks creds in session
     st.session_state["dbx_server"] = dbx_server
     st.session_state["dbx_http_path"] = dbx_http_path
@@ -2172,7 +2397,7 @@ if connect_clicked:
 
 
     except Exception as e:
-        st.error(f"❌ Connection failed: {e}")
+        st.error(f"❌ Connection failed: {friendly_error(e)}")
 if not st.session_state.get("source_conn") or not st.session_state.get("target_conn"):
     st.info("🔌 Please establish connections to continue")
     st.stop()
@@ -2260,7 +2485,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
             st.session_state["validation_config"] = json.loads(config_text)
             st.success("Config loaded successfully")
         except Exception as e:
-            st.error(f"Invalid JSON: {e}")
+            st.error(f"Invalid JSON: {friendly_error(e)}")
     if "validation_config" in st.session_state:
 
         tables = parse_config_tables(st.session_state["validation_config"])
@@ -2779,7 +3004,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 st.success("🎉 Manual validations completed")
 
             except Exception as e:
-                st.error(str(e))
+                st.error(friendly_error(e))
 
 
 with tab_csv:
@@ -2869,7 +3094,7 @@ with tab_csv:
                 st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
                 st.success("🎉 All CSV validations completed")
             except Exception as e:
-                st.error(f"❌ {str(e)}")
+                st.error(f"❌ {friendly_error(e)}")
 
 
 
@@ -3417,4 +3642,4 @@ with tab_browse:
             st.success("🎉 Browse validations completed")
 
         except Exception as e:
-            st.error(str(e))
+            st.error(friendly_error(e))
