@@ -278,7 +278,8 @@ def generate_validation_record(
     """
     return {
         "validation_id": str(uuid.uuid4()),
-        "timestamp": datetime.utcnow().isoformat(),
+            # Use a run-level timestamp if present so multiple inserts in one run share the same ts
+            "timestamp": st.session_state.get("current_run_ts", datetime.utcnow().isoformat()),
         "src_table_name": f"{src['catalog']}.{src['schema']}.{src['table']}",
         "tgt_table_name": f"{tgt['catalog']}.{tgt['schema']}.{tgt['table']}",
         "validation_type": validation_type,
@@ -1877,7 +1878,7 @@ if st.session_state["active_page"] == "dashboard":
         SELECT
             --COUNT(DISTINCT concat(catalog,'.',schema,'.',table)) AS tables_validated,
             COUNT(src_table_name) AS tables_validated,
-            COUNT(*) AS total_validations,
+            COUNT(DISTINCT validation_ts) AS total_runs,
             SUM(CASE WHEN row_count = 'PASS' THEN 1 ELSE 0 END) AS row_count_pass,
             SUM(CASE WHEN schema_check = 'PASS' THEN 1 ELSE 0 END) AS schema_pass,
             SUM(CASE WHEN numeric_check = 'PASS' THEN 1 ELSE 0 END) AS numeric_pass,
@@ -1898,6 +1899,10 @@ if st.session_state["active_page"] == "dashboard":
 
 
     result = normalize_result(result)
+    # Initialize the session counter once from DB baseline (do not overwrite afterwards)
+    if not st.session_state.get("total_validation_runs_counter_initialized", False):
+        st.session_state["total_validation_runs_counter"] = result.get("total_runs", 0)
+        st.session_state["total_validation_runs_counter_initialized"] = True
     row_fail = result["row_count_fail"]
     schema_fail = result["schema_fail"]
     numeric_fail = result["numeric_fail"]
@@ -1907,7 +1912,10 @@ if st.session_state["active_page"] == "dashboard":
     c4, c5, c6 = st.columns(3)
 
     c1.metric("📂 Tables Validated", result["tables_validated"])
-    c2.metric("🧪 Total Validations", result["total_validations"])
+    c2.metric(
+        "🧪 Total Validation Runs",
+        st.session_state.get("total_validation_runs_counter", result.get("total_runs", 0)),
+    )
     c3.metric("✅ Row Count Passed", result["row_count_pass"])
 
     c4.metric("📐 Schema Passed", result["schema_pass"])
@@ -2067,6 +2075,7 @@ with right:
 # SESSION STATE INITIALIZATION
 # =============================
 DEFAULT_SESSION_KEYS = {
+    "total_validation_runs_counter": 0,
     "engine": None,
     "source_conn": None,
     "target_conn": None,
@@ -2112,11 +2121,13 @@ DEFAULT_SESSION_KEYS = {
     "include_schema_config": True,
     "include_numeric_config": True,
     "include_hash_config": True,
+    "total_validation_runs_counter_initialized": False,
 }
 
 for key, default in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
 
 
 # =========================================================
@@ -2272,6 +2283,9 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 validation_type=t["validation_type"],
                 metrics=t["metrics"]
             )
+        # Count this config submission as a single validation run
+        st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
+        st.success("🎉 Config-driven validations completed")
 
  with tab_manual:
     validation_type = st.radio(
@@ -2542,7 +2556,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
         # RUN BUTTON
         # =========================
         if st.button("🚀 Run Manual Validations", use_container_width=True):
-
+            # mark a run timestamp so all per-table inserts share the same validation_ts
+            st.session_state["current_run_ts"] = datetime.utcnow().isoformat()
             try:
 
                 # =========================
@@ -2759,6 +2774,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                         else:
                             st.warning("⚠️ No validations selected.")
 
+                # increment run counter by 1 for this execution
+                st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
                 st.success("🎉 Manual validations completed")
 
             except Exception as e:
@@ -2844,8 +2861,12 @@ with tab_csv:
 
         if st.button("🚀 Run CSV Validations", use_container_width=True):
             try:
+                # mark a run timestamp so all per-table inserts share the same validation_ts
+                st.session_state["current_run_ts"] = datetime.utcnow().isoformat()
                 validate_csv(df)
                 run_csv_validations(df)
+                # increment run counter by 1 for this execution
+                st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
                 st.success("🎉 All CSV validations completed")
             except Exception as e:
                 st.error(f"❌ {str(e)}")
@@ -3165,7 +3186,8 @@ with tab_browse:
     # RUN BUTTON
     # =================================================
     if st.button("🚀 Run Browse Validations", use_container_width=True):
-
+        # mark a run timestamp so all per-table inserts share the same validation_ts
+        st.session_state["current_run_ts"] = datetime.utcnow().isoformat()
         try:
             if not st.session_state.get("source_selections") or not st.session_state.get("target_selections"):
                 st.error("❌ Please select source and target tables")
@@ -3390,6 +3412,8 @@ with tab_browse:
                     else:
                         st.warning("⚠️ No validations selected.")
 
+            # increment run counter by 1 for this execution
+            st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
             st.success("🎉 Browse validations completed")
 
         except Exception as e:
