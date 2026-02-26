@@ -14,7 +14,9 @@ os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
 import base64
 import json
+import requests
 import re
+from pathlib import Path
 
 DEFAULT_CONFIG = {
   "validation_framework": {
@@ -166,6 +168,84 @@ def _trim_text(val):
     if isinstance(val, str):
         return val.strip()
     return val
+
+
+def _get_api_base_url() -> str | None:
+    v = os.getenv("VALIDATION_API_BASE_URL")
+    if not v or not v.strip():
+        return None
+    base_url = v.strip().rstrip("/")
+    # 0.0.0.0 is a bind-all address, not a usable client destination.
+    base_url = base_url.replace("://0.0.0.0", "://localhost")
+    return base_url
+
+
+def _get_api_key() -> str | None:
+    # Prefer a single key var; fall back to the first in a comma-separated list.
+    v = os.getenv("VALIDATION_API_KEY")
+    if v and v.strip():
+        return v.strip()
+    v = os.getenv("VALIDATION_API_KEYS")
+    if v and v.strip():
+        return v.split(",")[0].strip()
+    return None
+
+
+def create_backend_session_from_ui(
+    source_engine: str,
+    project_id: str | None,
+    dataset_location: str | None,
+    bq_key_path: str | None,
+    sf_account: str | None,
+    sf_user: str | None,
+    sf_password: str | None,
+    sf_warehouse: str | None,
+    sf_role: str | None,
+    dbx_server: str,
+    dbx_http_path: str,
+    dbx_token: str,
+):
+    base_url = _get_api_base_url()
+    api_key = _get_api_key()
+
+    if not base_url or not api_key:
+        return None
+
+    source_engine_l = (source_engine or "").strip().lower()
+    if source_engine_l == "bigquery":
+        source_payload = {
+            "project_id": (project_id or "").strip(),
+            "dataset_location": (dataset_location or "US").strip(),
+            "service_account_key_path": (bq_key_path or "").strip(),
+        }
+    else:
+        # snowflake
+        source_payload = {
+            "account": (sf_account or "").strip(),
+            "user": (sf_user or "").strip(),
+            "password": (sf_password or "").strip(),
+            "warehouse": (sf_warehouse or "").strip(),
+            "role": (sf_role or "").strip() if sf_role else None,
+        }
+
+    payload = {
+        "source_engine": source_engine_l,
+        "source": source_payload,
+        "target": {
+            "server_hostname": (dbx_server or "").strip(),
+            "http_path": (dbx_http_path or "").strip(),
+            "access_token": (dbx_token or "").strip(),
+        },
+    }
+
+    resp = requests.post(
+        f"{base_url}/sessions",
+        headers={"x-api-key": api_key},
+        json=payload,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 def execute_query(engine, conn, query):
     """
@@ -376,9 +456,24 @@ def parse_table_path(path: str):
 
 
 def load_icon(path):
-    with open(path, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+    """Return base64 for an icon path, or None if missing."""
+    try:
+        p = Path(path)
+        candidates = []
+        if p.is_absolute():
+            candidates.append(p)
+        else:
+            candidates.append(Path.cwd() / p)
+            candidates.append(Path(__file__).resolve().parent / p)
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                data = candidate.read_bytes()
+                return base64.b64encode(data).decode()
+    except Exception:
+        # Never crash the app due to a missing banner icon.
+        return None
+    return None
 
 def generate_validation_record(
     validation_type,
@@ -1913,6 +2008,11 @@ _active_page = st.session_state.get("active_page", "main")
 # to disappear after connections are established.
 if _active_page in ("main", "validation"):
     icon_base64 = load_icon("reconciliation.png")
+    icon_html = (
+        f'<img src="data:image/png;base64,{icon_base64}" width="55"/>'
+        if icon_base64
+        else ""
+    )
 
     st.markdown(
         f"""
@@ -1923,7 +2023,7 @@ if _active_page in ("main", "validation"):
             gap:12px;
             margin-top:10px;
         ">
-            <img src="data:image/png;base64,{icon_base64}" width="55"/>
+            {icon_html}
             <h1 style="margin:0;">Reconciliation Framework</h1>
         </div>
 
@@ -2418,6 +2518,37 @@ if connect_clicked:
         st.session_state["engine"] = source_engine
 
         st.success("✅ Connections established successfully")
+
+        # Optional: create a backend session_id for async API calls (Databricks).
+        # This does NOT reuse the live Python connection; it stores credentials
+        # server-side with a TTL so the worker can reconnect when executing.
+        try:
+            api_base = _get_api_base_url()
+            api_key = _get_api_key()
+            if api_base and api_key:
+                sess = create_backend_session_from_ui(
+                    source_engine=source_engine,
+                    project_id=project_id if source_engine == "BigQuery" else None,
+                    dataset_location=dataset_location if source_engine == "BigQuery" else None,
+                    bq_key_path=bq_key_path if source_engine == "BigQuery" else None,
+                    sf_account=sf_account if source_engine == "Snowflake" else None,
+                    sf_user=sf_user if source_engine == "Snowflake" else None,
+                    sf_password=sf_password if source_engine == "Snowflake" else None,
+                    sf_warehouse=sf_warehouse if source_engine == "Snowflake" else None,
+                    sf_role=sf_role if source_engine == "Snowflake" else None,
+                    dbx_server=dbx_server,
+                    dbx_http_path=dbx_http_path,
+                    dbx_token=dbx_token,
+                )
+                if sess and sess.get("session_id"):
+                    st.session_state["backend_session_id"] = sess.get("session_id")
+                    st.success(
+                        f"🔑 Backend session created (TTL). Session ID: {st.session_state['backend_session_id']}"
+                    )
+                    if sess.get("expires_at"):
+                        st.caption(f"Session expires at: {sess.get('expires_at')}")
+        except Exception as e:
+            st.warning(f"Backend session creation failed (API optional): {e}")
         
 
 

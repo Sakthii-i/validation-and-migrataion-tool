@@ -1,0 +1,4 @@
+source_table,target_table,validation_type,metrics,case_sensitive,include_timestamp
+SNOWFLAKE_LEARNING_DB.PUBLIC.DATATYPE_DEMO,workspace.public.datatype_demo,shallow,"row_count,schema",no,yes
+SNOWFLAKE_LEARNING_DB.PUBLIC.HASH_TEST,workspace.public.hash_test,deep,"row_count,schema,numeric,hash",yes,no
+SNOWFLAKE_LEARNING_DB.PUBLIC.PERSON_TEST,workspace.public.person_test,deep,all,no,no

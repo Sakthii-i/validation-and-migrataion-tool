@@ -1,13 +1,35 @@
-import psycopg2
+import os
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = v.strip()
+    return v if v else default
+
+
+def _env_int(name: str, default: int) -> int:
+    v = _env(name)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
 
 # =============================
-# HARDCODED POSTGRES CONNECTION (NeonDB)
+# POSTGRES CONNECTION
+# - For local/dev, set env vars: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_SSLMODE
+# - Falls back to existing hardcoded defaults for backward compatibility.
 # =============================
 POSTGRES_CONFIG = {
-    "host": "validation.postgres.database.azure.com",
-    "port": 5432,
-    "db": "postgres",  # Replace with your database name
-    "user": "admin_post",  # Replace with your username
-    "password": "Sherin_post",  # Replace with your password
-    "sslmode": "require",  
+    "host": _env("POSTGRES_HOST", "sakthi.postgres.database.azure.com"),
+    "port": _env_int("POSTGRES_PORT", 5432),
+    "db": _env("POSTGRES_DB", "postgres"),
+    "user": _env("POSTGRES_USER", "sakthi"),
+    "password": _env("POSTGRES_PASSWORD", "Petchi@2811"),
+    "sslmode": _env("POSTGRES_SSLMODE", "require"),
 }
