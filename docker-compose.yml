@@ -1,0 +1,79 @@
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_DB=validation
+      - POSTGRES_USER=validation
+      - POSTGRES_PASSWORD=validation
+    ports:
+      - "5433:5432"
+    volumes:
+      - validation_pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ..
+      dockerfile: validation_tool/Dockerfile
+    command: ["python", "-m", "uvicorn", "validation_tool.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VALIDATION_SESSION_TTL_SECONDS=3600
+      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
+      - POSTGRES_HOST=${POSTGRES_HOST:-}
+      - POSTGRES_PORT=${POSTGRES_PORT:-}
+      - POSTGRES_DB=${POSTGRES_DB:-}
+      - POSTGRES_USER=${POSTGRES_USER:-}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - postgres
+
+  worker:
+    build:
+      context: ..
+      dockerfile: validation_tool/Dockerfile
+    command: ["python", "-m", "validation_tool.worker.run_worker"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VALIDATION_SESSION_TTL_SECONDS=3600
+      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
+      - POSTGRES_HOST=${POSTGRES_HOST:-}
+      - POSTGRES_PORT=${POSTGRES_PORT:-}
+      - POSTGRES_DB=${POSTGRES_DB:-}
+      - POSTGRES_USER=${POSTGRES_USER:-}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-}
+    depends_on:
+      - redis
+      - postgres
+
+  ui:
+    build:
+      context: ..
+      dockerfile: validation_tool/Dockerfile
+    command: ["streamlit", "run", "validation_tool/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
+      - VALIDATION_API_BASE_URL=http://api:8000
+      - POSTGRES_HOST=${POSTGRES_HOST:-}
+      - POSTGRES_PORT=${POSTGRES_PORT:-}
+      - POSTGRES_DB=${POSTGRES_DB:-}
+      - POSTGRES_USER=${POSTGRES_USER:-}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+volumes:
+  validation_pgdata:
