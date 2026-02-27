@@ -1544,27 +1544,6 @@ def run_row_hash_validation(
                             row_t = df_extra.iloc[0][available_cols]
                             
                             diff_cols = [c for c in available_cols if str(row_s.get(c, "")).strip() != str(row_t.get(c, "")).strip()]
-                            
-                            if diff_cols:
-                                st.error(f"🔴 **Hash is mismatching because of column(s): {', '.join([f'`{c}`' for c in diff_cols])}**")
-                                st.subheader("Column Value Comparison")
-                                
-                                # Create detailed comparison for each differing column
-                                for col in diff_cols:
-                                    try:
-                                        src_val = row_s.get(col, "N/A")
-                                        tgt_val = row_t.get(col, "N/A")
-                                        st.markdown(f"**Column: `{col}`**")
-                                        col1, col2 = st.columns(2)
-                                        with col1:
-                                            st.markdown(f"📊 **SOURCE:** `{src_val}`")
-                                        with col2:
-                                            st.markdown(f"📊 **TARGET:** `{tgt_val}`")
-                                        st.divider()
-                                    except Exception as e:
-                                        st.warning(f"Could not display column {col}: {friendly_error(e)}")
-                            else:
-                                st.info("✓ Sample rows have matching column values; hash mismatch stems from row presence rather than value differences.")
                         else:
                             st.warning("Could not extract column values from signature rows for comparison.")
                     except Exception as e:
