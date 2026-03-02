@@ -2020,6 +2020,8 @@ if _active_page in ("main", "validation"):
 # =========================================================
 # SIDEBAR — FRAMEWORK INFO
 # =========================================================
+sidebar_status_placeholder = None
+
 with st.sidebar:
 
     st.markdown(
@@ -2033,10 +2035,11 @@ with st.sidebar:
     st.divider()
 
     st.subheader("📊 Quick Stats")
-    if "source_conn" in st.session_state and "target_conn" in st.session_state:
-        st.success("🟢 Status: Connected")
+    sidebar_status_placeholder = st.empty()
+    if st.session_state.get("source_conn") and st.session_state.get("target_conn"):
+        sidebar_status_placeholder.success("🟢 Status: Connected")
     else:
-        st.error("🔴 Status: Not Connected")
+        sidebar_status_placeholder.error("🔴 Status: Not Connected")
 
     st.metric("Source Engine", st.session_state.get("engine", "—"))
     st.metric("Target Engine", "Databricks")
@@ -2185,8 +2188,9 @@ if st.session_state["active_page"] == "dashboard":
 
     btn_label = "📊 View Stats" if not st.session_state["show_pie_stats"] else "❌ Hide Stats"
 
-    if st.button(btn_label, use_container_width=True):
+    if st.button(btn_label, use_container_width=True, key="toggle_pie_stats"):
         st.session_state["show_pie_stats"] = not st.session_state["show_pie_stats"]
+        st.rerun()
 
     if st.session_state["show_pie_stats"]:
 
@@ -2346,8 +2350,17 @@ if st.session_state["active_page"] == "results":
 # =========================================================
 source_engine = st.selectbox(
     "Select Source Compute Engine",
-    ["BigQuery", "Snowflake"]
+    ["BigQuery", "Snowflake"],
+    key="ui_source_engine",
 )
+
+# If the user changes the selected engine, invalidate any previously established connections.
+if st.session_state.get("engine") and st.session_state.get("engine") != source_engine:
+    st.session_state["source_conn"] = None
+    st.session_state["target_conn"] = None
+    st.session_state["engine"] = None
+    if "backend_session_id" in st.session_state:
+        del st.session_state["backend_session_id"]
 
 # =========================================================
 # STEP 2: CREDENTIALS (SIDE-BY-SIDE)
@@ -2495,6 +2508,10 @@ if connect_clicked:
         st.session_state["source_conn"] = source_conn
         st.session_state["target_conn"] = target_conn
         st.session_state["engine"] = source_engine
+
+        # Update sidebar status immediately (sidebar rendered earlier in the script).
+        if sidebar_status_placeholder is not None:
+            sidebar_status_placeholder.success("🟢 Status: Connected")
 
         st.success("✅ Connections established successfully")
 
