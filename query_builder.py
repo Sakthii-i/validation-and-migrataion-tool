@@ -795,3 +795,66 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
     LIMIT {int(limit)}
     """.strip()
 
+
+
+# =============================
+# COLUMN-LEVEL DIFF QUERY BUILDER
+# =============================
+
+def build_column_diff_query(
+    engine: str,
+    catalog: str,
+    schema: str,
+    table: str,
+    key_columns: list[str],
+    all_columns: list[str],
+    mismatch_key_values: list[tuple],
+) -> str:
+    """
+    Build a query that fetches raw column values for rows identified by
+    composite primary-key values whose hashes mismatched.
+
+    Parameters
+    ----------
+    engine            : 'snowflake' | 'databricks' | 'bigquery'
+    catalog / schema / table : table coordinates
+    key_columns       : ordered list of PK column names
+    all_columns       : all column names to SELECT (including key columns)
+    mismatch_key_values : list of tuples, each a composite-key value set
+                          e.g. [('1', 'foo'), ('2', 'bar')]
+
+    Returns
+    -------
+    SQL string ready for execution on the given engine.
+    """
+    engine = engine.lower()
+    table_fqn = qualify_table(engine, catalog, schema, table)
+
+    def quote(col: str) -> str:
+        if engine in {"bigquery", "databricks"}:
+            return f"`{col}`"
+        return col  # Snowflake: unquoted (schema query lowercases names)
+
+    select_cols = ", ".join(quote(c) for c in all_columns)
+
+    # Build WHERE clause: each key combo becomes one (k1='v1' AND k2='v2') block
+    if not mismatch_key_values:
+        where_clause = "1=0"
+    else:
+        conditions = []
+        for key_tuple in mismatch_key_values:
+            if not isinstance(key_tuple, (list, tuple)):
+                key_tuple = (key_tuple,)
+            pairs = []
+            for col, val in zip(key_columns, key_tuple):
+                col_ref = quote(col)
+                escaped = str(val).replace("'", "''")
+                pairs.append(f"{col_ref} = '{escaped}'")
+            conditions.append("(" + " AND ".join(pairs) + ")")
+        where_clause = " OR ".join(conditions)
+
+    return (
+        f"SELECT {select_cols}\n"
+        f"FROM {table_fqn}\n"
+        f"WHERE {where_clause}"
+    )

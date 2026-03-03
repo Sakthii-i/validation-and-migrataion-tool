@@ -8,7 +8,7 @@ from connections.databricks import connect_databricks
 from connections.postgres import POSTGRES_CONFIG
 from connections.snowflake import connect_snowflake
 from metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
-from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2
+from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2, build_column_diff_query
 import os
 os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
@@ -1187,6 +1187,379 @@ def run_numeric_stats(engine, conn, catalog, schema, table, numeric_cols):
     return stats
 
 # =============================
+# COLUMN-LEVEL DIFF
+# =============================
+def _fetch_col_diff_available_cols(engine, source_conn, target_conn, src, tgt, include_timestamp):
+    """
+    Fetch schema from both sides and return the sorted list of common column
+    names (lowercase), filtered by the same rules used during hashing.
+    Called on-demand when the user checks Perform column-level diff.
+    """
+    try:
+        src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
+        tgt_schema = fetch_schema("Databricks", target_conn, tgt["catalog"], tgt["schema"], tgt["table"])
+    except Exception:
+        return []
+
+    def _keep(col_dict, include_ts):
+        dtype = str(col_dict.get("data_type") or "").upper()
+        if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            return False
+        if not include_ts and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+            return False
+        return True
+
+    src_names = {r["column_name"].lower() for r in src_schema if r.get("column_name") and _keep(r, include_timestamp)}
+    tgt_names = {r["column_name"].lower() for r in tgt_schema if r.get("column_name") and _keep(r, include_timestamp)}
+    return sorted(src_names & tgt_names)
+
+
+_MISSING_SENTINEL = "⬛ MISSING ROW"
+
+
+def _normalize_val(v) -> str:
+    """Convert any DB value to a trimmed, comparable string.
+
+    - None -> "<NULL>"
+    - bytes/bytearray/memoryview -> decoded UTF-8 if possible, else base64
+    - string forms like "b'ABC'" or "bytearray(b'ABC')" -> extract inner bytes content
+    - otherwise return trimmed string
+    """
+    if v is None:
+        return "<NULL>"
+
+    # Raw bytes-like objects: decode if possible, otherwise base64-encode
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(v).decode("utf-8", errors="strict").strip()
+        except Exception:
+            return base64.b64encode(bytes(v)).decode("ascii").strip()
+
+    s = str(v).strip()
+
+    # Common string representations of byte values: b'xxx' or b"xxx"
+    m = re.match(r"^b['\"](.*)['\"]$", s)
+    if m:
+        return m.group(1).strip()
+
+    # Patterns like bytearray(b'xxx') or other wrappers containing b'...'
+    m2 = re.search(r"b['\"](.*)['\"]", s)
+    if m2:
+        return m2.group(1).strip()
+
+    return s
+
+
+def run_column_level_diff(
+    engine: str,
+    source_conn,
+    target_conn,
+    src: dict,
+    tgt: dict,
+    key_columns: list[str],
+    src_schema_rows: list[dict],
+    tgt_schema_rows: list[dict],
+    missing_in_target_hashes: set,
+    extra_in_target_hashes: set,
+    src_sig_cols: list[str],
+    tgt_sig_cols: list[str],
+    include_timestamp_columns: bool = True,
+) -> None:
+    """
+    Perform a column-level diff between source and target for rows whose
+    row-hash mismatched.  Called only when the user has opted in and
+    provided at least one key column.
+
+    Renders results directly into the Streamlit UI.
+    """
+    st.subheader("🔬 Column-Level Diff")
+
+    # ── 1. Determine columns available in both sides ─────────────────────────
+    def _is_excluded(schema_rows, col_name_lower, include_ts):
+        """Return True if this column should be excluded (same rules as hash)."""
+        for r in schema_rows:
+            if r.get("column_name", "").lower() == col_name_lower:
+                dtype = str(r.get("data_type") or "").upper()
+                if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                    return True
+                if not include_ts and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+                    return True
+        return False
+
+    src_col_names = [r["column_name"] for r in src_schema_rows if r.get("column_name")]
+    tgt_col_names = [r["column_name"] for r in tgt_schema_rows if r.get("column_name")]
+
+    src_col_lower = {c.lower(): c for c in src_col_names}
+    tgt_col_lower = {c.lower(): c for c in tgt_col_names}
+
+    # Validate key columns exist in both schemas
+    invalid_keys = [k for k in key_columns if k.lower() not in src_col_lower or k.lower() not in tgt_col_lower]
+    if invalid_keys:
+        st.error(f"❌ Key column(s) not found in both source and target: {invalid_keys}")
+        return
+
+    # Non-key columns that exist on both sides, filtered by the same exclusion
+    # rules used during hashing (timestamp, complex types).
+    common_lower = set(src_col_lower.keys()) & set(tgt_col_lower.keys())
+    key_lower = {k.lower() for k in key_columns}
+    nonkey_lower = sorted(
+        c for c in (common_lower - key_lower)
+        if not _is_excluded(src_schema_rows, c, include_timestamp_columns)
+        and not _is_excluded(tgt_schema_rows, c, include_timestamp_columns)
+    )
+
+    # All columns to fetch for each side: keys + non-keys (in their native case)
+    def _build_fetch_cols(col_lower_map: dict, keys: list[str], nonkeys_sorted: list[str]) -> list[str]:
+        ordered = [col_lower_map[k.lower()] for k in keys]
+        ordered += [col_lower_map[nk] for nk in nonkeys_sorted if nk in col_lower_map]
+        return ordered
+
+    src_fetch_cols = _build_fetch_cols(src_col_lower, key_columns, nonkey_lower)
+    tgt_fetch_cols = _build_fetch_cols(tgt_col_lower, key_columns, nonkey_lower)
+
+    # ── 2. Fetch mismatched rows from source (hashes only in src) ────────────
+    # We need the actual key-column values.  The mismatch-row query returns
+    # hash_value + row_signature (pipe-delimited string).  We need to re-query
+    # the table directly with the composite key so we can do per-column lookup.
+    #
+    # Strategy: fetch all mismatched rows from source and target, then build
+    # composite-key dictionaries and compare.
+
+    def _fetch_raw_rows_by_hash(
+        eng: str,
+        conn,
+        cat: str, sch: str, tbl: str,
+        schema_rows_for_hash: list[dict],
+        hash_set: set,
+        fetch_cols: list[str],
+        include_ts: bool,
+    ) -> dict:
+        """
+        Returns {composite_key_tuple: {col: raw_value, ...}, ...}
+        """
+        if not hash_set:
+            return {}
+
+        # Build a mismatch-rows query to get hash_value + row_signature
+        hash_list = [str(h).upper() for h in hash_set if h]
+        if not hash_list:
+            return {}
+
+        q = build_row_hash_mismatch_rows_query_v2(
+            eng, cat, sch, tbl,
+            schema_rows=schema_rows_for_hash,
+            hash_values=hash_list,
+            include_timestamp=include_ts,
+            timestamp_mode=None,
+            limit=len(hash_list),
+        )
+        rows = execute_query(eng, conn, q)
+
+        if not rows:
+            return {}
+
+        # Now we have hash_value + row_signature — we need key column values.
+        # Re-fetch using the composite key by querying directly.
+        # We'll collect all keys from the signature, then do one batched fetch.
+        # Since the signature is pipe-delimited and columns are sorted
+        # alphabetically (same order as hash query), extract key positions.
+
+        sig_col_list = [
+            r["column_name"]
+            for r in sorted(schema_rows_for_hash, key=lambda x: str(x.get("column_name", "")).lower())
+            if r.get("column_name") and
+               not any(t in str(r.get("data_type", "")).upper() for t in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]) and
+               (include_ts or not any(t in str(r.get("data_type", "")).upper() for t in ["TIMESTAMP", "DATETIME"]))
+        ]
+
+        # Determine key column positions within sig_col_list
+        key_positions = []
+        for kc in fetch_cols[:len(key_columns)]:  # first N entries are key cols
+            kc_lower = kc.lower()
+            for idx, sc in enumerate(sig_col_list):
+                if sc.lower() == kc_lower:
+                    key_positions.append(idx)
+                    break
+
+        # Extract composite-key tuples from the pipe-split signature
+        key_tuples = set()
+        for row in rows:
+            sig_col = None
+            for col in row.keys():
+                if col.lower() == "row_signature":
+                    sig_col = col
+                    break
+            if sig_col is None:
+                continue
+            parts = str(row[sig_col]).split("|")
+            if len(parts) < len(sig_col_list):
+                continue
+            try:
+                key_tuple = tuple(parts[pos] for pos in key_positions)
+            except IndexError:
+                continue
+            key_tuples.add(key_tuple)
+
+        if not key_tuples:
+            return {}
+
+        # Fetch actual column data using the extracted keys
+        diff_q = build_column_diff_query(
+            eng, cat, sch, tbl,
+            key_columns=[c.lower() if eng == "snowflake" else c for c in fetch_cols[:len(key_columns)]],
+            all_columns=fetch_cols,
+            mismatch_key_values=list(key_tuples),
+        )
+        raw_rows = execute_query(eng, conn, diff_q)
+
+        result = {}
+        for raw in raw_rows:
+            raw_lower = {k.lower(): v for k, v in raw.items()}
+            key_vals = tuple(
+                _normalize_val(raw_lower.get(kc.lower()))
+                for kc in fetch_cols[:len(key_columns)]
+            )
+            result[key_vals] = {k.lower(): v for k, v in raw_lower.items()}
+        return result
+
+    # ── 3. Build schema rows for hash (same filtering as the main hash query) ──
+    def _build_hash_schema(schema_rows: list[dict], include_ts: bool) -> list[dict]:
+        out = []
+        for r in schema_rows:
+            col = r.get("column_name")
+            dtype = str(r.get("data_type") or "").upper()
+            if not col:
+                continue
+            if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                continue
+            if not include_ts and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+                continue
+            out.append(r)
+        return out
+
+    src_hash_schema = _build_hash_schema(src_schema_rows, include_timestamp_columns)
+    tgt_hash_schema = _build_hash_schema(tgt_schema_rows, include_timestamp_columns)
+
+    with st.spinner("Fetching mismatched rows for column-level diff…"):
+        try:
+            src_rows_map = _fetch_raw_rows_by_hash(
+                engine, source_conn,
+                src["catalog"], src["schema"], src["table"],
+                src_hash_schema, missing_in_target_hashes,
+                src_fetch_cols, include_timestamp_columns,
+            )
+        except Exception as e:
+            st.error(f"Could not fetch source diff rows: {friendly_error(e)}")
+            src_rows_map = {}
+
+        try:
+            tgt_rows_map = _fetch_raw_rows_by_hash(
+                "databricks", target_conn,
+                tgt["catalog"], tgt["schema"], tgt["table"],
+                tgt_hash_schema, extra_in_target_hashes,
+                tgt_fetch_cols, include_timestamp_columns,
+            )
+        except Exception as e:
+            st.error(f"Could not fetch target diff rows: {friendly_error(e)}")
+            tgt_rows_map = {}
+
+    if not src_rows_map and not tgt_rows_map:
+        st.warning("No diff rows could be retrieved — cannot produce column-level diff.")
+        return
+
+    # ── 4. Compare row-by-row ─────────────────────────────────────────────────
+    all_keys = sorted(set(src_rows_map.keys()) | set(tgt_rows_map.keys()))
+
+    diff_records = []
+
+    for key_tuple in all_keys:
+        composite_key_str = " | ".join(
+            f"{kc}={kv}" for kc, kv in zip(key_columns, key_tuple)
+        )
+
+        src_row = src_rows_map.get(key_tuple)
+        tgt_row = tgt_rows_map.get(key_tuple)
+
+        if src_row is None:
+            # Row exists only in target
+            for nk in nonkey_lower:
+                tgt_val = tgt_row.get(nk)
+                diff_records.append({
+                    "Composite Key": composite_key_str,
+                    "Column": nk,
+                    "Source Value": _MISSING_SENTINEL,
+                    "Target Value": _normalize_val(tgt_val),
+                    "Status": "🔴 MISSING IN SOURCE",
+                })
+        elif tgt_row is None:
+            # Row exists only in source
+            for nk in nonkey_lower:
+                src_val = src_row.get(nk)
+                diff_records.append({
+                    "Composite Key": composite_key_str,
+                    "Column": nk,
+                    "Source Value": _normalize_val(src_val),
+                    "Target Value": _MISSING_SENTINEL,
+                    "Status": "🔴 MISSING IN TARGET",
+                })
+        else:
+            # Row exists in both — compare non-key columns
+            for nk in nonkey_lower:
+                src_val = _normalize_val(src_row.get(nk))
+                tgt_val = _normalize_val(tgt_row.get(nk))
+                if src_val != tgt_val:
+                    diff_records.append({
+                        "Composite Key": composite_key_str,
+                        "Column": nk,
+                        "Source Value": src_val,
+                        "Target Value": tgt_val,
+                        "Status": "⚠️ VALUE MISMATCH",
+                    })
+
+    # ── 5. Render results ─────────────────────────────────────────────────────
+    total_rows_compared = len(all_keys)
+    mismatch_rows = sum(1 for r in diff_records if "MISMATCH" in r["Status"])
+    missing_src = sum(1 for r in diff_records if "MISSING IN SOURCE" in r["Status"])
+    missing_tgt = sum(1 for r in diff_records if "MISSING IN TARGET" in r["Status"])
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Rows Compared", total_rows_compared)
+    m2.metric("Value Mismatches", mismatch_rows)
+    m3.metric("Missing in Source", missing_src)
+    m4.metric("Missing in Target", missing_tgt)
+
+    if not diff_records:
+        st.success("✅ No column-level differences found in the sampled rows (hashes may differ due to data-type normalisation).")
+        return
+
+    diff_df = pd.DataFrame(diff_records)
+
+    # Summary: which columns differ most often
+    if "VALUE MISMATCH" in diff_df["Status"].values:
+        mismatch_cols = (
+            diff_df[diff_df["Status"] == "⚠️ VALUE MISMATCH"]
+            .groupby("Column")
+            .size()
+            .reset_index(name="Mismatch Count")
+            .sort_values("Mismatch Count", ascending=False)
+        )
+        with st.expander(f"📊 Columns with Most Mismatches ({len(mismatch_cols)} column(s))", expanded=True):
+            st.dataframe(mismatch_cols, use_container_width=True)
+
+    st.subheader("📋 Detailed Column-Level Diff")
+    st.dataframe(diff_df, use_container_width=True, height=400)
+
+    # Download
+    csv_bytes = diff_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇ Download Diff as CSV",
+        data=csv_bytes,
+        file_name="column_diff_report.csv",
+        mime="text/csv",
+    )
+
+
+# =============================
 # ROW HASH VALIDATION
 # =============================
 def get_hash(row):
@@ -1370,9 +1743,70 @@ def run_row_hash_validation(
             "Rows are split by column to identify which field(s) have different values."
         )
 
-        # Detailed mismatch analysis
+        # Detailed mismatch analysis — persist to session_state so the
+        # column-diff UI survives Streamlit reruns triggered by widget interaction.
         missing_in_target = src_hashes - tgt_hashes
         extra_in_target = tgt_hashes - src_hashes
+
+        # Build common column names respecting the same timestamp exclusion
+        # used during hashing — so available PK options match exactly.
+        def _is_timestamp_col(col_dict):
+            dtype = str(col_dict.get("raw_type") or col_dict.get("type") or "").upper()
+            return "TIMESTAMP" in dtype or "DATETIME" in dtype
+
+        common_col_names = sorted(
+            set(c.get("name", "").lower() for c in src_columns if c.get("name")
+                and (include_timestamp_columns or not _is_timestamp_col(c)))
+            & set(c.get("name", "").lower() for c in tgt_columns if c.get("name")
+                and (include_timestamp_columns or not _is_timestamp_col(c)))
+        )
+
+        # Populate the available-cols list for whichever tab triggered this run,
+        # so the multiselect is pre-filled on the next rerender.
+        for _tab in ("browse", "manual", "config"):
+            if st.session_state.get(f"col_diff_enabled_{_tab}"):
+                st.session_state[f"col_diff_available_cols_{_tab}"] = common_col_names
+
+        st.session_state["_col_diff_state"] = {
+            "engine": engine,
+            "src": src,
+            "tgt": tgt,
+            "src_schema_rows": src_schema_rows,
+            "tgt_schema_rows": tgt_schema_rows,
+            "src_columns": src_columns,
+            "tgt_columns": tgt_columns,
+            "missing_in_target": missing_in_target,
+            "extra_in_target": extra_in_target,
+            "include_timestamp_columns": include_timestamp_columns,
+            "common_col_names": common_col_names,
+        }
+
+        # Auto-run column diff immediately if the user already opted in
+        # and selected key columns before running validation.
+        for _tab in ("browse", "manual", "config"):
+            if st.session_state.get(f"col_diff_enabled_{_tab}"):
+                _key_cols = st.session_state.get(f"col_diff_key_columns_{_tab}", [])
+                if _key_cols:
+                    st.divider()
+                    try:
+                        run_column_level_diff(
+                            engine=engine,
+                            source_conn=source_conn,
+                            target_conn=target_conn,
+                            src=src,
+                            tgt=tgt,
+                            key_columns=_key_cols,
+                            src_schema_rows=src_schema_rows,
+                            tgt_schema_rows=tgt_schema_rows,
+                            missing_in_target_hashes=missing_in_target,
+                            extra_in_target_hashes=extra_in_target,
+                            src_sig_cols=src_columns,
+                            tgt_sig_cols=tgt_columns,
+                            include_timestamp_columns=include_timestamp_columns,
+                        )
+                    except Exception as _e:
+                        st.error(f"Column-level diff failed: {friendly_error(_e)}")
+                    break  # only run once
 
         m1, m2 = st.columns(2)
         m1.metric("Missing in Target", len(missing_in_target))
@@ -2605,6 +3039,44 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 "from the row hash calculation."
             ),
         )
+        st.checkbox(
+            "Perform column-level diff on hash mismatch",
+            key="col_diff_enabled_config",
+            value=st.session_state.get("col_diff_enabled_config", False),
+            help=(
+                "When hash validation fails, compare each non-key column value "
+                "individually between source and target rows."
+            ),
+        )
+        if st.session_state.get("col_diff_enabled_config"):
+            # Fetch available columns on-demand so the multiselect is populated
+            # immediately without needing to run hash validation first.
+            _include_ts_config = st.session_state.get("include_timestamp_in_hash_config", True)
+            _avail_key_config = f"col_diff_available_cols_config_{_include_ts_config}"
+            if _avail_key_config not in st.session_state:
+                _src_config = st.session_state.get('_col_diff_state', {}).get('src')
+                _tgt_config = st.session_state.get('_col_diff_state', {}).get('tgt')
+                if _src_config and _tgt_config and st.session_state.get("source_conn") and st.session_state.get("target_conn"):
+                    st.session_state[_avail_key_config] = _fetch_col_diff_available_cols(
+                        st.session_state.get('engine', 'snowflake'),
+                        st.session_state["source_conn"],
+                        st.session_state["target_conn"],
+                        _src_config, _tgt_config,
+                        _include_ts_config,
+                    )
+                else:
+                    st.session_state[_avail_key_config] = []
+            _opts_config = st.session_state.get(_avail_key_config, [])
+            st.session_state["col_diff_available_cols_config"] = _opts_config
+            st.session_state["col_diff_key_columns_config"] = st.multiselect(
+                "Primary Key Column(s) for diff",
+                options=_opts_config,
+                default=[c for c in st.session_state.get("col_diff_key_columns_config", []) if c in _opts_config],
+                key="col_diff_key_columns_widget_config",
+                help="Columns that uniquely identify each row.",
+            )
+            if not _opts_config:
+                st.caption("Connect to source and target first so columns can be loaded.")
 
     st.checkbox(
         "Case-sensitive schema validation",
@@ -2704,6 +3176,15 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 help=(
                     "If unchecked, columns with TIMESTAMP datatype are excluded "
                     "from the row hash calculation."
+                ),
+            )
+            st.checkbox(
+                "Perform column-level diff on hash mismatch",
+                key="col_diff_enabled_manual",
+                value=st.session_state.get("col_diff_enabled_manual", False),
+                help=(
+                    "When hash validation fails, compare each non-key column value "
+                    "individually between source and target rows."
                 ),
             )
 
@@ -2917,6 +3398,29 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 "Case sensitivity default: "
                 f"{'ON' if manual_case_sensitive_global else 'OFF'}"
                 f" | Overrides: {override_count}/{len(per_table_validations)}"
+            )
+
+        # ── Column-diff key picker (shown when col_diff enabled and tables are selected) ──
+        if st.session_state.get("col_diff_enabled_manual") and st.session_state.get("source_selections") and st.session_state.get("target_selections"):
+            _include_ts_manual = st.session_state.get("include_timestamp_in_hash_manual", True)
+            _avail_key_manual = f"col_diff_available_cols_manual_{_include_ts_manual}_{st.session_state.get('source_selections',[{}])[0].get('table','')}"
+            if _avail_key_manual not in st.session_state:
+                _src_manual = st.session_state["source_selections"][0]
+                _tgt_manual = st.session_state["target_selections"][0]
+                st.session_state[_avail_key_manual] = _fetch_col_diff_available_cols(
+                    st.session_state.get("engine", "snowflake"),
+                    st.session_state["source_conn"],
+                    st.session_state["target_conn"],
+                    _src_manual, _tgt_manual,
+                    _include_ts_manual,
+                )
+            _opts_manual = st.session_state.get(_avail_key_manual, [])
+            st.session_state["col_diff_key_columns_manual"] = st.multiselect(
+                "Primary Key Column(s) for diff",
+                options=_opts_manual,
+                default=[c for c in st.session_state.get("col_diff_key_columns_manual", []) if c in _opts_manual],
+                key="col_diff_key_columns_widget_manual",
+                help="Columns that uniquely identify each row. Used to look up and compare mismatched rows.",
             )
 
         # =========================
@@ -3307,6 +3811,15 @@ with tab_browse:
                     "from the row hash calculation."
                 ),
             )
+            st.checkbox(
+                "Perform column-level diff on hash mismatch",
+                key="col_diff_enabled_browse",
+                value=st.session_state.get("col_diff_enabled_browse", False),
+                help=(
+                    "When hash validation fails, compare each non-key column value "
+                    "individually between source and target rows."
+                ),
+            )
 
         override_mode = st.checkbox(
             "⚙️ Override validations per table",
@@ -3547,6 +4060,29 @@ with tab_browse:
             "Case sensitivity default: "
             f"{'ON' if browse_case_sensitive_global else 'OFF'}"
             f" | Overrides: {override_count}/{len(per_table_validations)}"
+        )
+
+    # ── Column-diff key picker (shown when col_diff enabled and tables are selected) ──
+    if st.session_state.get("col_diff_enabled_browse") and st.session_state.get("source_selections") and st.session_state.get("target_selections"):
+        _include_ts_browse = st.session_state.get("include_timestamp_in_hash_browse", True)
+        _avail_key_browse = f"col_diff_available_cols_browse_{_include_ts_browse}_{st.session_state.get('source_selections',[{}])[0].get('table','')}"
+        if _avail_key_browse not in st.session_state:
+            _src_browse = st.session_state["source_selections"][0]
+            _tgt_browse = st.session_state["target_selections"][0]
+            st.session_state[_avail_key_browse] = _fetch_col_diff_available_cols(
+                st.session_state.get("engine", "snowflake"),
+                st.session_state["source_conn"],
+                st.session_state["target_conn"],
+                _src_browse, _tgt_browse,
+                _include_ts_browse,
+            )
+        _opts_browse = st.session_state.get(_avail_key_browse, [])
+        st.session_state["col_diff_key_columns_browse"] = st.multiselect(
+            "Primary Key Column(s) for diff",
+            options=_opts_browse,
+            default=[c for c in st.session_state.get("col_diff_key_columns_browse", []) if c in _opts_browse],
+            key="col_diff_key_columns_widget_browse",
+            help="Columns that uniquely identify each row. Used to look up and compare mismatched rows.",
         )
 
     # =================================================

@@ -25,10 +25,13 @@ from validation_tool.backend.postgres_store import (
 from validation_tool.backend.session_store import create_session
 from validation_tool.worker.queue import get_queue
 from validation_tool.worker.tasks import run_validation_task
+from .validation_routes import router as validation_router
+
+# Then, after creating the app instance, include the router:
 
 
 app = FastAPI(title="Validation API", version="1.0")
-
+app.include_router(validation_router, prefix="")
 
 @app.post("/sessions", response_model=CreateSessionResponse, dependencies=[Depends(require_api_key)])
 def create_session_endpoint(req: CreateSessionRequest):
