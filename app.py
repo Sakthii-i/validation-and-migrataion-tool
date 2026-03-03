@@ -1223,10 +1223,36 @@ _MISSING_SENTINEL = "⬛ MISSING ROW"
 
 
 def _normalize_val(v) -> str:
-    """Convert any DB value to a trimmed string for comparison."""
+    """Convert any DB value to a trimmed, comparable string.
+
+    - None -> "<NULL>"
+    - bytes/bytearray/memoryview -> decoded UTF-8 if possible, else base64
+    - string forms like "b'ABC'" or "bytearray(b'ABC')" -> extract inner bytes content
+    - otherwise return trimmed string
+    """
     if v is None:
         return "<NULL>"
-    return str(v).strip()
+
+    # Raw bytes-like objects: decode if possible, otherwise base64-encode
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(v).decode("utf-8", errors="strict").strip()
+        except Exception:
+            return base64.b64encode(bytes(v)).decode("ascii").strip()
+
+    s = str(v).strip()
+
+    # Common string representations of byte values: b'xxx' or b"xxx"
+    m = re.match(r"^b['\"](.*)['\"]$", s)
+    if m:
+        return m.group(1).strip()
+
+    # Patterns like bytearray(b'xxx') or other wrappers containing b'...'
+    m2 = re.search(r"b['\"](.*)['\"]", s)
+    if m2:
+        return m2.group(1).strip()
+
+    return s
 
 
 def run_column_level_diff(
