@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from rq import Retry
 
 from validation_tool.api.auth import require_api_key
 from validation_tool.api.schemas import (
@@ -77,6 +78,7 @@ def submit_validations(
                 session_id,
                 row,
                 job_id=validation_id,
+                retry=Retry(max=60, interval=[2, 5, 10, 20, 30, 60]),
                 result_ttl=3600,
                 failure_ttl=86400,
             )
