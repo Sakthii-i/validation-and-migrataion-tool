@@ -17,6 +17,7 @@ import json
 import requests
 import re
 from pathlib import Path
+from api.auth import load_locked_credentials
 
 DEFAULT_CONFIG = {
   "validation_framework": {
@@ -192,18 +193,14 @@ def _get_api_key() -> str | None:
 
 
 def create_backend_session_from_ui(
+    credential_password: str,
     source_engine: str,
     project_id: str | None,
     dataset_location: str | None,
     bq_key_path: str | None,
-    sf_account: str | None,
-    sf_user: str | None,
-    sf_password: str | None,
-    sf_warehouse: str | None,
-    sf_role: str | None,
-    dbx_server: str,
-    dbx_http_path: str,
-    dbx_token: str,
+    dbx_server: str | None,
+    dbx_http_path: str | None,
+    dbx_token: str | None,
 ):
     base_url = _get_api_base_url()
     api_key = _get_api_key()
@@ -218,25 +215,23 @@ def create_backend_session_from_ui(
             "dataset_location": (dataset_location or "US").strip(),
             "service_account_key_path": (bq_key_path or "").strip(),
         }
-    else:
-        # snowflake
-        source_payload = {
-            "account": (sf_account or "").strip(),
-            "user": (sf_user or "").strip(),
-            "password": (sf_password or "").strip(),
-            "warehouse": (sf_warehouse or "").strip(),
-            "role": (sf_role or "").strip() if sf_role else None,
-        }
-
-    payload = {
-        "source_engine": source_engine_l,
-        "source": source_payload,
-        "target": {
+        target_payload = {
             "server_hostname": (dbx_server or "").strip(),
             "http_path": (dbx_http_path or "").strip(),
             "access_token": (dbx_token or "").strip(),
-        },
+        }
+    else:
+        source_payload = {}
+        target_payload = None
+
+    payload = {
+        "source_engine": source_engine_l,
+        "credential_password": (credential_password or "").strip(),
+        "source": source_payload,
     }
+    
+    if target_payload:
+        payload["target"] = target_payload
 
     resp = requests.post(
         f"{base_url}/sessions",
@@ -2384,31 +2379,21 @@ with left:
         st.session_state["dataset_location"] = dataset_location
         st.session_state["bq_key_path"] = bq_key_path
     elif source_engine == "Snowflake":
-        sf_account = _trim_text(st.text_input("Account"))
-        sf_user = _trim_text(st.text_input("Username"))
-        sf_password = _trim_text(st.text_input("Password", type="password"))
-        sf_warehouse = _trim_text(st.text_input("Warehouse"))
-        sf_role = _trim_text(st.text_input("Role"))
-        # persist Snowflake creds in session
-        st.session_state["sf_account"] = sf_account
-        st.session_state["sf_user"] = sf_user
-        st.session_state["sf_password"] = sf_password
-        st.session_state["sf_warehouse"] = sf_warehouse
-        st.session_state["sf_role"] = sf_role
+        credential_file_password = _trim_text(st.text_input("Credential File Unlock Password", type="password"))
+        st.session_state["credential_file_password"] = credential_file_password
 
 # -----------------------------
 # DATABRICKS CREDENTIALS
 # -----------------------------
 with right:
     st.markdown("### 🎯 Databricks")
-
-    dbx_server = _trim_text(st.text_input("Databricks Server Hostname"))
-    dbx_http_path = _trim_text(st.text_input("HTTP Path"))
-    dbx_token = _trim_text(st.text_input("Access Token", type="password"))
-    # persist Databricks creds in session
-    st.session_state["dbx_server"] = dbx_server
-    st.session_state["dbx_http_path"] = dbx_http_path
-    st.session_state["dbx_token"] = dbx_token
+    if source_engine == "BigQuery":
+        dbx_server = _trim_text(st.text_input("Databricks Server Hostname"))
+        dbx_http_path = _trim_text(st.text_input("HTTP Path"))
+        dbx_token = _trim_text(st.text_input("Access Token", type="password"))
+        st.session_state["dbx_server"] = dbx_server
+        st.session_state["dbx_http_path"] = dbx_http_path
+        st.session_state["dbx_token"] = dbx_token
 
 # =============================
 # SESSION STATE INITIALIZATION
@@ -2485,25 +2470,34 @@ if connect_clicked:
             if missing([project_id, bq_key_path]):
                 st.error("❌ Please fill all BigQuery credentials")
                 st.stop()
+            if missing([dbx_server, dbx_http_path, dbx_token]):
+                st.error("❌ Please fill all Databricks credentials")
+                st.stop()
         else:
-            if missing([sf_account, sf_user, sf_password, sf_warehouse]):
-                st.error("❌ Please fill all Snowflake credentials")
+            if missing([credential_file_password]):
+                st.error("❌ Please enter credential file unlock password")
                 st.stop()
 
-        # Validate Databricks credentials
-        if missing([dbx_server, dbx_http_path, dbx_token]):
-            st.error("❌ Please fill all Databricks credentials")
-            st.stop()
-
-        # === CONNECTION LOGIC (UNCHANGED) ===
+        # === CONNECTION LOGIC ===
         if source_engine == "BigQuery":
             source_conn = connect_bigquery(project_id, bq_key_path, dataset_location)
+            target_conn = connect_databricks(dbx_server, dbx_http_path, dbx_token)
         else:
+            locked = load_locked_credentials(credential_file_password)
+            sf = locked["snowflake"]
+            dbx = locked["databricks"]
             source_conn = connect_snowflake(
-                sf_account, sf_user, sf_password, sf_warehouse, sf_role
+                sf.get("account"),
+                sf.get("user"),
+                sf.get("password"),
+                sf.get("warehouse"),
+                sf.get("role"),
             )
-
-        target_conn = connect_databricks(dbx_server, dbx_http_path, dbx_token)
+            target_conn = connect_databricks(
+                dbx.get("server_hostname"),
+                dbx.get("http_path"),
+                dbx.get("access_token"),
+            )
 
         st.session_state["source_conn"] = source_conn
         st.session_state["target_conn"] = target_conn
@@ -2523,18 +2517,14 @@ if connect_clicked:
             api_key = _get_api_key()
             if api_base and api_key:
                 sess = create_backend_session_from_ui(
+                    credential_password=credential_file_password if source_engine == "Snowflake" else "",
                     source_engine=source_engine,
                     project_id=project_id if source_engine == "BigQuery" else None,
                     dataset_location=dataset_location if source_engine == "BigQuery" else None,
                     bq_key_path=bq_key_path if source_engine == "BigQuery" else None,
-                    sf_account=sf_account if source_engine == "Snowflake" else None,
-                    sf_user=sf_user if source_engine == "Snowflake" else None,
-                    sf_password=sf_password if source_engine == "Snowflake" else None,
-                    sf_warehouse=sf_warehouse if source_engine == "Snowflake" else None,
-                    sf_role=sf_role if source_engine == "Snowflake" else None,
-                    dbx_server=dbx_server,
-                    dbx_http_path=dbx_http_path,
-                    dbx_token=dbx_token,
+                    dbx_server=dbx_server if source_engine == "BigQuery" else None,
+                    dbx_http_path=dbx_http_path if source_engine == "BigQuery" else None,
+                    dbx_token=dbx_token if source_engine == "BigQuery" else None,
                 )
                 if sess and sess.get("session_id"):
                     st.session_state["backend_session_id"] = sess.get("session_id")

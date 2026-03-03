@@ -5,6 +5,7 @@ google-cloud-bigquery
 packaging<25
 plotly>=5.18.0
 psycopg2-binary
+cryptography>=41.0
 
 # API / async worker
 fastapi>=0.110
