@@ -20,9 +20,6 @@ from api.auth import _encrypt_content, CREDENTIAL_FILE_PATH
 def encrypt_credential_file():
     """Encrypt the credential file with the configured password."""
     
-    # The password that matches HARDCODED_FILE_PASSWORD_HASH
-    # Current hash: 10a6e6cc8311a3e2bcc09bf6c199adecd5dd59408c343e926b129c4914f3cb01
-    # This corresponds to password: "Sakthi@123"
     password = input("Enter the credential file password: ").strip()
     
     if not CREDENTIAL_FILE_PATH.exists():

@@ -2802,9 +2802,8 @@ left, right = st.columns(2)
 # SOURCE CREDENTIALS
 # -----------------------------
 with left:
-    st.markdown("### 🧩 Source Engine")
-
     if source_engine == "BigQuery":
+        st.markdown("### 🧩 Source Engine")
         project_id = _trim_text(st.text_input("GCP Project ID"))
         dataset_location = _trim_text(st.text_input("Dataset Location", value="US"))
         bq_key_path = _trim_text(st.text_input("Service Account Key Path"))
@@ -2820,8 +2819,8 @@ with left:
 # DATABRICKS CREDENTIALS
 # -----------------------------
 with right:
-    st.markdown("### 🎯 Databricks")
     if source_engine == "BigQuery":
+        st.markdown("### 🎯 Databricks")
         dbx_server = _trim_text(st.text_input("Databricks Server Hostname"))
         dbx_http_path = _trim_text(st.text_input("HTTP Path"))
         dbx_token = _trim_text(st.text_input("Access Token", type="password"))
