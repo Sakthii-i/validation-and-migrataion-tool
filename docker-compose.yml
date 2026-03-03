@@ -23,8 +23,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - VALIDATION_SESSION_TTL_SECONDS=3600
-      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
-      - POSTGRES_HOST=${POSTGRES_HOST:-}
+      - VALIDATION_API_KEYS=dev-key   # default added
+      - POSTGRES_HOST=${POSTGRES_HOST:-}s
       - POSTGRES_PORT=${POSTGRES_PORT:-}
       - POSTGRES_DB=${POSTGRES_DB:-}
       - POSTGRES_USER=${POSTGRES_USER:-}
@@ -44,7 +44,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - VALIDATION_SESSION_TTL_SECONDS=3600
-      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
+      - VALIDATION_API_KEYS=dev-key   # already hardcoded
       - POSTGRES_HOST=${POSTGRES_HOST:-}
       - POSTGRES_PORT=${POSTGRES_PORT:-}
       - POSTGRES_DB=${POSTGRES_DB:-}
@@ -62,7 +62,7 @@ services:
     command: ["streamlit", "run", "validation_tool/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - VALIDATION_API_KEYS=${VALIDATION_API_KEYS}
+      - VALIDATION_API_KEYS=dev-key
       - VALIDATION_API_BASE_URL=http://api:8000
       - POSTGRES_HOST=${POSTGRES_HOST:-}
       - POSTGRES_PORT=${POSTGRES_PORT:-}

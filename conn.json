@@ -1,0 +1,15 @@
+{
+  "source_engine": "snowflake",
+  "source": {
+    "account": "AXRAHTO-EV83004",
+    "user": "SAKTHI",
+    "password": "Sakthi@28112004",
+    "warehouse": "COMPUTE_WH",
+    "role": "ACCOUNTADMIN"
+  },
+  "target": {
+    "server_hostname": "dbc-5e8e9b15-5d2d.cloud.databricks.com",
+    "http_path": "/sql/1.0/warehouses/2400d99f6a16b5dc",
+    "access_token": "dapi7fd6301af53874ac7d88421ae3fe6fca"
+  }
+}
