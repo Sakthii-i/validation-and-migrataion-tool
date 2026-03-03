@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 
-from validation_tool.api.auth import require_api_key
+from validation_tool.api.auth import load_locked_credentials, require_api_key
 from validation_tool.api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -35,10 +35,26 @@ app.include_router(validation_router, prefix="")
 
 @app.post("/sessions", response_model=CreateSessionResponse, dependencies=[Depends(require_api_key)])
 def create_session_endpoint(req: CreateSessionRequest):
+    source_engine = (req.source_engine or "").strip().lower()
+
+    if source_engine == "snowflake":
+        locked = load_locked_credentials(req.credential_password)
+        source_payload = locked["snowflake"]
+        target_payload = locked["databricks"]
+    elif source_engine == "bigquery":
+        if req.credential_password:
+            locked = load_locked_credentials(req.credential_password)
+            target_payload = locked["databricks"]
+        else:
+            target_payload = req.target.model_dump() if req.target else {}
+        source_payload = req.source
+    else:
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+
     payload = {
-        "source_engine": (req.source_engine or "").strip().lower(),
-        "source": req.source,
-        "target": req.target.model_dump(),
+        "source_engine": source_engine,
+        "source": source_payload,
+        "target": target_payload,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 

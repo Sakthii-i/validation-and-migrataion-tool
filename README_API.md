@@ -37,7 +37,16 @@ Note: `0.0.0.0` is a bind address used by servers. In a browser, use `http://loc
 
 `POST /sessions` with header `x-api-key: <key>`.
 
-Body JSON example:
+**For BigQuery (`source_engine = "bigquery"`):**
+- Provide full BigQuery credentials in `source` field
+- Provide full Databricks credentials in `target` field
+- `credential_password` can be empty (not used)
+
+**For Snowflake (`source_engine = "snowflake"`):**
+- `credential_password` is required to unlock `api/credential.txt`
+- Both Snowflake and Databricks credentials are loaded from the locked file
+
+Body JSON example (BigQuery):
 
 ```json
 {
@@ -54,6 +63,32 @@ Body JSON example:
   }
 }
 ```
+
+`api/credential.txt` format (`key=value`):
+
+**IMPORTANT:** The `credential.txt` file must be encrypted. To encrypt it:
+
+1. Create plain text credential file with this format:
+```txt
+snowflake.account=...
+snowflake.user=...
+snowflake.password=...
+snowflake.warehouse=...
+snowflake.role=...
+databricks.server_hostname=...
+databricks.http_path=...
+databricks.access_token=...
+```
+
+2. Run the encryption utility:
+```bash
+cd api
+python encrypt_credentials.py
+```
+
+3. Enter your credential password when prompted (must match the hash in `api/auth.py`)
+
+The file will be encrypted in-place. The encrypted file can only be decrypted with the correct password.
 
 ### Submit validations (CSV)
 
