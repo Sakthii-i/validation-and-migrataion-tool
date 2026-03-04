@@ -20,6 +20,7 @@ import json
 import requests
 import re
 import html
+import threading
 from pathlib import Path
 from api.auth import load_locked_credentials
 
@@ -31,6 +32,27 @@ if "auth_role" not in st.session_state:
     st.session_state["auth_role"] = None  # "user" | "admin" | None
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
+if "auth_version" not in st.session_state:
+    st.session_state["auth_version"] = None
+
+
+@st.cache_resource
+def _get_auth_version_store() -> dict:
+    # Shared across Streamlit sessions/tabs (within the same server process).
+    # Used to invalidate auth in other open tabs after logout.
+    return {"lock": threading.Lock(), "version_by_user": {}}
+
+
+def _current_auth_version(username: str) -> int:
+    store = _get_auth_version_store()
+    with store["lock"]:
+        return int(store["version_by_user"].get(username, 0))
+
+
+def _bump_auth_version(username: str) -> None:
+    store = _get_auth_version_store()
+    with store["lock"]:
+        store["version_by_user"][username] = int(store["version_by_user"].get(username, 0)) + 1
 
 
 def _apply_auth_page_style() -> None:
@@ -67,7 +89,7 @@ def _apply_auth_page_style() -> None:
         )
 
 
-def _logout() -> None:
+def _logout(*, broadcast: bool = True) -> None:
     # If logout was triggered via query param, clear it to avoid rerun loops.
     try:
         if "logout" in st.query_params:
@@ -80,8 +102,14 @@ def _logout() -> None:
         except Exception:
             pass
 
+    if broadcast:
+        u = (st.session_state.get("auth_user") or "").strip()
+        if u:
+            _bump_auth_version(u)
+
     st.session_state["auth_role"] = None
     st.session_state["auth_user"] = None
+    st.session_state["auth_version"] = None
     # Keep the rest of session_state intact (connections, filters, etc.)
     st.rerun()
 
@@ -89,13 +117,31 @@ def _logout() -> None:
 # Support logout via a simple link: ?logout=1
 try:
     if "logout" in st.query_params:
-        _logout()
+        _logout(broadcast=True)
 except Exception:
     try:
         if "logout" in (st.experimental_get_query_params() or {}):
-            _logout()
+            _logout(broadcast=True)
     except Exception:
         pass
+
+
+def _enforce_logout_if_revoked() -> None:
+    role = st.session_state.get("auth_role")
+    if not role:
+        return
+    u = (st.session_state.get("auth_user") or "").strip()
+    if not u:
+        return
+
+    expected = _current_auth_version(u)
+    seen = st.session_state.get("auth_version")
+    if seen is None:
+        st.session_state["auth_version"] = expected
+        return
+
+    if int(seen) != int(expected):
+        _logout(broadcast=False)
 
 
 def _render_admin_page() -> None:
@@ -142,7 +188,7 @@ def _render_admin_page() -> None:
 
             with c2:
                 if st.button("Logout", use_container_width=True, key="admin_logout"):
-                    _logout()
+                    _logout(broadcast=True)
 
 
 def _render_login_page() -> None:
@@ -175,6 +221,7 @@ def _render_login_page() -> None:
                         if ok:
                             st.session_state["auth_role"] = "user"
                             st.session_state["auth_user"] = u.strip()
+                            st.session_state["auth_version"] = _current_auth_version(u.strip())
                             st.rerun()
                         else:
                             st.error("You dont have authentication contact to administrator")
@@ -188,12 +235,15 @@ def _render_login_page() -> None:
                     if is_admin_login(a.strip(), ap):
                         st.session_state["auth_role"] = "admin"
                         st.session_state["auth_user"] = a.strip()
+                        st.session_state["auth_version"] = _current_auth_version(a.strip())
                         st.rerun()
                     else:
                         st.error("Invalid admin credentials")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+
+_enforce_logout_if_revoked()
 
 if not st.session_state.get("auth_role"):
     _render_login_page()
@@ -210,46 +260,62 @@ with st.sidebar:
         auth_user = (st.session_state.get("auth_user") or "").strip() or "User"
         safe_user = html.escape(auth_user)
         st.markdown(
-                f"""
-                <style>
-                    .rf-profile {{
-                        position: relative;
-                        display: inline-block;
-                        margin-bottom: 8px;
-                    }}
-                    .rf-profile .rf-menu {{
-                        display: none;
-                        position: absolute;
-                        top: 22px;
-                        left: 0;
-                        z-index: 1000;
-                        padding: 8px 10px;
-                        border: 1px solid rgba(0,0,0,0.10);
-                        border-radius: 8px;
-                        background: rgba(255,255,255,0.98);
-                        white-space: nowrap;
-                    }}
-                    .rf-profile:hover .rf-menu {{
-                        display: block;
-                    }}
-                    .rf-profile .rf-icon {{
-                        cursor: default;
-                        user-select: none;
-                    }}
-                    .rf-profile .rf-name {{
-                        margin-bottom: 6px;
-                    }}
-                </style>
+            f"""
+            <style>
+                .rf-profile {{
+                    position: relative;
+                    display: inline-block;
+                    margin-bottom: 8px;
+                }}
+                .rf-profile .rf-menu {{
+                    display: none;
+                    position: absolute;
+                    top: 32px;
+                    left: 0;
+                    z-index: 1000;
+                    padding: 8px 10px;
+                    border: 1px solid rgba(0,0,0,0.10);
+                    border-radius: 8px;
+                    background: rgba(255,255,255,0.98);
+                    white-space: nowrap;
+                    min-width: 140px;
+                }}
+                .rf-profile:hover .rf-menu {{
+                    display: block;
+                }}
+                .rf-profile .rf-icon {{
+                    cursor: default;
+                    user-select: none;
+                    font-size: 26px;
+                    line-height: 1;
+                }}
+                .rf-profile .rf-name {{
+                    margin-bottom: 6px;
+                }}
+                /* Keep the Streamlit button compact inside the hover menu */
+                .rf-profile .rf-menu div[data-testid="stButton"] > button {{
+                    padding: 0.25rem 0.6rem;
+                    width: 100%;
+                }}
+            </style>
 
-                <div class="rf-profile" title="{safe_user}">
-                    <span class="rf-icon">👤</span>
-                    <div class="rf-menu">
-                        <div class="rf-name">{safe_user}</div>
-                        <a href="?logout=1">Logout</a>
-                    </div>
+            <div class="rf-profile" title="{safe_user}">
+                <span class="rf-icon">👤</span>
+                <div class="rf-menu">
+                    <div class="rf-name">{safe_user}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Logout", use_container_width=True, key="user_logout"):
+            _logout(broadcast=True)
+
+        st.markdown(
+            """
                 </div>
-                """,
-                unsafe_allow_html=True,
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 DEFAULT_CONFIG = {
