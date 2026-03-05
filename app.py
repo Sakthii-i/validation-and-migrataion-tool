@@ -632,6 +632,17 @@ def validate_csv(df):
     if not df["include_timestamp"].astype(str).str.lower().isin(valid_bool).all():
         raise ValueError("include_timestamp must be yes/no/true/false/1/0")
 
+    # Validate optional row_threshold column if present
+    if "row_threshold" in df.columns:
+        for idx, val in df["row_threshold"].items():
+            if pd.notna(val) and str(val).strip() != "":
+                try:
+                    fval = float(val)
+                    if fval < 0 or fval > 1:
+                        raise ValueError(f"row_threshold must be between 0 and 1, got {fval} at row {idx}")
+                except (ValueError, TypeError):
+                    raise ValueError(f"row_threshold must be a number between 0 and 1, got '{val}' at row {idx}")
+
         
 def run_csv_validations(df):
 
@@ -668,6 +679,18 @@ def run_csv_validations(df):
         # --------------------------
         ts_value = str(row["include_timestamp"]).strip().lower()
         include_timestamp = ts_value in ["yes", "true", "1"]
+
+        # --------------------------
+        # 🔑 Read row_threshold from CSV (optional)
+        # --------------------------
+        row_threshold = None
+        if "row_threshold" in row.index:
+            rt_val = row["row_threshold"]
+            if pd.notna(rt_val) and str(rt_val).strip() != "":
+                try:
+                    row_threshold = float(rt_val)
+                except (ValueError, TypeError):
+                    row_threshold = None
 
         # --------------------------
         # Determine Metrics
@@ -714,7 +737,8 @@ def run_csv_validations(df):
                 st.session_state["engine"],
                 st.session_state["source_conn"],
                 st.session_state["target_conn"],
-                src, tgt
+                src, tgt,
+                threshold=row_threshold,
             )
 
             schema_res = run_schema_validation(
@@ -744,11 +768,12 @@ def run_csv_validations(df):
 
             if selected_validations["row_count"]:
                 checks.append(("Row Count Validation",
-                    lambda s=src, t=tgt: run_row_count(
+                    lambda s=src, t=tgt, thr=row_threshold: run_row_count(
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        s, t
+                        s, t,
+                        threshold=thr,
                     )))
 
             if selected_validations["schema"]:
@@ -990,7 +1015,7 @@ def run_shallow_validation(engine, source_conn, target_conn, src_sel, tgt_sel):
     # =============================
     # ROW COUNT VALIDATION
     # =============================
-def run_row_count(engine, source_conn, target_conn, src, tgt):
+def run_row_count(engine, source_conn, target_conn, src, tgt, threshold=None):
     metrics = {"row_count": True}
 
     src_query = build_shallow_query(
@@ -1022,9 +1047,30 @@ def run_row_count(engine, source_conn, target_conn, src, tgt):
     c1.metric("Source", src_res["row_count"])
     c2.metric("Target", tgt_res["row_count"])
 
-    if src_res["row_count"] == tgt_res["row_count"]:
-        c3.success("✅ PASS")
+    src_count = src_res["row_count"]
+    tgt_count = tgt_res["row_count"]
+
+    if src_count == tgt_count:
+        c3.success("✅ PASS (Exact Match)")
         return True
+    elif threshold is not None and threshold > 0:
+        # Calculate match ratio
+        if src_count == 0 and tgt_count == 0:
+            c3.success("✅ PASS (Both Empty)")
+            return True
+        elif src_count == 0 or tgt_count == 0:
+            match_ratio = 0.0
+        else:
+            match_ratio = min(src_count, tgt_count) / max(src_count, tgt_count)
+
+        if match_ratio >= threshold:
+            c3.success(f"✅ PASS ({match_ratio:.4%} ≥ {threshold:.4%} threshold)")
+            st.caption(f"Row count difference: {abs(src_count - tgt_count)} rows | Match ratio: {match_ratio:.4%}")
+            return True
+        else:
+            c3.error(f"❌ FAIL ({match_ratio:.4%} < {threshold:.4%} threshold)")
+            st.caption(f"Row count difference: {abs(src_count - tgt_count)} rows | Match ratio: {match_ratio:.4%}")
+            return False
     else:
         c3.error("❌ FAIL")
         return False
@@ -3205,6 +3251,26 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
         hash_check = False
         override_mode = False
 
+        # Threshold for row count in shallow mode
+        manual_use_threshold = st.checkbox(
+            "Use acceptable threshold for Row Count",
+            value=False,
+            key="manual_use_row_threshold",
+            help="If enabled, row count validation passes if the match ratio meets the threshold (e.g., 0.99 = 99%)."
+        )
+        manual_row_threshold = None
+        if manual_use_threshold:
+            manual_row_threshold = st.number_input(
+                "Row Count Match Threshold (e.g., 0.99 = 99%)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.99,
+                step=0.01,
+                format="%.4f",
+                key="manual_row_threshold_value",
+                help="Enter a value between 0 and 1. For example, 0.99 means 99% of rows must match."
+            )
+
     manual_case_sensitive_global = st.checkbox(
         "Case-sensitive schema validation (global)",
         key="manual_case_sensitive_global",
@@ -3487,7 +3553,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     st.session_state["engine"],
                                     st.session_state["source_conn"],
                                     st.session_state["target_conn"],
-                                    s, t
+                                    s, t,
+                                    threshold=manual_row_threshold if manual_use_threshold else None,
                                 )))
 
                         if effective_schema:
@@ -3569,7 +3636,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                      st.session_state["engine"],
                                      st.session_state["source_conn"],
                                      st.session_state["target_conn"],
-                                     s, t
+                                     s, t,
+                                     threshold=manual_row_threshold if manual_use_threshold else None,
                                  )),
                                 ("Schema Validation",
                                  lambda s=src, t=tgt: run_schema_validation(
@@ -3668,6 +3736,7 @@ with tab_csv:
         "metrics",
         "case_sensitive",
         "include_timestamp",
+        "row_threshold",
     ]
 
     # Build sample rows: one for deep and one for shallow (horizontal display)
@@ -3682,6 +3751,7 @@ with tab_csv:
         "row_count,schema,numeric,hash",  # metrics
         "no",                 # case_sensitive
         "yes",                # include_timestamp
+        "",                   # row_threshold (empty = exact match)
     ]
 
     shallow_sample = [
@@ -3695,6 +3765,7 @@ with tab_csv:
         "",                   # metrics (empty for shallow)
         "no",                 # case_sensitive
         "yes",                # include_timestamp
+        "0.99",               # row_threshold (99% match)
     ]
 
     # Build a two-row DataFrame with columns as headers and sample rows
@@ -3834,6 +3905,26 @@ with tab_browse:
         browse_schema_check = True
         browse_numeric_check = False
         browse_hash_check = False
+
+        # Threshold for row count in shallow mode
+        browse_use_threshold = st.checkbox(
+            "Use acceptable threshold for Row Count",
+            value=False,
+            key="browse_use_row_threshold",
+            help="If enabled, row count validation passes if the match ratio meets the threshold (e.g., 0.99 = 99%)."
+        )
+        browse_row_threshold = None
+        if browse_use_threshold:
+            browse_row_threshold = st.number_input(
+                "Row Count Match Threshold (e.g., 0.99 = 99%)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.99,
+                step=0.01,
+                format="%.4f",
+                key="browse_row_threshold_value",
+                help="Enter a value between 0 and 1. For example, 0.99 means 99% of rows must match."
+            )
 
     st.divider()
     left, right = st.columns(2)
@@ -4238,7 +4329,8 @@ with tab_browse:
                                  st.session_state["engine"],
                                  st.session_state["source_conn"],
                                  st.session_state["target_conn"],
-                                 s, t
+                                 s, t,
+                                 threshold=browse_row_threshold if browse_use_threshold else None,
                              )),
                             ("Schema Validation",
                              lambda s=src, t=tgt: run_schema_validation(
