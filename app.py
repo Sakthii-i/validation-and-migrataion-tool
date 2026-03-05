@@ -3,6 +3,9 @@ import pandas as pd
 import uuid
 from datetime import datetime, timedelta
 import psycopg2
+from backend.auth_crypto import hash_password
+from backend.auth_service import is_admin_login, is_user_authorized
+from backend.auth_store import get_pg_conn as get_auth_pg_conn, upsert_user
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
 from connections.postgres import POSTGRES_CONFIG
@@ -16,8 +19,304 @@ import base64
 import json
 import requests
 import re
+import html
+import threading
 from pathlib import Path
 from api.auth import load_locked_credentials
+
+
+# =========================================================
+# AUTH (LOGIN GATE)
+# =========================================================
+if "auth_role" not in st.session_state:
+    st.session_state["auth_role"] = None  # "user" | "admin" | None
+if "auth_user" not in st.session_state:
+    st.session_state["auth_user"] = None
+if "auth_version" not in st.session_state:
+    st.session_state["auth_version"] = None
+
+
+@st.cache_resource
+def _get_auth_version_store() -> dict:
+    # Shared across Streamlit sessions/tabs (within the same server process).
+    # Used to invalidate auth in other open tabs after logout.
+    return {"lock": threading.Lock(), "version_by_user": {}}
+
+
+def _current_auth_version(username: str) -> int:
+    store = _get_auth_version_store()
+    with store["lock"]:
+        return int(store["version_by_user"].get(username, 0))
+
+
+def _bump_auth_version(username: str) -> None:
+    store = _get_auth_version_store()
+    with store["lock"]:
+        store["version_by_user"][username] = int(store["version_by_user"].get(username, 0)) + 1
+
+
+def _apply_auth_page_style() -> None:
+        st.markdown(
+                """
+                <style>
+                    /* Make auth screens feel like a centered page */
+                    .rf-auth-card {
+                        padding: 22px 22px;
+                        border: 1px solid rgba(0,0,0,0.08);
+                        border-radius: 14px;
+                        background: rgba(255,255,255,0.92);
+                    }
+                    .rf-auth-form {
+                        padding: 10px 10px;
+                    }
+                    .rf-auth-title {
+                        font-size: 30px;
+                        font-weight: 700;
+                        margin: 0 0 2px 0;
+                    }
+                    .rf-auth-sub {
+                        opacity: 0.75;
+                        margin: 0 0 14px 0;
+                    }
+                    /* Tighten top padding Streamlit adds */
+                    section.main > div.block-container {
+                        padding-top: 1.75rem;
+                        max-width: 980px;
+                    }
+                </style>
+                """,
+                unsafe_allow_html=True,
+        )
+
+
+def _logout(*, broadcast: bool = True) -> None:
+    # If logout was triggered via query param, clear it to avoid rerun loops.
+    try:
+        if "logout" in st.query_params:
+            del st.query_params["logout"]
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            if "logout" in qp:
+                st.experimental_set_query_params()
+        except Exception:
+            pass
+
+    if broadcast:
+        u = (st.session_state.get("auth_user") or "").strip()
+        if u:
+            _bump_auth_version(u)
+
+    st.session_state["auth_role"] = None
+    st.session_state["auth_user"] = None
+    st.session_state["auth_version"] = None
+    # Keep the rest of session_state intact (connections, filters, etc.)
+    st.rerun()
+
+
+# Support logout via a simple link: ?logout=1
+try:
+    if "logout" in st.query_params:
+        _logout(broadcast=True)
+except Exception:
+    try:
+        if "logout" in (st.experimental_get_query_params() or {}):
+            _logout(broadcast=True)
+    except Exception:
+        pass
+
+
+def _enforce_logout_if_revoked() -> None:
+    role = st.session_state.get("auth_role")
+    if not role:
+        return
+    u = (st.session_state.get("auth_user") or "").strip()
+    if not u:
+        return
+
+    expected = _current_auth_version(u)
+    seen = st.session_state.get("auth_version")
+    if seen is None:
+        st.session_state["auth_version"] = expected
+        return
+
+    if int(seen) != int(expected):
+        _logout(broadcast=False)
+
+
+def _render_admin_page() -> None:
+    _apply_auth_page_style()
+
+    left, mid, right = st.columns([1, 1.4, 1])
+    with mid:
+        st.markdown(
+            """
+            <div class="rf-auth-card">
+              <div class="rf-auth-title">🔐 Admin</div>
+              <div class="rf-auth-sub">Manage which users are allowed to access the tool.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        card = st.container(border=True)
+        with card:
+            st.subheader("Add / Update User")
+            st.caption("Passwords are stored as salted hashes in Postgres.")
+
+            username = st.text_input("Username", placeholder="e.g. aswath", key="admin_add_username")
+            password = st.text_input("Password", type="password", key="admin_add_password")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Add User", use_container_width=True, key="admin_add_user"):
+                    if not username.strip() or not password:
+                        st.error("Please enter username and password")
+                    else:
+                        try:
+                            pg = get_auth_pg_conn()
+                            try:
+                                upsert_user(pg, username.strip(), hash_password(password))
+                            finally:
+                                try:
+                                    pg.close()
+                                except Exception:
+                                    pass
+                            st.success("User added/updated successfully")
+                        except Exception as e:
+                            st.error(f"Failed to save user: {e}")
+
+            with c2:
+                if st.button("Logout", use_container_width=True, key="admin_logout"):
+                    _logout(broadcast=True)
+
+
+def _render_login_page() -> None:
+    _apply_auth_page_style()
+
+    left, mid, right = st.columns([0.8, 2.2, 0.8])
+    with mid:
+        st.title("Reconciliation Framework")
+        st.caption("Sign in to validate data consistency and completeness.")
+
+        st.markdown("<div class=\"rf-auth-form\">", unsafe_allow_html=True)
+        box = st.container(border=True)
+        with box:
+            user_tab, admin_tab = st.tabs(["User Login", "Admin Login"])
+
+            with user_tab:
+                u = st.text_input("Username", placeholder="Your username", key="login_user_username")
+                p = st.text_input("Password", type="password", key="login_user_password")
+                if st.button("Login", use_container_width=True, key="login_user_btn"):
+                    try:
+                        pg = get_auth_pg_conn()
+                        try:
+                            ok = is_user_authorized(pg, u.strip(), p)
+                        finally:
+                            try:
+                                pg.close()
+                            except Exception:
+                                pass
+
+                        if ok:
+                            st.session_state["auth_role"] = "user"
+                            st.session_state["auth_user"] = u.strip()
+                            st.session_state["auth_version"] = _current_auth_version(u.strip())
+                            st.rerun()
+                        else:
+                            st.error("You dont have authentication contact to administrator")
+                    except Exception as e:
+                        st.error(f"Login failed: {e}")
+
+            with admin_tab:
+                a = st.text_input("Admin Username", placeholder="Admin username", key="login_admin_username")
+                ap = st.text_input("Admin Password", type="password", key="login_admin_password")
+                if st.button("Admin Login", use_container_width=True, key="login_admin_btn"):
+                    if is_admin_login(a.strip(), ap):
+                        st.session_state["auth_role"] = "admin"
+                        st.session_state["auth_user"] = a.strip()
+                        st.session_state["auth_version"] = _current_auth_version(a.strip())
+                        st.rerun()
+                    else:
+                        st.error("Invalid admin credentials")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+_enforce_logout_if_revoked()
+
+if not st.session_state.get("auth_role"):
+    _render_login_page()
+    st.stop()
+
+if st.session_state.get("auth_role") == "admin":
+    _render_admin_page()
+    st.stop()
+
+# At this point, only authenticated users continue into the tool.
+
+# Sidebar profile (hover to show name + logout)
+with st.sidebar:
+        auth_user = (st.session_state.get("auth_user") or "").strip() or "User"
+        safe_user = html.escape(auth_user)
+        st.markdown(
+            f"""
+            <style>
+                .rf-profile {{
+                    position: relative;
+                    display: inline-block;
+                    margin-bottom: 8px;
+                }}
+                .rf-profile .rf-menu {{
+                    display: none;
+                    position: absolute;
+                    top: 32px;
+                    left: 0;
+                    z-index: 1000;
+                    padding: 8px 10px;
+                    border: 1px solid rgba(0,0,0,0.10);
+                    border-radius: 8px;
+                    background: rgba(255,255,255,0.98);
+                    white-space: nowrap;
+                    min-width: 140px;
+                }}
+                .rf-profile:hover .rf-menu {{
+                    display: block;
+                }}
+                .rf-profile .rf-icon {{
+                    cursor: default;
+                    user-select: none;
+                    font-size: 26px;
+                    line-height: 1;
+                }}
+                .rf-profile .rf-name {{
+                    margin-bottom: 6px;
+                }}
+                /* Keep the Streamlit button compact inside the hover menu */
+                .rf-profile .rf-menu div[data-testid="stButton"] > button {{
+                    padding: 0.25rem 0.6rem;
+                    width: 100%;
+                }}
+            </style>
+
+            <div class="rf-profile" title="{safe_user}">
+                <span class="rf-icon">👤</span>
+                <div class="rf-menu">
+                    <div class="rf-name">{safe_user}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Logout", use_container_width=True, key="user_logout"):
+            _logout(broadcast=True)
+
+        st.markdown(
+            """
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 DEFAULT_CONFIG = {
   "validation_framework": {

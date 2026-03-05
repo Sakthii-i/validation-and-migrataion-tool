@@ -16,6 +16,9 @@ This repo now includes an async API to submit validation jobs and poll results.
 - `VALIDATION_API_BASE_URL`: base URL the Streamlit UI uses to create sessions (optional)
 - `REDIS_URL`: Redis connection string (default `redis://localhost:6379/0`)
 - `VALIDATION_SESSION_TTL_SECONDS`: session TTL in seconds (default `3600`)
+- `VALIDATION_MAX_CONCURRENT_JOBS_PER_SESSION`: max simultaneous RUNNING jobs per session (default `2`)
+- `VALIDATION_SESSION_CONCURRENCY_SLOT_TTL_SECONDS`: safety TTL for session concurrency slots (default `1800`)
+- `WORKER_PROCESSES`: number of worker processes to run in `python -m validation_tool.worker.run_worker` (default `1`)
 
 ## Run with Docker Compose
 
