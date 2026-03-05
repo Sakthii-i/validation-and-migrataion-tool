@@ -1087,22 +1087,24 @@ def run_csv_validations(df):
 
             if selected_validations["numeric"]:
                 checks.append(("Numeric Statistics Validation",
-                    lambda s=src, t=tgt: run_numeric_validation(
+                    lambda s=src, t=tgt, thr=row_threshold: run_numeric_validation(
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        s, t
+                        s, t,
+                        threshold=thr,
                     )))
 
             if selected_validations["hash"]:
                 checks.append(("Row Hash Validation",
-                    lambda s=src, t=tgt: run_row_hash_validation(
+                    lambda s=src, t=tgt, thr=row_threshold: run_row_hash_validation(
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
                         s,
                         t,
                         include_timestamp_columns=include_timestamp,
+                        threshold=thr,
                     )))
 
             results_map = run_checks_in_order(checks)
@@ -1931,6 +1933,7 @@ def run_row_hash_validation(
     src,
     tgt,
     include_timestamp_columns=None,
+    threshold=None,
 ):
     st.subheader("🔐 Row Hash Validation")
 
@@ -2081,259 +2084,276 @@ def run_row_hash_validation(
     if src_hashes == tgt_hashes:
         c3.success("✅ HASH MATCH")
         return True
-    else:
-        c3.error("❌ HASH MISMATCH")
-        st.warning(
-            "💡 **Column comparison below:** "
-            "Rows are split by column to identify which field(s) have different values."
-        )
-
-        # Detailed mismatch analysis — persist to session_state so the
-        # column-diff UI survives Streamlit reruns triggered by widget interaction.
-        missing_in_target = src_hashes - tgt_hashes
-        extra_in_target = tgt_hashes - src_hashes
-
-        # Build common column names respecting the same timestamp exclusion
-        # used during hashing — so available PK options match exactly.
-        def _is_timestamp_col(col_dict):
-            dtype = str(col_dict.get("raw_type") or col_dict.get("type") or "").upper()
-            return "TIMESTAMP" in dtype or "DATETIME" in dtype
-
-        common_col_names = sorted(
-            set(c.get("name", "").lower() for c in src_columns if c.get("name")
-                and (include_timestamp_columns or not _is_timestamp_col(c)))
-            & set(c.get("name", "").lower() for c in tgt_columns if c.get("name")
-                and (include_timestamp_columns or not _is_timestamp_col(c)))
-        )
-
-        # Populate the available-cols list for whichever tab triggered this run,
-        # so the multiselect is pre-filled on the next rerender.
-        for _tab in ("browse", "manual", "config"):
-            if st.session_state.get(f"col_diff_enabled_{_tab}"):
-                st.session_state[f"col_diff_available_cols_{_tab}"] = common_col_names
-
-        st.session_state["_col_diff_state"] = {
-            "engine": engine,
-            "src": src,
-            "tgt": tgt,
-            "src_schema_rows": src_schema_rows,
-            "tgt_schema_rows": tgt_schema_rows,
-            "src_columns": src_columns,
-            "tgt_columns": tgt_columns,
-            "missing_in_target": missing_in_target,
-            "extra_in_target": extra_in_target,
-            "include_timestamp_columns": include_timestamp_columns,
-            "common_col_names": common_col_names,
-        }
-
-        # Auto-run column diff immediately if the user already opted in
-        # and selected key columns before running validation.
-        for _tab in ("browse", "manual", "config"):
-            if st.session_state.get(f"col_diff_enabled_{_tab}"):
-                _key_cols = st.session_state.get(f"col_diff_key_columns_{_tab}", [])
-                if _key_cols:
-                    st.divider()
-                    try:
-                        run_column_level_diff(
-                            engine=engine,
-                            source_conn=source_conn,
-                            target_conn=target_conn,
-                            src=src,
-                            tgt=tgt,
-                            key_columns=_key_cols,
-                            src_schema_rows=src_schema_rows,
-                            tgt_schema_rows=tgt_schema_rows,
-                            missing_in_target_hashes=missing_in_target,
-                            extra_in_target_hashes=extra_in_target,
-                            src_sig_cols=src_columns,
-                            tgt_sig_cols=tgt_columns,
-                            include_timestamp_columns=include_timestamp_columns,
-                        )
-                    except Exception as _e:
-                        st.error(f"Column-level diff failed: {friendly_error(_e)}")
-                    break  # only run once
-
-        m1, m2 = st.columns(2)
-        m1.metric("Missing in Target", len(missing_in_target))
-        m2.metric("Extra in Target", len(extra_in_target))
-        
-        # Summary statistics
+    elif threshold is not None and threshold > 0:
+        # Calculate hash match ratio
         total_unique = len(src_hashes | tgt_hashes)
         matching = len(src_hashes & tgt_hashes)
-        if total_unique > 0:
-            st.info(f"**Summary:** {matching} of {total_unique} unique rows match ({100*matching/total_unique:.1f}%)")
+        if total_unique == 0:
+            match_ratio = 1.0
+        else:
+            match_ratio = matching / total_unique
 
-        st.subheader("Column-Level Breakdown (Sample Rows)")
+        if match_ratio >= threshold:
+            c3.success(f"✅ PASS ({match_ratio:.4%} ≥ {threshold:.4%} threshold)")
+            st.caption(f"Matching hashes: {matching}/{total_unique} | Match ratio: {match_ratio:.4%}")
+            return True
+        else:
+            c3.error(f"❌ FAIL ({match_ratio:.4%} < {threshold:.4%} threshold)")
+            st.caption(f"Matching hashes: {matching}/{total_unique} | Match ratio: {match_ratio:.4%}")
+    else:
+        c3.error("❌ HASH MISMATCH")
+
+    st.warning(
+        "💡 **Column comparison below:** "
+        "Rows are split by column to identify which field(s) have different values."
+    )
+
+    # Detailed mismatch analysis — persist to session_state so the
+    # column-diff UI survives Streamlit reruns triggered by widget interaction.
+    missing_in_target = src_hashes - tgt_hashes
+    extra_in_target = tgt_hashes - src_hashes
+
+    # Build common column names respecting the same timestamp exclusion
+    # used during hashing — so available PK options match exactly.
+    def _is_timestamp_col(col_dict):
+        dtype = str(col_dict.get("raw_type") or col_dict.get("type") or "").upper()
+        return "TIMESTAMP" in dtype or "DATETIME" in dtype
+
+    common_col_names = sorted(
+        set(c.get("name", "").lower() for c in src_columns if c.get("name")
+            and (include_timestamp_columns or not _is_timestamp_col(c)))
+        & set(c.get("name", "").lower() for c in tgt_columns if c.get("name")
+            and (include_timestamp_columns or not _is_timestamp_col(c)))
+    )
+
+    # Populate the available-cols list for whichever tab triggered this run,
+    # so the multiselect is pre-filled on the next rerender.
+    for _tab in ("browse", "manual", "config"):
+        if st.session_state.get(f"col_diff_enabled_{_tab}"):
+            st.session_state[f"col_diff_available_cols_{_tab}"] = common_col_names
+
+    st.session_state["_col_diff_state"] = {
+        "engine": engine,
+        "src": src,
+        "tgt": tgt,
+        "src_schema_rows": src_schema_rows,
+        "tgt_schema_rows": tgt_schema_rows,
+        "src_columns": src_columns,
+        "tgt_columns": tgt_columns,
+        "missing_in_target": missing_in_target,
+        "extra_in_target": extra_in_target,
+        "include_timestamp_columns": include_timestamp_columns,
+        "common_col_names": common_col_names,
+    }
+
+    # Auto-run column diff immediately if the user already opted in
+    # and selected key columns before running validation.
+    for _tab in ("browse", "manual", "config"):
+        if st.session_state.get(f"col_diff_enabled_{_tab}"):
+            _key_cols = st.session_state.get(f"col_diff_key_columns_{_tab}", [])
+            if _key_cols:
+                st.divider()
+                try:
+                    run_column_level_diff(
+                        engine=engine,
+                        source_conn=source_conn,
+                        target_conn=target_conn,
+                        src=src,
+                        tgt=tgt,
+                        key_columns=_key_cols,
+                        src_schema_rows=src_schema_rows,
+                        tgt_schema_rows=tgt_schema_rows,
+                        missing_in_target_hashes=missing_in_target,
+                        extra_in_target_hashes=extra_in_target,
+                        src_sig_cols=src_columns,
+                        tgt_sig_cols=tgt_columns,
+                        include_timestamp_columns=include_timestamp_columns,
+                    )
+                except Exception as _e:
+                    st.error(f"Column-level diff failed: {friendly_error(_e)}")
+                break  # only run once
+
+    m1, m2 = st.columns(2)
+    m1.metric("Missing in Target", len(missing_in_target))
+    m2.metric("Extra in Target", len(extra_in_target))
+    
+    # Summary statistics
+    total_unique = len(src_hashes | tgt_hashes)
+    matching = len(src_hashes & tgt_hashes)
+    if total_unique > 0:
+        st.info(f"**Summary:** {matching} of {total_unique} unique rows match ({100*matching/total_unique:.1f}%)")
+
+    st.subheader("Column-Level Breakdown (Sample Rows)")
+    
+    # Build schema rows for display
+    try:
+        src_schema_rows_for_hash = [
+            {
+                "column_name": c.get("name"),
+                "data_type": (c.get("raw_type") or c.get("type") or ""),
+            }
+            for c in (src_columns or [])
+            if c.get("name")
+        ]
+        tgt_schema_rows_for_hash = [
+            {
+                "column_name": c.get("name"),
+                "data_type": (c.get("raw_type") or c.get("type") or ""),
+            }
+            for c in (tgt_columns or [])
+            if c.get("name")
+        ]
+
+        def _included_signature_cols(schema_rows_for_hash):
+            included = []
+            for r in schema_rows_for_hash:
+                col = r.get("column_name")
+                dtype = str(r.get("data_type") or "").upper()
+                if not col:
+                    continue
+                if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+                    continue
+                if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
+                    continue
+                included.append(str(col))
+            return included
+
+        sig_cols = _included_signature_cols(src_schema_rows_for_hash)
         
-        # Build schema rows for display
-        try:
-            src_schema_rows_for_hash = [
-                {
-                    "column_name": c.get("name"),
-                    "data_type": (c.get("raw_type") or c.get("type") or ""),
-                }
-                for c in (src_columns or [])
-                if c.get("name")
-            ]
-            tgt_schema_rows_for_hash = [
-                {
-                    "column_name": c.get("name"),
-                    "data_type": (c.get("raw_type") or c.get("type") or ""),
-                }
-                for c in (tgt_columns or [])
-                if c.get("name")
-            ]
+        if sig_cols:
+            st.caption("Columns included in hash (in order):")
+            st.code(" | ".join(sig_cols), language="text")
+        
+        df_missing = None
+        df_extra = None
 
-            def _included_signature_cols(schema_rows_for_hash):
-                included = []
-                for r in schema_rows_for_hash:
-                    col = r.get("column_name")
-                    dtype = str(r.get("data_type") or "").upper()
-                    if not col:
-                        continue
-                    if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-                        continue
-                    if (not include_timestamp_columns) and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
-                        continue
-                    included.append(str(col))
-                return included
+        if missing_in_target and len(missing_in_target) > 0:
+            st.subheader("🔴 Source-Only Rows (in source, NOT in target)")
+            try:
+                missing_hashes = [str(h).upper() for h in list(missing_in_target)[:50] if h]
+                if missing_hashes:
+                    q = build_row_hash_mismatch_rows_query_v2(
+                        engine,
+                        src["catalog"],
+                        src["schema"],
+                        src["table"],
+                        schema_rows=src_schema_rows_for_hash,
+                        hash_values=missing_hashes,
+                        include_timestamp=include_timestamp_columns,
+                        timestamp_mode=None,
+                        limit=10,
+                    )
+                    rows = execute_query(engine, source_conn, q)
 
-            sig_cols = _included_signature_cols(src_schema_rows_for_hash)
-            
-            if sig_cols:
-                st.caption("Columns included in hash (in order):")
-                st.code(" | ".join(sig_cols), language="text")
-            
-            df_missing = None
-            df_extra = None
-
-            if missing_in_target and len(missing_in_target) > 0:
-                st.subheader("🔴 Source-Only Rows (in source, NOT in target)")
-                try:
-                    missing_hashes = [str(h).upper() for h in list(missing_in_target)[:50] if h]
-                    if missing_hashes:
-                        q = build_row_hash_mismatch_rows_query_v2(
-                            engine,
-                            src["catalog"],
-                            src["schema"],
-                            src["table"],
-                            schema_rows=src_schema_rows_for_hash,
-                            hash_values=missing_hashes,
-                            include_timestamp=include_timestamp_columns,
-                            timestamp_mode=None,
-                            limit=10,
-                        )
-                        rows = execute_query(engine, source_conn, q)
-
-                        if rows:
-                            df_missing = pd.DataFrame(rows)
-                            # Find row_signature column (case-insensitive)
-                            sig_col = None
-                            for col in df_missing.columns:
-                                if col.lower() == 'row_signature':
-                                    sig_col = col
-                                    break
-                            
-                            if sig_col and sig_cols:
-                                parts = df_missing[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
-                                if parts.shape[1] >= len(sig_cols):
-                                    parts.columns = sig_cols[:parts.shape[1]]
-                                    df_missing = pd.concat([df_missing.drop(columns=[sig_col]), parts], axis=1)
-                            st.dataframe(df_missing, use_container_width=True, height=200)
-                        else:
-                            st.info("No sample rows found")
-                except Exception as e:
-                    st.error(f"Could not fetch source-only rows: {friendly_error(e)}")
-
-            if extra_in_target and len(extra_in_target) > 0:
-                st.subheader("🟢 Target-Only Rows (in target, NOT in source)")
-                try:
-                    extra_hashes = [str(h).upper() for h in list(extra_in_target)[:50] if h]
-                    if extra_hashes:
-                        q = build_row_hash_mismatch_rows_query_v2(
-                            "databricks",
-                            tgt["catalog"],
-                            tgt["schema"],
-                            tgt["table"],
-                            schema_rows=tgt_schema_rows_for_hash,
-                            hash_values=extra_hashes,
-                            include_timestamp=include_timestamp_columns,
-                            timestamp_mode=None,
-                            limit=10,
-                        )
-                        rows = execute_query("Databricks", target_conn, q)
-
-                        if rows:
-                            df_extra = pd.DataFrame(rows)
-                            # Find row_signature column (case-insensitive)
-                            sig_col = None
-                            for col in df_extra.columns:
-                                if col.lower() == 'row_signature':
-                                    sig_col = col
-                                    break
-                            
-                            if sig_col and sig_cols:
-                                parts = df_extra[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
-                                if parts.shape[1] >= len(sig_cols):
-                                    parts.columns = sig_cols[:parts.shape[1]]
-                                    df_extra = pd.concat([df_extra.drop(columns=[sig_col]), parts], axis=1)
-                            st.dataframe(df_extra, use_container_width=True, height=200)
-                        else:
-                            st.info("No sample rows found")
-                except Exception as e:
-                    st.error(f"Could not fetch target-only rows: {friendly_error(e)}")
-
-            # Automatic column diff if both samples exist
-            if df_missing is not None and df_extra is not None and len(sig_cols) > 0:
-                if len(df_missing) > 0 and len(df_extra) > 0:
-                    try:
-                        # Parse signatures for both dataframes (case-insensitive column lookup)
-                        def get_signature_col(df):
-                            for col in df.columns:
-                                if col.lower() == 'row_signature':
-                                    return col
-                            return None
+                    if rows:
+                        df_missing = pd.DataFrame(rows)
+                        # Find row_signature column (case-insensitive)
+                        sig_col = None
+                        for col in df_missing.columns:
+                            if col.lower() == 'row_signature':
+                                sig_col = col
+                                break
                         
-                        sig_col_missing = get_signature_col(df_missing)
-                        sig_col_extra = get_signature_col(df_extra)
-                        
-                        # If signature exists but columns not parsed, parse them now
-                        if sig_col_missing and 'row_signature' not in df_missing.columns:
-                            parts = df_missing[sig_col_missing].astype(str).str.split(r"\|", expand=True, regex=True)
+                        if sig_col and sig_cols:
+                            parts = df_missing[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
                             if parts.shape[1] >= len(sig_cols):
                                 parts.columns = sig_cols[:parts.shape[1]]
-                                df_missing = pd.concat([df_missing.drop(columns=[sig_col_missing]), parts], axis=1)
+                                df_missing = pd.concat([df_missing.drop(columns=[sig_col]), parts], axis=1)
+                        st.dataframe(df_missing, use_container_width=True, height=200)
+                    else:
+                        st.info("No sample rows found")
+            except Exception as e:
+                st.error(f"Could not fetch source-only rows: {friendly_error(e)}")
+
+        if extra_in_target and len(extra_in_target) > 0:
+            st.subheader("🟢 Target-Only Rows (in target, NOT in source)")
+            try:
+                extra_hashes = [str(h).upper() for h in list(extra_in_target)[:50] if h]
+                if extra_hashes:
+                    q = build_row_hash_mismatch_rows_query_v2(
+                        "databricks",
+                        tgt["catalog"],
+                        tgt["schema"],
+                        tgt["table"],
+                        schema_rows=tgt_schema_rows_for_hash,
+                        hash_values=extra_hashes,
+                        include_timestamp=include_timestamp_columns,
+                        timestamp_mode=None,
+                        limit=10,
+                    )
+                    rows = execute_query("Databricks", target_conn, q)
+
+                    if rows:
+                        df_extra = pd.DataFrame(rows)
+                        # Find row_signature column (case-insensitive)
+                        sig_col = None
+                        for col in df_extra.columns:
+                            if col.lower() == 'row_signature':
+                                sig_col = col
+                                break
                         
-                        if sig_col_extra and 'row_signature' not in df_extra.columns:
-                            parts = df_extra[sig_col_extra].astype(str).str.split(r"\|", expand=True, regex=True)
+                        if sig_col and sig_cols:
+                            parts = df_extra[sig_col].astype(str).str.split(r"\|", expand=True, regex=True)
                             if parts.shape[1] >= len(sig_cols):
                                 parts.columns = sig_cols[:parts.shape[1]]
-                                df_extra = pd.concat([df_extra.drop(columns=[sig_col_extra]), parts], axis=1)
+                                df_extra = pd.concat([df_extra.drop(columns=[sig_col]), parts], axis=1)
+                        st.dataframe(df_extra, use_container_width=True, height=200)
+                    else:
+                        st.info("No sample rows found")
+            except Exception as e:
+                st.error(f"Could not fetch target-only rows: {friendly_error(e)}")
+
+        # Automatic column diff if both samples exist
+        if df_missing is not None and df_extra is not None and len(sig_cols) > 0:
+            if len(df_missing) > 0 and len(df_extra) > 0:
+                try:
+                    # Parse signatures for both dataframes (case-insensitive column lookup)
+                    def get_signature_col(df):
+                        for col in df.columns:
+                            if col.lower() == 'row_signature':
+                                return col
+                        return None
+                    
+                    sig_col_missing = get_signature_col(df_missing)
+                    sig_col_extra = get_signature_col(df_extra)
+                    
+                    # If signature exists but columns not parsed, parse them now
+                    if sig_col_missing and 'row_signature' not in df_missing.columns:
+                        parts = df_missing[sig_col_missing].astype(str).str.split(r"\|", expand=True, regex=True)
+                        if parts.shape[1] >= len(sig_cols):
+                            parts.columns = sig_cols[:parts.shape[1]]
+                            df_missing = pd.concat([df_missing.drop(columns=[sig_col_missing]), parts], axis=1)
+                    
+                    if sig_col_extra and 'row_signature' not in df_extra.columns:
+                        parts = df_extra[sig_col_extra].astype(str).str.split(r"\|", expand=True, regex=True)
+                        if parts.shape[1] >= len(sig_cols):
+                            parts.columns = sig_cols[:parts.shape[1]]
+                            df_extra = pd.concat([df_extra.drop(columns=[sig_col_extra]), parts], axis=1)
+                    
+                    # Get available columns from dataframe
+                    available_cols = [c for c in sig_cols if c in df_missing.columns and c in df_extra.columns]
+                    
+                    if available_cols:
+                        row_s = df_missing.iloc[0][available_cols]
+                        row_t = df_extra.iloc[0][available_cols]
                         
-                        # Get available columns from dataframe
-                        available_cols = [c for c in sig_cols if c in df_missing.columns and c in df_extra.columns]
-                        
-                        if available_cols:
-                            row_s = df_missing.iloc[0][available_cols]
-                            row_t = df_extra.iloc[0][available_cols]
-                            
-                            diff_cols = [c for c in available_cols if str(row_s.get(c, "")).strip() != str(row_t.get(c, "")).strip()]
-                        else:
-                            st.warning("Could not extract column values from signature rows for comparison.")
-                    except Exception as e:
-                        st.error(f"Error comparing rows: {friendly_error(e)}")
+                        diff_cols = [c for c in available_cols if str(row_s.get(c, "")).strip() != str(row_t.get(c, "")).strip()]
+                    else:
+                        st.warning("Could not extract column values from signature rows for comparison.")
+                except Exception as e:
+                    st.error(f"Error comparing rows: {friendly_error(e)}")
 
 
-        except Exception as e:
-            st.warning(f"Could not build detailed column breakdown: {friendly_error(e)}")
+    except Exception as e:
+        st.warning(f"Could not build detailed column breakdown: {friendly_error(e)}")
 
-        return False
+    return False
 def approx_equal(a, b, tol=1e-6):
     if a is None or b is None:
         return False
     return abs(a - b) <= tol
     
-def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
+def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold=None):
     st.subheader("📈 Deep Table Statistics")
 
     # ---------- Fetch schema ----------
@@ -2352,6 +2372,9 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
     overall_pass = True
     failed_numeric_cols = []
     failed_string_cols = []
+
+    # Compute variance tolerance from threshold (e.g., 0.99 → 1% tolerance)
+    variance_tolerance = (1 - threshold) if (threshold is not None and threshold > 0) else None
 
     # ---------- Null count ----------
     null_query = f"""
@@ -2404,10 +2427,26 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
             tgt_max = normalize_numeric(t["max_val"])
             tgt_avg = normalize_numeric(t["avg_val"])
 
-            # Use approx_equal for all comparisons (handles floating point precision)
-            min_match = approx_equal(src_min, tgt_min)
-            max_match = approx_equal(src_max, tgt_max)
-            avg_match = approx_equal(src_avg, tgt_avg)
+            if variance_tolerance is not None:
+                # Variance-based comparison
+                def _within_variance(a, b, tol):
+                    if a is None or b is None:
+                        return a is None and b is None
+                    if a == 0 and b == 0:
+                        return True
+                    denominator = max(abs(a), abs(b))
+                    if denominator == 0:
+                        return True
+                    return abs(a - b) / denominator <= tol
+
+                min_match = _within_variance(src_min, tgt_min, variance_tolerance)
+                max_match = _within_variance(src_max, tgt_max, variance_tolerance)
+                avg_match = _within_variance(src_avg, tgt_avg, variance_tolerance)
+            else:
+                # Exact match (original logic)
+                min_match = approx_equal(src_min, tgt_min)
+                max_match = approx_equal(src_max, tgt_max)
+                avg_match = approx_equal(src_avg, tgt_avg)
             
             matched = min_match and max_match and avg_match
 
@@ -2415,11 +2454,14 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
                 overall_pass = False
                 differences = []
                 if not min_match:
-                    differences.append(f"MIN: {src_min} vs {tgt_min} (diff: {abs((src_min or 0) - (tgt_min or 0)):.4f})")
+                    variance_pct = (abs((src_min or 0) - (tgt_min or 0)) / max(abs(src_min or 0), abs(tgt_min or 0), 1)) * 100
+                    differences.append(f"MIN: {src_min} vs {tgt_min} (variance: {variance_pct:.4f}%)")
                 if not max_match:
-                    differences.append(f"MAX: {src_max} vs {tgt_max} (diff: {abs((src_max or 0) - (tgt_max or 0)):.4f})")
+                    variance_pct = (abs((src_max or 0) - (tgt_max or 0)) / max(abs(src_max or 0), abs(tgt_max or 0), 1)) * 100
+                    differences.append(f"MAX: {src_max} vs {tgt_max} (variance: {variance_pct:.4f}%)")
                 if not avg_match:
-                    differences.append(f"AVG: {src_avg} vs {tgt_avg} (diff: {abs((src_avg or 0) - (tgt_avg or 0)):.4f})")
+                    variance_pct = (abs((src_avg or 0) - (tgt_avg or 0)) / max(abs(src_avg or 0), abs(tgt_avg or 0), 1)) * 100
+                    differences.append(f"AVG: {src_avg} vs {tgt_avg} (variance: {variance_pct:.4f}%)")
                 
                 failed_numeric_cols.append({
                     "column": col,
@@ -2427,6 +2469,14 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
                     "target": (tgt_min, tgt_max, tgt_avg),
                     "differences": differences
                 })
+
+            # Build result label
+            if matched and variance_tolerance is not None:
+                result_label = f"✅ PASS (within {variance_tolerance*100:.2f}% variance)"
+            elif matched:
+                result_label = "✅ PASS"
+            else:
+                result_label = "❌ FAIL"
 
             numeric_rows.append({
                 "Column": col,
@@ -2436,10 +2486,12 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
                 "Target Max": tgt_max,
                 "Source Avg": round(src_avg, 4) if src_avg is not None else None,
                 "Target Avg": round(tgt_avg, 4) if tgt_avg is not None else None,
-                "Result": "✅ PASS" if matched else "❌ FAIL"
+                "Result": result_label
             })
 
         st.subheader("🔢 Numeric Column Statistics")
+        if variance_tolerance is not None:
+            st.caption(f"Using variance tolerance: {variance_tolerance*100:.2f}% (threshold: {threshold})")
         st.dataframe(pd.DataFrame(numeric_rows), use_container_width=True)
 
         # Show failed numeric columns with details
@@ -2480,27 +2532,59 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
         tgt_max_len = normalize_numeric(t["max_len"])
         tgt_avg_len = normalize_numeric(t["avg_len"])
 
-        # Use approx_equal for string length comparisons too
-        matched = (
-            approx_equal(src_min_len, tgt_min_len) and
-            approx_equal(src_max_len, tgt_max_len) and
-            approx_equal(src_avg_len, tgt_avg_len)
-        )
+        if variance_tolerance is not None:
+            def _within_variance_str(a, b, tol):
+                if a is None or b is None:
+                    return a is None and b is None
+                if a == 0 and b == 0:
+                    return True
+                denominator = max(abs(a), abs(b))
+                if denominator == 0:
+                    return True
+                return abs(a - b) / denominator <= tol
+
+            matched = (
+                _within_variance_str(src_min_len, tgt_min_len, variance_tolerance) and
+                _within_variance_str(src_max_len, tgt_max_len, variance_tolerance) and
+                _within_variance_str(src_avg_len, tgt_avg_len, variance_tolerance)
+            )
+        else:
+            # Use approx_equal for string length comparisons too
+            matched = (
+                approx_equal(src_min_len, tgt_min_len) and
+                approx_equal(src_max_len, tgt_max_len) and
+                approx_equal(src_avg_len, tgt_avg_len)
+            )
 
         if not matched:
             overall_pass = False
             differences = []
-            if not approx_equal(src_min_len, tgt_min_len):
-                differences.append(f"MIN length: {src_min_len} vs {tgt_min_len}")
-            if not approx_equal(src_max_len, tgt_max_len):
-                differences.append(f"MAX length: {src_max_len} vs {tgt_max_len}")
-            if not approx_equal(src_avg_len, tgt_avg_len):
-                differences.append(f"AVG length: {src_avg_len:.2f} vs {tgt_avg_len:.2f}")
+            if variance_tolerance is not None:
+                if not _within_variance_str(src_min_len, tgt_min_len, variance_tolerance):
+                    differences.append(f"MIN length: {src_min_len} vs {tgt_min_len}")
+                if not _within_variance_str(src_max_len, tgt_max_len, variance_tolerance):
+                    differences.append(f"MAX length: {src_max_len} vs {tgt_max_len}")
+                if not _within_variance_str(src_avg_len, tgt_avg_len, variance_tolerance):
+                    differences.append(f"AVG length: {src_avg_len:.2f} vs {tgt_avg_len:.2f}")
+            else:
+                if not approx_equal(src_min_len, tgt_min_len):
+                    differences.append(f"MIN length: {src_min_len} vs {tgt_min_len}")
+                if not approx_equal(src_max_len, tgt_max_len):
+                    differences.append(f"MAX length: {src_max_len} vs {tgt_max_len}")
+                if not approx_equal(src_avg_len, tgt_avg_len):
+                    differences.append(f"AVG length: {src_avg_len:.2f} vs {tgt_avg_len:.2f}")
             
             failed_string_cols.append({
                 "column": col,
                 "differences": differences
             })
+
+        if matched and variance_tolerance is not None:
+            str_result_label = f"✅ PASS (within {variance_tolerance*100:.2f}% variance)"
+        elif matched:
+            str_result_label = "✅ PASS"
+        else:
+            str_result_label = "❌ FAIL"
 
         string_rows.append({
             "Column": f"{col} (string)",
@@ -2510,7 +2594,7 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
             "Target Max Len": tgt_max_len,
             "Source Avg Len": round(src_avg_len, 2) if src_avg_len else None,
             "Target Avg Len": round(tgt_avg_len, 2) if tgt_avg_len else None,
-            "Result": "✅ PASS" if matched else "❌ FAIL"
+            "Result": str_result_label
         })
 
     if string_rows:
@@ -2524,7 +2608,10 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt):
 
     # Overall summary
     if overall_pass:
-        st.success("✅ All Numeric Statistics PASSED")
+        if variance_tolerance is not None:
+            st.success(f"✅ All Numeric Statistics PASSED (within {variance_tolerance*100:.2f}% variance tolerance)")
+        else:
+            st.success("✅ All Numeric Statistics PASSED")
     else:
         total_failures = len(failed_numeric_cols) + len(failed_string_cols)
         st.error(f"❌ Numeric Statistics FAILED - {total_failures} column(s) with mismatches")
@@ -3538,6 +3625,26 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
             key="manual_override"
         )
 
+        # Threshold for deep mode
+        manual_use_threshold = st.checkbox(
+            "Use acceptable threshold for passing",
+            value=False,
+            key="manual_use_row_threshold_deep",
+            help="If enabled, Row Count, Numeric Stats, and Row Hash use a match ratio threshold instead of exact match. Schema is always exact."
+        )
+        manual_row_threshold = None
+        if manual_use_threshold:
+            manual_row_threshold = st.number_input(
+                "Acceptable Threshold (e.g., 0.99 = 99%)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.99,
+                step=0.01,
+                format="%.4f",
+                key="manual_row_threshold_value_deep",
+                help="Row Count: match ratio. Numeric: variance tolerance. Hash: hash match ratio. Schema is NOT affected."
+            )
+
     else:
         # SHALLOW MODE
         st.info("Shallow mode will automatically run:")
@@ -3872,7 +3979,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     st.session_state["engine"],
                                     st.session_state["source_conn"],
                                     st.session_state["target_conn"],
-                                    s, t
+                                    s, t,
+                                    threshold=manual_row_threshold if manual_use_threshold else None,
                                 )))
 
                         if effective_hash:
@@ -3889,6 +3997,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     s,
                                     t,
                                     include_timestamp_columns=effective_include_timestamp,
+                                    threshold=manual_row_threshold if manual_use_threshold else None,
                                 )))
 
                         if checks:
@@ -3955,7 +4064,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                         st.session_state["engine"],
                                         st.session_state["source_conn"],
                                         st.session_state["target_conn"],
-                                        s, t
+                                        s, t,
+                                        threshold=manual_row_threshold if manual_use_threshold else None,
                                     )))
 
                             if schema_check:
@@ -3974,7 +4084,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                         st.session_state["engine"],
                                         st.session_state["source_conn"],
                                         st.session_state["target_conn"],
-                                        s, t
+                                        s, t,
+                                        threshold=manual_row_threshold if manual_use_threshold else None,
                                     )))
 
                             if hash_check:
@@ -3988,6 +4099,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                         include_timestamp_columns=st.session_state.get(
                                             "include_timestamp_in_hash_manual", True
                                         ),
+                                        threshold=manual_row_threshold if manual_use_threshold else None,
                                     )))
 
                         if checks:
@@ -4195,6 +4307,26 @@ with tab_browse:
             value=False,
             key="browse_override"
         )
+
+        # Threshold for deep mode
+        browse_use_threshold = st.checkbox(
+            "Use acceptable threshold for passing",
+            value=False,
+            key="browse_use_row_threshold_deep",
+            help="If enabled, Row Count, Numeric Stats, and Row Hash use a match ratio threshold instead of exact match. Schema is always exact."
+        )
+        browse_row_threshold = None
+        if browse_use_threshold:
+            browse_row_threshold = st.number_input(
+                "Acceptable Threshold (e.g., 0.99 = 99%)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.99,
+                step=0.01,
+                format="%.4f",
+                key="browse_row_threshold_value_deep",
+                help="Row Count: match ratio. Numeric: variance tolerance. Hash: hash match ratio. Schema is NOT affected."
+            )
 
     else:
         override_mode = False
@@ -4546,7 +4678,8 @@ with tab_browse:
                                 st.session_state["engine"],
                                 st.session_state["source_conn"],
                                 st.session_state["target_conn"],
-                                s, t
+                                s, t,
+                                threshold=browse_row_threshold if browse_use_threshold else None,
                             )))
 
                     if effective_schema:
@@ -4565,7 +4698,8 @@ with tab_browse:
                                 st.session_state["engine"],
                                 st.session_state["source_conn"],
                                 st.session_state["target_conn"],
-                                s, t
+                                s, t,
+                                threshold=browse_row_threshold if browse_use_threshold else None,
                             )))
 
                     if effective_hash:
@@ -4582,6 +4716,7 @@ with tab_browse:
                                 s,
                                 t,
                                 include_timestamp_columns=effective_include_timestamp,
+                                threshold=browse_row_threshold if browse_use_threshold else None,
                             )))
 
                     if checks:
@@ -4649,7 +4784,8 @@ with tab_browse:
                                     st.session_state["engine"],
                                     st.session_state["source_conn"],
                                     st.session_state["target_conn"],
-                                    s, t
+                                    s, t,
+                                    threshold=browse_row_threshold if browse_use_threshold else None,
                                 )))
 
                         if browse_schema_check:
@@ -4668,7 +4804,8 @@ with tab_browse:
                                     st.session_state["engine"],
                                     st.session_state["source_conn"],
                                     st.session_state["target_conn"],
-                                    s, t
+                                    s, t,
+                                    threshold=browse_row_threshold if browse_use_threshold else None,
                                 )))
 
                         if browse_hash_check:
@@ -4682,6 +4819,7 @@ with tab_browse:
                                     include_timestamp_columns=st.session_state.get(
                                         "include_timestamp_in_hash_browse", True
                                     ),
+                                    threshold=browse_row_threshold if browse_use_threshold else None,
                                 )))
 
                     if checks:
