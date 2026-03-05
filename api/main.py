@@ -39,9 +39,13 @@ def create_session_endpoint(req: CreateSessionRequest):
     source_engine = (req.source_engine or "").strip().lower()
 
     if source_engine == "snowflake":
-        locked = load_locked_credentials(req.credential_password)
-        source_payload = locked["snowflake"]
-        target_payload = locked["databricks"]
+        if req.credential_password:
+            locked = load_locked_credentials(req.credential_password)
+            source_payload = locked["snowflake"]
+            target_payload = locked["databricks"]
+        else:
+            source_payload = req.source
+            target_payload = req.target.model_dump() if req.target else {}
     elif source_engine == "bigquery":
         if req.credential_password:
             locked = load_locked_credentials(req.credential_password)
