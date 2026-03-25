@@ -3,9 +3,7 @@ import pandas as pd
 import uuid
 from datetime import datetime, timedelta
 import psycopg2
-from backend.auth_crypto import hash_password
 from backend.auth_service import is_admin_login, is_user_authorized
-from backend.auth_store import get_pg_conn as get_auth_pg_conn, upsert_user
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
 from connections.postgres import POSTGRES_CONFIG
@@ -17,6 +15,7 @@ os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
 import base64
 import json
+import hashlib
 import requests
 import re
 import html
@@ -161,30 +160,12 @@ def _render_admin_page() -> None:
 
         card = st.container(border=True)
         with card:
-            st.subheader("Add / Update User")
-            st.caption("Passwords are stored as salted hashes in Postgres.")
-
-            username = st.text_input("Username", placeholder="e.g. aswath", key="admin_add_username")
-            password = st.text_input("Password", type="password", key="admin_add_password")
+            st.subheader("Admin Panel")
+            st.caption("User access is configured using hardcoded credentials in backend/auth_config.py.")
 
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("Add User", use_container_width=True, key="admin_add_user"):
-                    if not username.strip() or not password:
-                        st.error("Please enter username and password")
-                    else:
-                        try:
-                            pg = get_auth_pg_conn()
-                            try:
-                                upsert_user(pg, username.strip(), hash_password(password))
-                            finally:
-                                try:
-                                    pg.close()
-                                except Exception:
-                                    pass
-                            st.success("User added/updated successfully")
-                        except Exception as e:
-                            st.error(f"Failed to save user: {e}")
+                st.info("To change user login, update USER_USERNAME and USER_PASSWORD in backend/auth_config.py")
 
             with c2:
                 if st.button("Logout", use_container_width=True, key="admin_logout"):
@@ -208,25 +189,15 @@ def _render_login_page() -> None:
                 u = st.text_input("Username", placeholder="Your username", key="login_user_username")
                 p = st.text_input("Password", type="password", key="login_user_password")
                 if st.button("Login", use_container_width=True, key="login_user_btn"):
-                    try:
-                        pg = get_auth_pg_conn()
-                        try:
-                            ok = is_user_authorized(pg, u.strip(), p)
-                        finally:
-                            try:
-                                pg.close()
-                            except Exception:
-                                pass
+                    ok = is_user_authorized(u.strip(), p)
 
-                        if ok:
-                            st.session_state["auth_role"] = "user"
-                            st.session_state["auth_user"] = u.strip()
-                            st.session_state["auth_version"] = _current_auth_version(u.strip())
-                            st.rerun()
-                        else:
-                            st.error("You dont have authentication contact to administrator")
-                    except Exception as e:
-                        st.error(f"Login failed: {e}")
+                    if ok:
+                        st.session_state["auth_role"] = "user"
+                        st.session_state["auth_user"] = u.strip()
+                        st.session_state["auth_version"] = _current_auth_version(u.strip())
+                        st.rerun()
+                    else:
+                        st.error("Invalid user credentials")
 
             with admin_tab:
                 a = st.text_input("Admin Username", placeholder="Admin username", key="login_admin_username")
@@ -522,6 +493,40 @@ def load_conn_json_credentials():
         "snowflake": sf,
         "databricks": dbx
     }
+
+
+def _conn_json_fingerprint() -> str | None:
+    """
+    Build a stable hash of connection settings that should trigger reconnection
+    when changed in conn.json.
+    """
+    conn_json_path = Path(__file__).resolve().parent / "conn.json"
+    if not conn_json_path.exists():
+        return None
+
+    try:
+        data = json.loads(conn_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    source = data.get("source", {}) if isinstance(data, dict) else {}
+    target = data.get("target", {}) if isinstance(data, dict) else {}
+    payload = {
+        "source": {
+            "account": source.get("account"),
+            "user": source.get("user"),
+            "password": source.get("password"),
+            "warehouse": source.get("warehouse"),
+            "role": source.get("role"),
+        },
+        "target": {
+            "server_hostname": target.get("server_hostname"),
+            "http_path": target.get("http_path"),
+            "access_token": target.get("access_token"),
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def create_backend_session_from_ui(
@@ -3277,6 +3282,7 @@ if st.session_state.get("engine") and st.session_state.get("engine") != source_e
     st.session_state["source_conn"] = None
     st.session_state["target_conn"] = None
     st.session_state["engine"] = None
+    st.session_state["conn_json_fingerprint"] = None
     if "backend_session_id" in st.session_state:
         del st.session_state["backend_session_id"]
 
@@ -3371,12 +3377,40 @@ DEFAULT_SESSION_KEYS = {
     "include_schema_config": True,
     "include_numeric_config": True,
     "include_hash_config": True,
+    "conn_json_fingerprint": None,
     "total_validation_runs_counter_initialized": False,
 }
 
 for key, default in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+# If conn.json changed while Snowflake is already connected, force a reconnect
+# so the UI does not keep using stale credentials from the existing live session.
+if source_engine == "Snowflake" and st.session_state.get("engine") == "Snowflake":
+    current_fp = _conn_json_fingerprint()
+    previous_fp = st.session_state.get("conn_json_fingerprint")
+    if (
+        current_fp
+        and previous_fp
+        and current_fp != previous_fp
+        and st.session_state.get("source_conn")
+    ):
+        for key in ["source_conn", "target_conn"]:
+            conn = st.session_state.get(key)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        st.session_state["source_conn"] = None
+        st.session_state["target_conn"] = None
+        st.session_state["engine"] = None
+        st.session_state["conn_json_fingerprint"] = current_fp
+        if "backend_session_id" in st.session_state:
+            del st.session_state["backend_session_id"]
+        st.warning("Snowflake credentials changed in conn.json. Click 'Establish Connections' to reconnect.")
 
 
 
@@ -3413,6 +3447,7 @@ if connect_clicked:
                 dbx.get("http_path"),
                 dbx.get("access_token"),
             )
+            st.session_state["conn_json_fingerprint"] = _conn_json_fingerprint()
 
         st.session_state["source_conn"] = source_conn
         st.session_state["target_conn"] = target_conn

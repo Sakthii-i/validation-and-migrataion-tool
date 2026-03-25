@@ -10,3 +10,7 @@ ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD_HASH = (
     "pbkdf2_sha256$200000$uPhvmKw0PqDhCDul1UMJGw==$I23o7zB2rbNAqxpfc2SIVz13AYJWDdSUH4kE1po7h6E="
 )
+
+# Default user credentials (hardcoded).
+USER_USERNAME = "user"
+USER_PASSWORD = "user123"
