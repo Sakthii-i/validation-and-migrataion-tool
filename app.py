@@ -3,6 +3,29 @@ import pandas as pd
 import uuid
 from datetime import datetime, timedelta
 import psycopg2
+from pathlib import Path
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv(Path(__file__).parent / ".env")
+
+
+def _get_credential_password() -> str:
+    """Load credential password from env first, then Streamlit secrets."""
+    env_pwd = (os.getenv("CREDENTIAL_PASSWORD") or "").strip()
+    if env_pwd:
+        return env_pwd
+
+    try:
+        secret_pwd = st.secrets.get("CREDENTIAL_PASSWORD", "")
+        if isinstance(secret_pwd, str):
+            return secret_pwd.strip()
+    except Exception:
+        pass
+
+    return ""
+
 from backend.auth_service import is_admin_login, is_user_authorized
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
@@ -10,7 +33,6 @@ from connections.postgres import POSTGRES_CONFIG
 from connections.snowflake import connect_snowflake
 from metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
 from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2, build_column_diff_query
-import os
 os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
 import base64
@@ -20,7 +42,6 @@ import requests
 import re
 import html
 import threading
-from pathlib import Path
 from api.auth import load_locked_credentials
 
 
@@ -462,71 +483,8 @@ def _get_api_key() -> str | None:
     return None
 
 
-def load_conn_json_credentials():
-    """
-    Load Snowflake and Databricks credentials from conn.json file.
-    Returns a dict with 'snowflake' and 'databricks' keys.
-    """
-    conn_json_path = Path(__file__).resolve().parent / "conn.json"
-    
-    if not conn_json_path.exists():
-        raise FileNotFoundError(f"conn.json not found at {conn_json_path}")
-    
-    with open(conn_json_path, "r") as f:
-        data = json.load(f)
-    
-    # Validate required Snowflake fields
-    sf = data.get("source", {})
-    required_sf = ["account", "user", "warehouse"]
-    missing_sf = [field for field in required_sf if not sf.get(field)]
-    if missing_sf:
-        raise ValueError(f"Missing Snowflake credentials in conn.json: {', '.join(missing_sf)}")
-    
-    # Validate required Databricks fields
-    dbx = data.get("target", {})
-    required_dbx = ["server_hostname", "http_path", "access_token"]
-    missing_dbx = [field for field in required_dbx if not dbx.get(field)]
-    if missing_dbx:
-        raise ValueError(f"Missing Databricks credentials in conn.json: {', '.join(missing_dbx)}")
-    
-    return {
-        "snowflake": sf,
-        "databricks": dbx
-    }
 
 
-def _conn_json_fingerprint() -> str | None:
-    """
-    Build a stable hash of connection settings that should trigger reconnection
-    when changed in conn.json.
-    """
-    conn_json_path = Path(__file__).resolve().parent / "conn.json"
-    if not conn_json_path.exists():
-        return None
-
-    try:
-        data = json.loads(conn_json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    source = data.get("source", {}) if isinstance(data, dict) else {}
-    target = data.get("target", {}) if isinstance(data, dict) else {}
-    payload = {
-        "source": {
-            "account": source.get("account"),
-            "user": source.get("user"),
-            "password": source.get("password"),
-            "warehouse": source.get("warehouse"),
-            "role": source.get("role"),
-        },
-        "target": {
-            "server_hostname": target.get("server_hostname"),
-            "http_path": target.get("http_path"),
-            "access_token": target.get("access_token"),
-        },
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def create_backend_session_from_ui(
@@ -558,21 +516,13 @@ def create_backend_session_from_ui(
             "access_token": (dbx_token or "").strip(),
         }
     else:
-        loaded = load_conn_json_credentials()
-        sf = loaded["snowflake"]
-        dbx = loaded["databricks"]
-        source_payload = {
-            "account": (sf.get("account") or "").strip(),
-            "user": (sf.get("user") or "").strip(),
-            "password": (sf.get("password") or "").strip(),
-            "warehouse": (sf.get("warehouse") or "").strip(),
-            "role": (sf.get("role") or "").strip() or None,
-        }
-        target_payload = {
-            "server_hostname": (dbx.get("server_hostname") or "").strip(),
-            "http_path": (dbx.get("http_path") or "").strip(),
-            "access_token": (dbx.get("access_token") or "").strip(),
-        }
+        # For non-BigQuery sources, credentials must be provided via encrypted credential.txt
+        if not credential_password:
+            raise ValueError("credential_password is required for Snowflake/Databricks connections")
+        
+        # Credentials will be loaded via the API using credential_password
+        source_payload = {}
+        target_payload = {}
 
     payload = {
         "source_engine": source_engine_l,
@@ -3282,7 +3232,7 @@ if st.session_state.get("engine") and st.session_state.get("engine") != source_e
     st.session_state["source_conn"] = None
     st.session_state["target_conn"] = None
     st.session_state["engine"] = None
-    st.session_state["conn_json_fingerprint"] = None
+    # Removed conn_json_fingerprint as credentials are now encrypted
     if "backend_session_id" in st.session_state:
         del st.session_state["backend_session_id"]
 
@@ -3377,40 +3327,12 @@ DEFAULT_SESSION_KEYS = {
     "include_schema_config": True,
     "include_numeric_config": True,
     "include_hash_config": True,
-    "conn_json_fingerprint": None,
     "total_validation_runs_counter_initialized": False,
 }
 
 for key, default in DEFAULT_SESSION_KEYS.items():
     if key not in st.session_state:
         st.session_state[key] = default
-
-
-# If conn.json changed while Snowflake is already connected, force a reconnect
-# so the UI does not keep using stale credentials from the existing live session.
-if source_engine == "Snowflake" and st.session_state.get("engine") == "Snowflake":
-    current_fp = _conn_json_fingerprint()
-    previous_fp = st.session_state.get("conn_json_fingerprint")
-    if (
-        current_fp
-        and previous_fp
-        and current_fp != previous_fp
-        and st.session_state.get("source_conn")
-    ):
-        for key in ["source_conn", "target_conn"]:
-            conn = st.session_state.get(key)
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        st.session_state["source_conn"] = None
-        st.session_state["target_conn"] = None
-        st.session_state["engine"] = None
-        st.session_state["conn_json_fingerprint"] = current_fp
-        if "backend_session_id" in st.session_state:
-            del st.session_state["backend_session_id"]
-        st.warning("Snowflake credentials changed in conn.json. Click 'Establish Connections' to reconnect.")
 
 
 
@@ -3430,24 +3352,35 @@ if connect_clicked:
             if missing([dbx_server, dbx_http_path, dbx_token]):
                 st.error("❌ Please fill all Databricks credentials")
                 st.stop()
+            source_conn = connect_bigquery(bq_key_path, project_id, dataset_location)
+            target_conn = connect_databricks(dbx_server, dbx_http_path, dbx_token)
         else:
-            # Snowflake loads from conn.json
-            loaded = load_conn_json_credentials()
-            sf = loaded["snowflake"]
-            dbx = loaded["databricks"]
-            source_conn = connect_snowflake(
-                sf.get("account"),
-                sf.get("user"),
-                sf.get("password"),
-                sf.get("warehouse"),
-                sf.get("role"),
-            )
-            target_conn = connect_databricks(
-                dbx.get("server_hostname"),
-                dbx.get("http_path"),
-                dbx.get("access_token"),
-            )
-            st.session_state["conn_json_fingerprint"] = _conn_json_fingerprint()
+            # Snowflake: auto-connect with credentials from encrypted credential.txt
+            credential_password = _get_credential_password()
+            if not credential_password:
+                st.error("❌ CREDENTIAL_PASSWORD is not configured. Set it via OS environment, .env, or .streamlit/secrets.toml")
+                st.stop()
+            
+            try:
+                creds = load_locked_credentials(credential_password)
+                sf_creds = creds["snowflake"]
+                dbx_creds = creds["databricks"]
+                
+                source_conn = connect_snowflake(
+                    sf_creds["account"],
+                    sf_creds["user"],
+                    sf_creds["password"],
+                    sf_creds["warehouse"],
+                    sf_creds.get("role")
+                )
+                target_conn = connect_databricks(
+                    dbx_creds["server_hostname"],
+                    dbx_creds["http_path"],
+                    dbx_creds["access_token"]
+                )
+            except Exception as e:
+                st.error(f"❌ Failed to decrypt credentials: {friendly_error(e)}")
+                st.stop()
 
         st.session_state["source_conn"] = source_conn
         st.session_state["target_conn"] = target_conn
@@ -3466,8 +3399,10 @@ if connect_clicked:
             api_base = _get_api_base_url()
             api_key = _get_api_key()
             if api_base and api_key:
+                # For Snowflake, pass the credential_password to backend
+                cred_pwd = _get_credential_password() if source_engine == "Snowflake" else ""
                 sess = create_backend_session_from_ui(
-                    credential_password="" if source_engine == "Snowflake" else "",
+                    credential_password=cred_pwd,
                     source_engine=source_engine,
                     project_id=project_id if source_engine == "BigQuery" else None,
                     dataset_location=dataset_location if source_engine == "BigQuery" else None,
