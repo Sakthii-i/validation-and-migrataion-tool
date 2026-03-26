@@ -6,6 +6,7 @@ import psycopg2
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import sys
 
 # Load environment variables from .env file
 load_dotenv(Path(__file__).parent / ".env")
@@ -16,6 +17,19 @@ def _get_credential_password() -> str:
     env_pwd = (os.getenv("CREDENTIAL_PASSWORD") or "").strip()
     if env_pwd:
         return env_pwd
+
+    # Windows fallback: read user-level env var directly from registry.
+    # This helps when Streamlit was started before the variable was set.
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+                reg_pwd, _ = winreg.QueryValueEx(key, "CREDENTIAL_PASSWORD")
+                if isinstance(reg_pwd, str) and reg_pwd.strip():
+                    return reg_pwd.strip()
+        except Exception:
+            pass
 
     try:
         secret_pwd = st.secrets.get("CREDENTIAL_PASSWORD", "")
