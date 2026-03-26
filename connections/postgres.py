@@ -26,10 +26,10 @@ def _env_int(name: str, default: int) -> int:
 # - Falls back to existing hardcoded defaults for backward compatibility.
 # =============================
 POSTGRES_CONFIG = {
-    "host": _env("POSTGRES_HOST", "sakthi.postgres.database.azure.com"),
+    "host": _env("POSTGRES_HOST", "mrid.postgres.database.azure.com"),
     "port": _env_int("POSTGRES_PORT", 5432),
     "db": _env("POSTGRES_DB", "postgres"),
-    "user": _env("POSTGRES_USER", "sakthi"),
-    "password": _env("POSTGRES_PASSWORD", "Petchi@2811"),
+    "user": _env("POSTGRES_USER", "mridulla"),
+    "password": _env("POSTGRES_PASSWORD", "snu-1309"),
     "sslmode": _env("POSTGRES_SSLMODE", "require"),
 }
