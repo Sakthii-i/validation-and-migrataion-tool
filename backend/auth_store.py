@@ -61,3 +61,24 @@ def get_password_hash(pg_conn, username: str) -> str | None:
     row = cur.fetchone()
     cur.close()
     return row[0] if row else None
+
+
+def list_usernames(pg_conn) -> list[str]:
+    ensure_credentials_table(pg_conn)
+
+    cur = pg_conn.cursor()
+    cur.execute("SELECT username FROM auth.credentials ORDER BY username ASC")
+    rows = cur.fetchall() or []
+    cur.close()
+    return [str(r[0]) for r in rows if r and r[0] is not None]
+
+
+def delete_user(pg_conn, username: str) -> bool:
+    ensure_credentials_table(pg_conn)
+
+    cur = pg_conn.cursor()
+    cur.execute("DELETE FROM auth.credentials WHERE username = %s", (username,))
+    deleted = cur.rowcount > 0
+    pg_conn.commit()
+    cur.close()
+    return deleted

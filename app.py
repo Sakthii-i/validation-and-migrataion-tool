@@ -40,7 +40,13 @@ def _get_credential_password() -> str:
 
     return ""
 
-from backend.auth_service import is_admin_login, is_user_authorized
+from backend.auth_service import (
+    grant_user_access,
+    is_admin_login,
+    is_user_authorized,
+    list_authorized_users,
+    revoke_user_access,
+)
 from connections.bigquery import connect_bigquery
 from connections.databricks import connect_databricks
 from connections.postgres import POSTGRES_CONFIG
@@ -196,15 +202,43 @@ def _render_admin_page() -> None:
         card = st.container(border=True)
         with card:
             st.subheader("Admin Panel")
-            st.caption("User access is configured using hardcoded credentials in backend/auth_config.py.")
+            st.caption("Only users explicitly granted here can log in.")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.info("To change user login, update USER_USERNAME and USER_PASSWORD in backend/auth_config.py")
+            with st.form("admin_grant_user_form", clear_on_submit=True):
+                new_user = st.text_input("Username", placeholder="Enter username")
+                new_pass = st.text_input("Password", type="password", placeholder="Set user password")
+                grant_clicked = st.form_submit_button("Grant / Update Access", use_container_width=True)
 
-            with c2:
-                if st.button("Logout", use_container_width=True, key="admin_logout"):
-                    _logout(broadcast=True)
+            if grant_clicked:
+                try:
+                    grant_user_access(new_user, new_pass)
+                    st.success(f"Access granted for '{new_user.strip()}'.")
+                except Exception as e:
+                    st.error(f"Failed to grant access: {e}")
+
+            st.markdown("### Authorized Users")
+            try:
+                users = list_authorized_users()
+            except Exception as e:
+                users = []
+                st.error(f"Failed to load users: {e}")
+
+            if users:
+                selected = st.selectbox("Select user to revoke", options=users, key="admin_revoke_user")
+                if st.button("Revoke Access", use_container_width=True, key="admin_revoke_btn"):
+                    try:
+                        deleted = revoke_user_access(selected)
+                        if deleted:
+                            st.success(f"Access revoked for '{selected}'.")
+                        else:
+                            st.warning("User not found.")
+                    except Exception as e:
+                        st.error(f"Failed to revoke access: {e}")
+            else:
+                st.info("No users are authorized yet. Add a user above.")
+
+            if st.button("Logout", use_container_width=True, key="admin_logout"):
+                _logout(broadcast=True)
 
 
 def _render_login_page() -> None:
@@ -232,7 +266,7 @@ def _render_login_page() -> None:
                         st.session_state["auth_version"] = _current_auth_version(u.strip())
                         st.rerun()
                     else:
-                        st.error("Invalid user credentials")
+                        st.error("Access denied. Ask admin to grant user access.")
 
             with admin_tab:
                 a = st.text_input("Admin Username", placeholder="Admin username", key="login_admin_username")
