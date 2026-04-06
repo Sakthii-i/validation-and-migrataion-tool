@@ -370,6 +370,7 @@ DEFAULT_CONFIG = {
           "source": "efundamentals.product_data",
           "target": "common_catalog.product_data"
         },
+                "where": "1=1",
         "validation_type": "deep",
         "metrics": ["row_count", "schema", "hash", "numeric"]
       },
@@ -378,6 +379,9 @@ DEFAULT_CONFIG = {
           "source": "efundamentals.sales_data",
           "target": "common_catalog.sales_data"
         },
+                "use_separate_where": True,
+                "source_where": "sale_date >= current_date - 7",
+                "target_where": "sale_date >= date_sub(current_date, 7)",
         "validation_type": "shallow",
         "metrics": ["row_count"]
       },
@@ -960,6 +964,29 @@ def bool_to_status(val):
         return "FAIL"
     return None
 
+
+def normalize_where_input(where_value, default="1=1"):
+    if where_value is None:
+        return default
+    text = str(where_value).strip()
+    return text if text else default
+
+
+def resolve_table_where_clauses(
+    unified_where=None,
+    use_separate=False,
+    source_where=None,
+    target_where=None,
+):
+    if use_separate:
+        return (
+            normalize_where_input(source_where),
+            normalize_where_input(target_where),
+        )
+
+    shared = normalize_where_input(unified_where)
+    return shared, shared
+
 def validate_csv(df):
     
    
@@ -990,6 +1017,10 @@ def validate_csv(df):
 
     if not df["include_timestamp"].astype(str).str.lower().isin(valid_bool).all():
         raise ValueError("include_timestamp must be yes/no/true/false/1/0")
+
+    if "use_separate_where" in df.columns:
+        if not df["use_separate_where"].astype(str).str.lower().isin(valid_bool).all():
+            raise ValueError("use_separate_where must be yes/no/true/false/1/0")
 
     # Validate optional row_threshold column if present
     if "row_threshold" in df.columns:
@@ -1051,6 +1082,21 @@ def run_csv_validations(df):
                 except (ValueError, TypeError):
                     row_threshold = None
 
+        use_separate_where = False
+        if "use_separate_where" in row.index:
+            separate_val = str(row["use_separate_where"]).strip().lower()
+            use_separate_where = separate_val in ["yes", "true", "1"]
+
+        unified_where = row["where_clause"] if "where_clause" in row.index else None
+        source_where = row["source_where"] if "source_where" in row.index else None
+        target_where = row["target_where"] if "target_where" in row.index else None
+        effective_source_where, effective_target_where = resolve_table_where_clauses(
+            unified_where=unified_where,
+            use_separate=use_separate_where,
+            source_where=source_where,
+            target_where=target_where,
+        )
+
         # --------------------------
         # Determine Metrics
         # --------------------------
@@ -1098,6 +1144,8 @@ def run_csv_validations(df):
                 st.session_state["target_conn"],
                 src, tgt,
                 threshold=row_threshold,
+                source_where=effective_source_where,
+                target_where=effective_target_where,
             )
 
             schema_res = run_schema_validation(
@@ -1133,6 +1181,8 @@ def run_csv_validations(df):
                         st.session_state["target_conn"],
                         s, t,
                         threshold=thr,
+                        source_where=effective_source_where,
+                        target_where=effective_target_where,
                     )))
 
             if selected_validations["schema"]:
@@ -1153,6 +1203,8 @@ def run_csv_validations(df):
                         st.session_state["target_conn"],
                         s, t,
                         threshold=thr,
+                        source_where=effective_source_where,
+                        target_where=effective_target_where,
                     )))
 
             if selected_validations["hash"]:
@@ -1165,6 +1217,8 @@ def run_csv_validations(df):
                         t,
                         include_timestamp_columns=include_timestamp,
                         threshold=thr,
+                        source_where=effective_source_where,
+                        target_where=effective_target_where,
                     )))
 
             results_map = run_checks_in_order(checks)
@@ -1348,7 +1402,11 @@ def parse_config_tables(config):
             "source": input_table["source"],
             "target": input_table["target"],
             "validation_type": validation_type,
-            "metrics": metrics
+            "metrics": metrics,
+            "where": table_cfg.get("where", "1=1"),
+            "use_separate_where": bool(table_cfg.get("use_separate_where", False)),
+            "source_where": table_cfg.get("source_where", "1=1"),
+            "target_where": table_cfg.get("target_where", "1=1"),
         })
 
     return parsed
@@ -1376,7 +1434,16 @@ def run_shallow_validation(engine, source_conn, target_conn, src_sel, tgt_sel):
     # =============================
     # ROW COUNT VALIDATION
     # =============================
-def run_row_count(engine, source_conn, target_conn, src, tgt, threshold=None):
+def run_row_count(
+    engine,
+    source_conn,
+    target_conn,
+    src,
+    tgt,
+    threshold=None,
+    source_where="1=1",
+    target_where="1=1",
+):
     metrics = {"row_count": True}
 
     src_query = build_shallow_query(
@@ -1384,7 +1451,8 @@ def run_row_count(engine, source_conn, target_conn, src, tgt, threshold=None):
         src["catalog"],
         src["schema"],
         src["table"],
-        metrics
+        metrics,
+        where_clause=normalize_where_input(source_where),
     )
 
     tgt_query = build_shallow_query(
@@ -1392,7 +1460,8 @@ def run_row_count(engine, source_conn, target_conn, src, tgt, threshold=None):
         tgt["catalog"],
         tgt["schema"],
         tgt["table"],
-        metrics
+        metrics,
+        where_clause=normalize_where_input(target_where),
     )
 
     src_res = normalize_result(
@@ -1581,12 +1650,25 @@ def run_schema_validation(
 
 
 
-def run_numeric_stats(engine, conn, catalog, schema, table, numeric_cols):
+def run_numeric_stats(
+    engine,
+    conn,
+    catalog,
+    schema,
+    table,
+    numeric_cols,
+    where_clause="1=1",
+):
     stats = {}
 
     for col in numeric_cols:
         query = build_numeric_stats_query(
-            engine, catalog, schema, table, col
+            engine,
+            catalog,
+            schema,
+            table,
+            col,
+            where_clause=normalize_where_input(where_clause),
         )
         res = execute_query(engine, conn, query)[0]
         stats[col] = res
@@ -1671,6 +1753,8 @@ def run_column_level_diff(
     src_sig_cols: list[str],
     tgt_sig_cols: list[str],
     include_timestamp_columns: bool = True,
+    source_where: str = "1=1",
+    target_where: str = "1=1",
 ) -> None:
     """
     Perform a column-level diff between source and target for rows whose
@@ -1740,6 +1824,7 @@ def run_column_level_diff(
         hash_set: set,
         fetch_cols: list[str],
         include_ts: bool,
+        where_clause_for_table: str,
     ) -> dict:
         """
         Returns {composite_key_tuple: {col: raw_value, ...}, ...}
@@ -1759,6 +1844,7 @@ def run_column_level_diff(
             include_timestamp=include_ts,
             timestamp_mode=None,
             limit=len(hash_list),
+            where_clause=normalize_where_input(where_clause_for_table),
         )
         rows = execute_query(eng, conn, q)
 
@@ -1816,6 +1902,7 @@ def run_column_level_diff(
             key_columns=[c.lower() if eng == "snowflake" else c for c in fetch_cols[:len(key_columns)]],
             all_columns=fetch_cols,
             mismatch_key_values=list(key_tuples),
+            base_where_clause=normalize_where_input(where_clause_for_table),
         )
         raw_rows = execute_query(eng, conn, diff_q)
 
@@ -1854,6 +1941,7 @@ def run_column_level_diff(
                 src["catalog"], src["schema"], src["table"],
                 src_hash_schema, missing_in_target_hashes,
                 src_fetch_cols, include_timestamp_columns,
+                source_where,
             )
         except Exception as e:
             st.error(f"Could not fetch source diff rows: {friendly_error(e)}")
@@ -1865,6 +1953,7 @@ def run_column_level_diff(
                 tgt["catalog"], tgt["schema"], tgt["table"],
                 tgt_hash_schema, extra_in_target_hashes,
                 tgt_fetch_cols, include_timestamp_columns,
+                target_where,
             )
         except Exception as e:
             st.error(f"Could not fetch target diff rows: {friendly_error(e)}")
@@ -1994,6 +2083,8 @@ def run_row_hash_validation(
     tgt,
     include_timestamp_columns=None,
     threshold=None,
+    source_where="1=1",
+    target_where="1=1",
 ):
     st.subheader("🔐 Row Hash Validation")
 
@@ -2120,6 +2211,7 @@ def run_row_hash_validation(
         src["schema"],
         src["table"],
         columns=src_columns,
+        where_clause=normalize_where_input(source_where),
     )
 
     tgt_query = build_row_hash_query(
@@ -2128,6 +2220,7 @@ def run_row_hash_validation(
         tgt["schema"],
         tgt["table"],
         columns=tgt_columns,
+        where_clause=normalize_where_input(target_where),
     )
 
     with st.spinner("Computing row hashes..."):
@@ -2228,6 +2321,8 @@ def run_row_hash_validation(
                         src_sig_cols=src_columns,
                         tgt_sig_cols=tgt_columns,
                         include_timestamp_columns=include_timestamp_columns,
+                        source_where=normalize_where_input(source_where),
+                        target_where=normalize_where_input(target_where),
                     )
                 except Exception as _e:
                     st.error(f"Column-level diff failed: {friendly_error(_e)}")
@@ -2302,6 +2397,7 @@ def run_row_hash_validation(
                         include_timestamp=include_timestamp_columns,
                         timestamp_mode=None,
                         limit=10,
+                        where_clause=normalize_where_input(source_where),
                     )
                     rows = execute_query(engine, source_conn, q)
 
@@ -2340,6 +2436,7 @@ def run_row_hash_validation(
                         include_timestamp=include_timestamp_columns,
                         timestamp_mode=None,
                         limit=10,
+                        where_clause=normalize_where_input(target_where),
                     )
                     rows = execute_query("Databricks", target_conn, q)
 
@@ -2413,8 +2510,20 @@ def approx_equal(a, b, tol=1e-6):
         return False
     return abs(a - b) <= tol
     
-def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold=None):
+def run_numeric_validation(
+    engine,
+    source_conn,
+    target_conn,
+    src,
+    tgt,
+    threshold=None,
+    source_where="1=1",
+    target_where="1=1",
+):
     st.subheader("📈 Deep Table Statistics")
+
+    source_where = normalize_where_input(source_where)
+    target_where = normalize_where_input(target_where)
 
     # ---------- Fetch schema ----------
     src_schema = fetch_schema(
@@ -2444,6 +2553,7 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold
             for r in src_schema
         ])}
         FROM {src['catalog']}.{src['schema']}.{src['table']}
+        WHERE {source_where}
     """
     null_res = execute_query("snowflake", source_conn, null_query)[0]
 
@@ -2467,12 +2577,14 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold
         src_stats = run_numeric_stats(
             engine, source_conn,
             src["catalog"], src["schema"], src["table"],
-            numeric_cols
+            numeric_cols,
+            where_clause=source_where,
         )
         tgt_stats = run_numeric_stats(
             "databricks", target_conn,
             tgt["catalog"], tgt["schema"], tgt["table"],
-            numeric_cols
+            numeric_cols,
+            where_clause=target_where,
         )
 
         for col in numeric_cols:
@@ -2572,6 +2684,7 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold
                 MAX(round(LENGTH({col}),4)) AS max_len,
                 AVG(round(LENGTH({col}),4)) AS avg_len
             FROM {src['catalog']}.{src['schema']}.{src['table']}
+            WHERE {source_where}
         """
         tgt_q = f"""
             SELECT
@@ -2579,6 +2692,7 @@ def run_numeric_validation(engine, source_conn, target_conn, src, tgt, threshold
                 MAX(round(LENGTH({col}),4)) AS max_len,
                 AVG(round(LENGTH({col}),4)) AS avg_len
             FROM {tgt['catalog']}.{tgt['schema']}.{tgt['table']}
+            WHERE {target_where}
         """
 
         s = normalize_keys(execute_query("snowflake", source_conn, src_q)[0])
@@ -2758,7 +2872,14 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-def run_validation(src, tgt, validation_type, metrics):
+def run_validation(
+    src,
+    tgt,
+    validation_type,
+    metrics,
+    source_where="1=1",
+    target_where="1=1",
+):
 
         metric_set = set(m.lower() for m in (metrics or []))
         if "all" in metric_set:
@@ -2797,7 +2918,10 @@ def run_validation(src, tgt, validation_type, metrics):
                     st.session_state["engine"],
                     st.session_state["source_conn"],
                     st.session_state["target_conn"],
-                    src, tgt
+                    src,
+                    tgt,
+                    source_where=source_where,
+                    target_where=target_where,
                 )
                 if selected_validations.get("row_count")
                 else None
@@ -2835,7 +2959,10 @@ def run_validation(src, tgt, validation_type, metrics):
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src,
+                        tgt,
+                        source_where=source_where,
+                        target_where=target_where,
                     )
                 ))
             if selected_validations.get("schema"):
@@ -2858,7 +2985,10 @@ def run_validation(src, tgt, validation_type, metrics):
                         st.session_state["engine"],
                         st.session_state["source_conn"],
                         st.session_state["target_conn"],
-                        src, tgt
+                        src,
+                        tgt,
+                        source_where=source_where,
+                        target_where=target_where,
                     )
                 ))
             if selected_validations.get("hash"):
@@ -2873,6 +3003,8 @@ def run_validation(src, tgt, validation_type, metrics):
                         include_timestamp_columns=st.session_state.get(
                             "include_timestamp_in_hash_config", True
                         ),
+                        source_where=source_where,
+                        target_where=target_where,
                     )
                 ))
 
@@ -3606,7 +3738,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
         st.divider()
         st.subheader("🚀 Running Config Driven Validations")
 
-        for t in tables:
+        for i, t in enumerate(tables):
             st.markdown(f"### 🔍 {t['name']}")
 
             src_cat, src_sch, src_tbl = parse_table_path(t["source"])
@@ -3615,11 +3747,50 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
             src = {"catalog": src_cat, "schema": src_sch, "table": src_tbl}
             tgt = {"catalog": tgt_cat, "schema": tgt_sch, "table": tgt_tbl}
 
+            config_use_separate_where = st.checkbox(
+                "Use separate Source/Target WHERE",
+                key=f"config_use_separate_where_{i}",
+                value=bool(t.get("use_separate_where", False)),
+            )
+
+            if config_use_separate_where:
+                c_src_where, c_tgt_where = st.columns(2)
+                with c_src_where:
+                    config_source_where = st.text_input(
+                        f"Source WHERE ({st.session_state.get('engine', 'Source')})",
+                        key=f"config_source_where_{i}",
+                        value=normalize_where_input(t.get("source_where", "1=1")),
+                    )
+                with c_tgt_where:
+                    config_target_where = st.text_input(
+                        "Target WHERE (Databricks)",
+                        key=f"config_target_where_{i}",
+                        value=normalize_where_input(t.get("target_where", "1=1")),
+                    )
+                config_unified_where = None
+            else:
+                config_unified_where = st.text_input(
+                    "WHERE clause (applies to both source and target)",
+                    key=f"config_where_{i}",
+                    value=normalize_where_input(t.get("where", "1=1")),
+                )
+                config_source_where = None
+                config_target_where = None
+
+            effective_source_where, effective_target_where = resolve_table_where_clauses(
+                unified_where=config_unified_where,
+                use_separate=config_use_separate_where,
+                source_where=config_source_where,
+                target_where=config_target_where,
+            )
+
             run_validation(
                 src=src,
                 tgt=tgt,
                 validation_type=t["validation_type"],
-                metrics=t["metrics"]
+                metrics=t["metrics"],
+                source_where=effective_source_where,
+                target_where=effective_target_where,
             )
         # Count this config submission as a single validation run
         st.session_state["total_validation_runs_counter"] = st.session_state.get("total_validation_runs_counter", 0) + 1
@@ -3832,6 +4003,63 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 
         table_pairs = list(zip(source_selections, target_selections))
 
+        manual_table_where_config = {}
+        if table_pairs:
+            st.divider()
+            st.markdown("## 🧪 Per-Table WHERE Conditions")
+            for i, (src, tgt) in enumerate(table_pairs):
+                where_id = f"manual_where_{src['schema']}_{src['table']}_{i}"
+                st.markdown(
+                    f"### 🔹 {src['schema']}.{src['table']} → "
+                    f"{tgt['schema']}.{tgt['table']}"
+                )
+                use_separate_where = st.checkbox(
+                    "Use separate Source/Target WHERE",
+                    key=f"{where_id}_separate",
+                    value=st.session_state.get(f"{where_id}_separate", False),
+                )
+
+                if use_separate_where:
+                    mw_src_col, mw_tgt_col = st.columns(2)
+                    with mw_src_col:
+                        source_where = st.text_input(
+                            f"Source WHERE ({st.session_state.get('engine', 'Source')})",
+                            key=f"{where_id}_src",
+                            value=st.session_state.get(f"{where_id}_src", "1=1"),
+                        )
+                    with mw_tgt_col:
+                        target_where = st.text_input(
+                            "Target WHERE (Databricks)",
+                            key=f"{where_id}_tgt",
+                            value=st.session_state.get(f"{where_id}_tgt", "1=1"),
+                        )
+                    where_clause = None
+                else:
+                    where_clause = st.text_input(
+                        "WHERE clause (applies to both source and target)",
+                        key=f"{where_id}_single",
+                        value=st.session_state.get(f"{where_id}_single", "1=1"),
+                    )
+                    source_where = None
+                    target_where = None
+
+                eff_src_where, eff_tgt_where = resolve_table_where_clauses(
+                    unified_where=where_clause,
+                    use_separate=use_separate_where,
+                    source_where=source_where,
+                    target_where=target_where,
+                )
+
+                manual_table_where_config[where_id] = {
+                    "use_separate": use_separate_where,
+                    "source_where": eff_src_where,
+                    "target_where": eff_tgt_where,
+                    "src": src,
+                    "tgt": tgt,
+                }
+
+        st.session_state["manual_table_where_config"] = manual_table_where_config
+
         # ====================================================
         # OVERRIDE UI PER TABLE
         # ====================================================
@@ -3922,6 +4150,7 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                         "hash": h,
                         "case_override": case_override,
                         "include_timestamp": include_ts,
+                        "where_id": f"manual_where_{src['schema']}_{src['table']}_{i}",
                         "src": src,
                         "tgt": tgt
                     }
@@ -3990,6 +4219,13 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
 
                         checks = []
 
+                        where_cfg = st.session_state.get("manual_table_where_config", {}).get(
+                            config.get("where_id", ""),
+                            {},
+                        )
+                        src_where = normalize_where_input(where_cfg.get("source_where", "1=1"))
+                        tgt_where = normalize_where_input(where_cfg.get("target_where", "1=1"))
+
                         case_override = bool(config.get("case_override"))
                         effective_case_sensitive = (
                             (not manual_case_sensitive_global)
@@ -4029,6 +4265,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     st.session_state["target_conn"],
                                     s, t,
                                     threshold=manual_row_threshold if manual_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                         if effective_schema:
@@ -4049,6 +4287,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     st.session_state["target_conn"],
                                     s, t,
                                     threshold=manual_row_threshold if manual_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                         if effective_hash:
@@ -4066,6 +4306,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                     t,
                                     include_timestamp_columns=effective_include_timestamp,
                                     threshold=manual_row_threshold if manual_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                         if checks:
@@ -4094,7 +4336,12 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                 # =========================
                 else:
 
-                    for src, tgt in table_pairs:
+                    for i, (src, tgt) in enumerate(table_pairs):
+
+                        where_id = f"manual_where_{src['schema']}_{src['table']}_{i}"
+                        where_cfg = st.session_state.get("manual_table_where_config", {}).get(where_id, {})
+                        src_where = normalize_where_input(where_cfg.get("source_where", "1=1"))
+                        tgt_where = normalize_where_input(where_cfg.get("target_where", "1=1"))
 
                         st.divider()
                         st.markdown(
@@ -4114,6 +4361,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                      st.session_state["target_conn"],
                                      s, t,
                                      threshold=manual_row_threshold if manual_use_threshold else None,
+                                     source_where=src_where,
+                                     target_where=tgt_where,
                                  )),
                                 ("Schema Validation",
                                  lambda s=src, t=tgt: run_schema_validation(
@@ -4134,6 +4383,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                         st.session_state["target_conn"],
                                         s, t,
                                         threshold=manual_row_threshold if manual_use_threshold else None,
+                                        source_where=src_where,
+                                        target_where=tgt_where,
                                     )))
 
                             if schema_check:
@@ -4154,6 +4405,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                         st.session_state["target_conn"],
                                         s, t,
                                         threshold=manual_row_threshold if manual_use_threshold else None,
+                                        source_where=src_where,
+                                        target_where=tgt_where,
                                     )))
 
                             if hash_check:
@@ -4168,6 +4421,8 @@ if "source_conn" in st.session_state and "target_conn" in st.session_state:
                                             "include_timestamp_in_hash_manual", True
                                         ),
                                         threshold=manual_row_threshold if manual_use_threshold else None,
+                                        source_where=src_where,
+                                        target_where=tgt_where,
                                     )))
 
                         if checks:
@@ -4212,6 +4467,10 @@ with tab_csv:
         "target_catalog",
         "target_schema",
         "target_table",
+        "where_clause",
+        "use_separate_where",
+        "source_where",
+        "target_where",
         "metrics",
         "case_sensitive",
         "include_timestamp",
@@ -4227,6 +4486,10 @@ with tab_csv:
         "workspace",          # target_catalog
         "public",             # target_schema
         "datatype_demo",      # target_table
+        "1=1",                # where_clause
+        "no",                 # use_separate_where
+        "",                   # source_where
+        "",                   # target_where
         "row_count,schema,numeric,hash",  # metrics
         "no",                 # case_sensitive
         "yes",                # include_timestamp
@@ -4241,6 +4504,10 @@ with tab_csv:
         "workspace",          # target_catalog
         "public",             # target_schema
         "datatype_demo",           # target_table
+        "1=1",                # where_clause
+        "yes",                # use_separate_where
+        "event_date >= current_date - 1", # source_where
+        "event_date >= date_sub(current_date, 1)", # target_where
         "",                   # metrics (empty for shallow)
         "no",                 # case_sensitive
         "yes",                # include_timestamp
@@ -4546,6 +4813,63 @@ with tab_browse:
         st.session_state.get("target_selections", [])
     ))
 
+    browse_table_where_config = {}
+    if table_pairs:
+        st.divider()
+        st.markdown("## 🧪 Per-Table WHERE Conditions")
+        for i, (src, tgt) in enumerate(table_pairs):
+            where_id = f"browse_where_{src['schema']}_{src['table']}_{i}"
+            st.markdown(
+                f"### 🔹 {src['schema']}.{src['table']} → "
+                f"{tgt['schema']}.{tgt['table']}"
+            )
+            use_separate_where = st.checkbox(
+                "Use separate Source/Target WHERE",
+                key=f"{where_id}_separate",
+                value=st.session_state.get(f"{where_id}_separate", False),
+            )
+
+            if use_separate_where:
+                bw_src_col, bw_tgt_col = st.columns(2)
+                with bw_src_col:
+                    source_where = st.text_input(
+                        f"Source WHERE ({st.session_state.get('engine', 'Source')})",
+                        key=f"{where_id}_src",
+                        value=st.session_state.get(f"{where_id}_src", "1=1"),
+                    )
+                with bw_tgt_col:
+                    target_where = st.text_input(
+                        "Target WHERE (Databricks)",
+                        key=f"{where_id}_tgt",
+                        value=st.session_state.get(f"{where_id}_tgt", "1=1"),
+                    )
+                where_clause = None
+            else:
+                where_clause = st.text_input(
+                    "WHERE clause (applies to both source and target)",
+                    key=f"{where_id}_single",
+                    value=st.session_state.get(f"{where_id}_single", "1=1"),
+                )
+                source_where = None
+                target_where = None
+
+            eff_src_where, eff_tgt_where = resolve_table_where_clauses(
+                unified_where=where_clause,
+                use_separate=use_separate_where,
+                source_where=source_where,
+                target_where=target_where,
+            )
+
+            browse_table_where_config[where_id] = {
+                "use_separate": use_separate_where,
+                "source_where": eff_src_where,
+                "target_where": eff_tgt_where,
+                "src": src,
+                "tgt": tgt,
+            }
+
+    st.session_state["browse_table_where_config"] = browse_table_where_config
+
     per_table_validations = {}
 
     if validation_type == "deep" and override_mode and table_pairs:
@@ -4634,6 +4958,7 @@ with tab_browse:
                     "hash": h,
                     "case_override": case_override,
                     "include_timestamp": include_ts,
+                    "where_id": f"browse_where_{src['schema']}_{src['table']}_{i}",
                     "src": src,
                     "tgt": tgt
                 }
@@ -4709,6 +5034,13 @@ with tab_browse:
 
                     checks = []
 
+                    where_cfg = st.session_state.get("browse_table_where_config", {}).get(
+                        config.get("where_id", ""),
+                        {},
+                    )
+                    src_where = normalize_where_input(where_cfg.get("source_where", "1=1"))
+                    tgt_where = normalize_where_input(where_cfg.get("target_where", "1=1"))
+
                     case_override = bool(config.get("case_override"))
                     effective_case_sensitive = (
                         (not browse_case_sensitive_global)
@@ -4748,6 +5080,8 @@ with tab_browse:
                                 st.session_state["target_conn"],
                                 s, t,
                                 threshold=browse_row_threshold if browse_use_threshold else None,
+                                source_where=src_where,
+                                target_where=tgt_where,
                             )))
 
                     if effective_schema:
@@ -4768,6 +5102,8 @@ with tab_browse:
                                 st.session_state["target_conn"],
                                 s, t,
                                 threshold=browse_row_threshold if browse_use_threshold else None,
+                                source_where=src_where,
+                                target_where=tgt_where,
                             )))
 
                     if effective_hash:
@@ -4785,6 +5121,8 @@ with tab_browse:
                                 t,
                                 include_timestamp_columns=effective_include_timestamp,
                                 threshold=browse_row_threshold if browse_use_threshold else None,
+                                source_where=src_where,
+                                target_where=tgt_where,
                             )))
 
                     if checks:
@@ -4813,7 +5151,12 @@ with tab_browse:
             # ==========================
             else:
 
-                for src, tgt in table_pairs:
+                for i, (src, tgt) in enumerate(table_pairs):
+
+                    where_id = f"browse_where_{src['schema']}_{src['table']}_{i}"
+                    where_cfg = st.session_state.get("browse_table_where_config", {}).get(where_id, {})
+                    src_where = normalize_where_input(where_cfg.get("source_where", "1=1"))
+                    tgt_where = normalize_where_input(where_cfg.get("target_where", "1=1"))
 
                     st.divider()
                     st.markdown(
@@ -4833,6 +5176,8 @@ with tab_browse:
                                  st.session_state["target_conn"],
                                  s, t,
                                  threshold=browse_row_threshold if browse_use_threshold else None,
+                                 source_where=src_where,
+                                 target_where=tgt_where,
                              )),
                             ("Schema Validation",
                              lambda s=src, t=tgt: run_schema_validation(
@@ -4854,6 +5199,8 @@ with tab_browse:
                                     st.session_state["target_conn"],
                                     s, t,
                                     threshold=browse_row_threshold if browse_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                         if browse_schema_check:
@@ -4874,6 +5221,8 @@ with tab_browse:
                                     st.session_state["target_conn"],
                                     s, t,
                                     threshold=browse_row_threshold if browse_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                         if browse_hash_check:
@@ -4888,6 +5237,8 @@ with tab_browse:
                                         "include_timestamp_in_hash_browse", True
                                     ),
                                     threshold=browse_row_threshold if browse_use_threshold else None,
+                                    source_where=src_where,
+                                    target_where=tgt_where,
                                 )))
 
                     if checks:

@@ -10,7 +10,7 @@ def qualify_table(engine, catalog, schema, table):
     raise ValueError(f"Unsupported engine: {engine}")
 
 
-def build_shallow_query(engine, catalog, schema, table, metrics):
+def build_shallow_query(engine, catalog, schema, table, metrics, where_clause="1=1"):
     """
     Build ONE query that calculates all selected shallow metrics
     """
@@ -24,10 +24,13 @@ def build_shallow_query(engine, catalog, schema, table, metrics):
 
     table_fqn = qualify_table(engine, catalog, schema, table)
 
+    where_sql = (str(where_clause).strip() or "1=1")
+
     return f"""
     SELECT
         {', '.join(select_exprs)}
     FROM {table_fqn}
+    WHERE {where_sql}
     """.strip()
 
 
@@ -100,8 +103,16 @@ def get_numeric_columns(schema_rows):
 # =============================
 # NUMERIC STATS QUERY BUILDER
 # =============================
-def build_numeric_stats_query(engine, catalog, schema, table, column):
+def build_numeric_stats_query(
+    engine,
+    catalog,
+    schema,
+    table,
+    column,
+    where_clause="1=1",
+):
     table_fqn = qualify_table(engine, catalog, schema, table)
+    where_sql = (str(where_clause).strip() or "1=1")
 
     return f"""
     SELECT
@@ -109,6 +120,7 @@ def build_numeric_stats_query(engine, catalog, schema, table, column):
         MAX({column}) AS max_val,
         AVG({column}) AS avg_val
     FROM {table_fqn}
+    WHERE {where_sql}
     """
     
 
@@ -376,7 +388,14 @@ def _row_signature_expr(engine: str, columns) -> str:
     return "CONCAT(" + ", '||', ".join(parts) + ")"
 
 
-def build_row_hash_query(engine, catalog, schema, table, columns=None):
+def build_row_hash_query(
+    engine,
+    catalog,
+    schema,
+    table,
+    columns=None,
+    where_clause="1=1",
+):
     return build_row_hash_query_v2(
         engine,
         catalog,
@@ -385,6 +404,7 @@ def build_row_hash_query(engine, catalog, schema, table, columns=None):
         schema_rows=_columns_to_schema_rows(columns),
         include_timestamp=True,
         timestamp_mode=None,
+        where_clause=where_clause,
     )
 
 
@@ -480,6 +500,7 @@ def build_row_hash_query_v2(
     schema_rows,
     include_timestamp=True,
     timestamp_mode=None,
+    where_clause="1=1",
 ):
     engine = engine.lower()
     table_fqn = qualify_table(engine, catalog, schema, table)
@@ -562,6 +583,8 @@ def build_row_hash_query_v2(
 
     concat_expr = ",\n                    ".join(concat_parts)
 
+    where_sql = (str(where_clause).strip() or "1=1")
+
     if engine == "snowflake":
         return f"""
         SELECT
@@ -571,6 +594,7 @@ def build_row_hash_query_v2(
                 )
             )) AS hash_value
         FROM {table_fqn}
+        WHERE {where_sql}
         ORDER BY hash_value
         """.strip()
 
@@ -583,6 +607,7 @@ def build_row_hash_query_v2(
                 )
             )) AS hash_value
         FROM {table_fqn}
+        WHERE {where_sql}
         ORDER BY hash_value
         """.strip()
 
@@ -597,6 +622,7 @@ def build_row_hash_query_v2(
         WITH source_data AS (
             SELECT {signature_expr} AS row_signature
             FROM {table_fqn}
+            WHERE {where_sql}
         )
         SELECT
             UPPER(TO_HEX(MD5(row_signature))) AS hash_value
@@ -617,6 +643,7 @@ def build_row_hash_mismatch_rows_query_v2(
     include_timestamp=True,
     timestamp_mode=None,
     limit: int = 50,
+    where_clause="1=1",
 ):
     """Return a query that outputs (hash_value, row_signature) for provided hashes."""
     engine = engine.lower()
@@ -697,11 +724,14 @@ def build_row_hash_mismatch_rows_query_v2(
     # Build IN list
     in_list = ", ".join([f"'{str(h)}'" for h in hash_values])
 
+    where_sql = (str(where_clause).strip() or "1=1")
+
     return f"""
     WITH data AS (
         SELECT
             {signature_expr} AS row_signature
         FROM {table_fqn}
+        WHERE {where_sql}
     ), hashed AS (
         SELECT
             {hash_expr} AS hash_value,
@@ -809,6 +839,7 @@ def build_column_diff_query(
     key_columns: list[str],
     all_columns: list[str],
     mismatch_key_values: list[tuple],
+    base_where_clause: str = "1=1",
 ) -> str:
     """
     Build a query that fetches raw column values for rows identified by
@@ -837,9 +868,11 @@ def build_column_diff_query(
 
     select_cols = ", ".join(quote(c) for c in all_columns)
 
-    # Build WHERE clause: each key combo becomes one (k1='v1' AND k2='v2') block
+    base_where = (str(base_where_clause).strip() or "1=1")
+
+    # Build key-matching clause: each key combo becomes one (k1='v1' AND k2='v2') block
     if not mismatch_key_values:
-        where_clause = "1=0"
+        key_clause = "1=0"
     else:
         conditions = []
         for key_tuple in mismatch_key_values:
@@ -851,7 +884,9 @@ def build_column_diff_query(
                 escaped = str(val).replace("'", "''")
                 pairs.append(f"{col_ref} = '{escaped}'")
             conditions.append("(" + " AND ".join(pairs) + ")")
-        where_clause = " OR ".join(conditions)
+        key_clause = " OR ".join(conditions)
+
+    where_clause = f"({base_where}) AND ({key_clause})"
 
     return (
         f"SELECT {select_cols}\n"
