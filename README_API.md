@@ -19,6 +19,36 @@ This repo now includes an async API to submit validation jobs and poll results.
 - `VALIDATION_MAX_CONCURRENT_JOBS_PER_SESSION`: max simultaneous RUNNING jobs per session (default `2`)
 - `VALIDATION_SESSION_CONCURRENCY_SLOT_TTL_SECONDS`: safety TTL for session concurrency slots (default `1800`)
 - `WORKER_PROCESSES`: number of worker processes to run in `python -m validation_tool.worker.run_worker` (default `1`)
+- `SUPABASE_URL`: your Supabase project URL (required for Supabase result storage)
+- `SUPABASE_PUBLISHABLE_KEY` or `SUPABASE_ANON_KEY`: Supabase publishable/anon API key
+- `SUPABASE_RESULTS_TABLE`: table name used by API result persistence (default `validation_results`)
+
+## Supabase result storage
+
+When `SUPABASE_URL` and key are configured, React `/api/validate/run` results are upserted to Supabase and `/api/results` + `/api/results/{validation_id}` read from Supabase.
+
+Expected Supabase table columns:
+
+- `validation_id` (text, primary key)
+- `validation_ts` (timestamptz)
+- `validation_type` (text)
+- `src_table_name` (text)
+- `tgt_table_name` (text)
+- `row_count` (text)
+- `schema_check` (text)
+- `numeric_check` (text)
+- `hash_validation` (text)
+- `details` (jsonb)
+
+Quick setup (from scratch):
+
+1. Create a Supabase project.
+2. In Supabase SQL Editor, run `validation_tool/tools/supabase/setup_validation_results.sql`.
+3. Copy `.env.example` to `.env` and set:
+  - `SUPABASE_URL=https://<your-project-ref>.supabase.co`
+  - `SUPABASE_PUBLISHABLE_KEY=sb_publishable_HzIXmmpx_rJP4K8cNMLhRg_oQY3Yt_b`
+4. Restart API container/service.
+5. Run a new validation and verify `/api/results` returns records.
 
 ## Run with Docker Compose
 

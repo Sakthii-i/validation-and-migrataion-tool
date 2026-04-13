@@ -32,6 +32,9 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-}
       - BQ_KEY_PATH=${BQ_KEY_PATH:-}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY:-}
+      - SUPABASE_RESULTS_TABLE=${SUPABASE_RESULTS_TABLE:-validation_results}
     ports:
       - "8000:8000"
     depends_on:
@@ -56,6 +59,9 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY:-}
+      - SUPABASE_RESULTS_TABLE=${SUPABASE_RESULTS_TABLE:-validation_results}
     depends_on:
       - redis
       - postgres

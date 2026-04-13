@@ -55,9 +55,9 @@ def build_schema_query(engine, catalog, schema, table):
             data_type,
             is_nullable
         FROM system.information_schema.columns
-        WHERE table_catalog = '{catalog}'
-          AND table_schema = '{schema}'
-          AND table_name = '{table}'
+                WHERE lower(table_catalog) = lower('{catalog}')
+                    AND lower(table_schema) = lower('{schema}')
+                    AND lower(table_name) = lower('{table}')
         ORDER BY ordinal_position
         """
 

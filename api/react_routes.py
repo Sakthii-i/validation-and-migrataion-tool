@@ -31,6 +31,7 @@ from validation_tool.query_builder import (
     build_row_hash_query,
     build_row_hash_mismatch_rows_query_v2,
 )
+from validation_tool.backend import supabase_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -161,6 +162,10 @@ def auth_revoke(req: RevokeRequest):
 @router.get("/dashboard/stats")
 def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
+
+    if supabase_store.is_enabled():
+        return supabase_store.dashboard_stats(start_date=s, end_date=e)
+
     where = _where_clause(s, e)
 
     query = f"""
@@ -197,6 +202,11 @@ def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str]
 @router.get("/results")
 def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
+
+    if supabase_store.is_enabled():
+        rows = supabase_store.list_results(start_date=s, end_date=e, limit=500)
+        return {"results": rows}
+
     where = _where_clause(s, e)
 
     query = f"""
@@ -225,6 +235,12 @@ def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = 
 
 @router.get("/results/{validation_id}")
 def get_result_by_id(validation_id: str):
+    if supabase_store.is_enabled():
+        row = supabase_store.get_result_by_id(validation_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Validation ID not found")
+        return row
+
     query = f"""
         SELECT
             validation_id,
@@ -483,8 +499,8 @@ def run_validation(req: RunValidationRequest):
                         "target_count": int(tgt_cnt or 0),
                         "difference": int(abs((src_cnt or 0) - (tgt_cnt or 0))),
                     }
-                except Exception:
-                    details["row_count"] = None
+                except Exception as e:
+                    details["row_count"] = {"error": str(e)}
 
             if schema_enabled or numeric_enabled or hash_enabled:
                 try:
@@ -534,8 +550,8 @@ def run_validation(req: RunValidationRequest):
                         "total_columns": int(len(schema_rows)),
                         "mismatch_count": int(sum(1 for x in schema_rows if x["status"] != "MATCH")),
                     }
-                except Exception:
-                    details["schema"] = None
+                except Exception as e:
+                    details["schema"] = {"rows": [], "error": str(e)}
 
             if numeric_enabled and src_schema_rows is not None and tgt_schema_rows is not None:
                 try:
@@ -728,8 +744,8 @@ def run_validation(req: RunValidationRequest):
                         "source_not_in_target_rows": src_only_rows,
                         "target_not_in_source_rows": tgt_only_rows,
                     }
-                except Exception:
-                    details["row_hash"] = None
+                except Exception as e:
+                    details["row_hash"] = {"error": str(e)}
 
             record = generate_validation_record(
                 vtype, src, tgt,
@@ -758,6 +774,9 @@ def run_validation(req: RunValidationRequest):
                 "details": details,
             })
 
+    if results_list:
+        supabase_store.upsert_results(results_list)
+
     return {"results": results_list}
 
 # ══════════════════════════════════════
@@ -765,18 +784,109 @@ def run_validation(req: RunValidationRequest):
 # ══════════════════════════════════════
 
 @router.post("/validate/csv")
-async def run_csv_validation(session_id: str = Form(""), file: UploadFile = File(...)):
-    sess = _get_session(session_id)
+async def run_csv_validation(
+    session_id: str = Form(""),
+    settings: str = Form("{}"),
+    file: UploadFile = File(...),
+):
+    _get_session(session_id)
     contents = await file.read()
     df = pd.read_csv(io.BytesIO(contents), comment="#")
-    # Re-use the existing CSV validation logic
-    # Basic CSV validation
-    required_cols = {"source_catalog", "source_schema", "source_table", "target_catalog", "target_schema", "target_table", "validation_type", "case_sensitive", "include_timestamp"}
+
+    required_cols = {
+        "source_catalog",
+        "source_schema",
+        "source_table",
+        "target_catalog",
+        "target_schema",
+        "target_table",
+        "validation_type",
+    }
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise HTTPException(status_code=400, detail=f"Missing columns: {missing_cols}")
 
-    return {"status": "ok", "rows_processed": len(df)}
+    try:
+        ui_settings = json.loads(settings or "{}") if isinstance(settings, str) else (settings or {})
+    except Exception:
+        ui_settings = {}
+
+    def _to_bool(value, default=False):
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"yes", "true", "1", "y"}:
+            return True
+        if text in {"no", "false", "0", "n"}:
+            return False
+        return default
+
+    def _val(row, key, default=""):
+        raw = row.get(key, default)
+        if isinstance(raw, float) and pd.isna(raw):
+            return default
+        return raw
+
+    all_results = []
+    for _, row in df.iterrows():
+        src = f"{_val(row, 'source_catalog')}.{_val(row, 'source_schema')}.{_val(row, 'source_table')}"
+        tgt = f"{_val(row, 'target_catalog')}.{_val(row, 'target_schema')}.{_val(row, 'target_table')}"
+
+        if not src.strip(".") or not tgt.strip("."):
+            continue
+
+        use_separate_where = _to_bool(_val(row, "use_separate_where", "no"), False)
+        shared_where = str(_val(row, "where_clause", "1=1") or "1=1")
+        source_where = str(_val(row, "source_where", shared_where) or shared_where) if use_separate_where else shared_where
+        target_where = str(_val(row, "target_where", shared_where) or shared_where) if use_separate_where else shared_where
+
+        vtype = str(_val(row, "validation_type", "shallow") or "shallow").strip().lower()
+        metrics_text = str(_val(row, "metrics", "") or "")
+        metrics = [m.strip().lower() for m in metrics_text.split(",") if m.strip()]
+
+        table_settings = dict(ui_settings or {})
+        table_settings["caseSensitive"] = _to_bool(_val(row, "case_sensitive", table_settings.get("caseSensitive", False)), table_settings.get("caseSensitive", False))
+        table_settings["includeTimestamp"] = _to_bool(_val(row, "include_timestamp", table_settings.get("includeTimestamp", False)), table_settings.get("includeTimestamp", False))
+
+        if vtype == "shallow":
+            table_settings.update({"rowCount": True, "schema": True, "numeric": False, "hash": False})
+        elif metrics:
+            table_settings.update({
+                "rowCount": "row_count" in metrics,
+                "schema": "schema" in metrics,
+                "numeric": "numeric" in metrics,
+                "hash": "hash" in metrics,
+            })
+
+        row_threshold = _val(row, "row_threshold", "")
+        if row_threshold not in ("", None):
+            try:
+                threshold_val = float(row_threshold)
+                if threshold_val > 1:
+                    threshold_val = threshold_val / 100.0
+                table_settings["useThreshold"] = True
+                table_settings["threshold"] = threshold_val
+            except Exception:
+                pass
+
+        run_req = RunValidationRequest(
+            session_id=session_id,
+            validation_type=vtype,
+            table_pairs=[{
+                "source": src,
+                "target": tgt,
+                "source_where": source_where,
+                "target_where": target_where,
+            }],
+            settings=table_settings,
+        )
+
+        response = run_validation(run_req)
+        all_results.extend(response.get("results", []))
+
+    return {"results": all_results}
 
 # ══════════════════════════════════════
 # SCHEMA VIEWER
@@ -851,25 +961,89 @@ class ConfigValidationRequest(BaseModel):
 @router.post("/validate/config")
 def run_config_validation(req: ConfigValidationRequest):
     """Accept JSON config and run validations for each table entry."""
-    sess = _get_session(req.session_id)
     tables = req.config.get("tables", [])
     if not tables:
         raise HTTPException(status_code=400, detail="No tables defined in config")
 
-    # Delegate to run endpoint with converted pairs
-    pairs = []
-    for t in tables:
-        pairs.append({
-            "source": t.get("source", ""),
-            "target": t.get("target", ""),
-            "source_where": t.get("source_where", t.get("where", "1=1")),
-            "target_where": t.get("target_where", t.get("where", "1=1")),
-        })
+    def _to_bool(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"yes", "true", "1", "y"}:
+            return True
+        if text in {"no", "false", "0", "n"}:
+            return False
+        return default
 
-    run_req = RunValidationRequest(
-        session_id=req.session_id,
-        validation_type=tables[0].get("validation_type", "shallow") if tables else "shallow",
-        table_pairs=pairs,
-        settings=req.settings,
-    )
-    return run_validation(run_req)
+    all_results = []
+    for t in tables:
+        src = t.get("source") or ".".join([
+            str(t.get("source_catalog", "")).strip(),
+            str(t.get("source_schema", "")).strip(),
+            str(t.get("source_table", "")).strip(),
+        ]).strip(".")
+        tgt = t.get("target") or ".".join([
+            str(t.get("target_catalog", "")).strip(),
+            str(t.get("target_schema", "")).strip(),
+            str(t.get("target_table", "")).strip(),
+        ]).strip(".")
+
+        if not src or not tgt:
+            continue
+
+        use_separate_where = _to_bool(t.get("use_separate_where"), False)
+        shared_where = t.get("where_clause", t.get("where", "1=1")) or "1=1"
+        src_where = (t.get("source_where") or shared_where) if use_separate_where else shared_where
+        tgt_where = (t.get("target_where") or shared_where) if use_separate_where else shared_where
+
+        table_settings = dict(req.settings or {})
+
+        metrics_raw = t.get("metrics")
+        metric_items = []
+        if isinstance(metrics_raw, str):
+            metric_items = [m.strip().lower() for m in metrics_raw.split(",") if m.strip()]
+        elif isinstance(metrics_raw, list):
+            metric_items = [str(m).strip().lower() for m in metrics_raw if str(m).strip()]
+
+        if metric_items:
+            table_settings.update({
+                "rowCount": "row_count" in metric_items,
+                "schema": "schema" in metric_items,
+                "numeric": "numeric" in metric_items,
+                "hash": "hash" in metric_items,
+            })
+
+        if "case_sensitive" in t:
+            table_settings["caseSensitive"] = _to_bool(t.get("case_sensitive"), False)
+        if "include_timestamp" in t:
+            table_settings["includeTimestamp"] = _to_bool(t.get("include_timestamp"), False)
+
+        row_threshold = t.get("row_threshold")
+        if row_threshold not in (None, ""):
+            try:
+                threshold_value = float(row_threshold)
+                if threshold_value > 1:
+                    threshold_value = threshold_value / 100.0
+                table_settings["useThreshold"] = True
+                table_settings["threshold"] = threshold_value
+            except Exception:
+                pass
+
+        run_req = RunValidationRequest(
+            session_id=req.session_id,
+            validation_type=str(t.get("validation_type", "shallow") or "shallow").lower(),
+            table_pairs=[{
+                "source": src,
+                "target": tgt,
+                "source_where": src_where,
+                "target_where": tgt_where,
+            }],
+            settings=table_settings,
+        )
+
+        response = run_validation(run_req)
+        all_results.extend(response.get("results", []))
+
+    return {"results": all_results}

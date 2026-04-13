@@ -8,6 +8,15 @@ import {
   Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, Trash2, Eye
 } from 'lucide-react';
 
+const toPayloadSettings = (settings) => {
+  const rawPercent = Number(settings.threshold);
+  const safePercent = Number.isFinite(rawPercent) ? Math.max(0, Math.min(100, rawPercent)) : 99;
+  return {
+    ...settings,
+    threshold: safePercent / 100,
+  };
+};
+
 // ═══════════════════════════════════════
 // CREDENTIALS SECTION
 // ═══════════════════════════════════════
@@ -192,10 +201,10 @@ function ValidationSettings({ settings, setSettings }) {
           </label>
           {settings.useThreshold && (
             <div className="form-group ml-6">
-              <label className="form-label">Threshold (0-1)</label>
-              <input type="number" className="form-input w-40" value={settings.threshold} min="0" max="1" step="0.01"
-                onChange={e => setSettings(p => ({ ...p, threshold: parseFloat(e.target.value) }))} />
-              <span className="form-hint">e.g., 0.99 = 99% match</span>
+              <label className="form-label">Threshold (%)</label>
+              <input type="number" className="form-input w-40" value={settings.threshold} min="0" max="100" step="1"
+                onChange={e => setSettings(p => ({ ...p, threshold: e.target.value }))} />
+              <span className="form-hint">e.g., 99 means 99% match</span>
             </div>
           )}
 
@@ -242,6 +251,9 @@ function BrowseTab({ settings, setSettings }) {
   const [whereClause, setWhereClause] = useState('1=1');
   const [sourceWhereClause, setSourceWhereClause] = useState('1=1');
   const [targetWhereClause, setTargetWhereClause] = useState('1=1');
+  const [tablePairs, setTablePairs] = useState([]);
+  const [overridePerTable, setOverridePerTable] = useState(false);
+  const [tableValidationOverrides, setTableValidationOverrides] = useState({});
 
   const loadCatalogs = async (target) => {
     try {
@@ -361,35 +373,76 @@ function BrowseTab({ settings, setSettings }) {
     })();
   }, [selectedTgtCatalog, selectedTgtSchema]);
 
+  const currentPairReady = !!(selectedSrcCatalog && selectedSrcSchema && selectedSrcTable && selectedTgtCatalog && selectedTgtSchema && selectedTgtTable);
+
+  const currentPair = currentPairReady ? {
+    source: `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}`,
+    target: `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}`,
+    source_where: useSeparateWhere ? (sourceWhereClause || '1=1') : (whereClause || '1=1'),
+    target_where: useSeparateWhere ? (targetWhereClause || '1=1') : (whereClause || '1=1'),
+  } : null;
+
+  const addCurrentPair = () => {
+    if (!currentPair) return;
+    setTablePairs(prev => {
+      const exists = prev.some(p => p.source === currentPair.source && p.target === currentPair.target);
+      return exists ? prev : [...prev, currentPair];
+    });
+  };
+
   const handleRun = async () => {
-    if (!selectedSrcCatalog || !selectedSrcSchema || !selectedSrcTable || !selectedTgtCatalog || !selectedTgtSchema || !selectedTgtTable) {
+    const pairs = tablePairs.length ? tablePairs : (currentPair ? [currentPair] : []);
+
+    if (!pairs.length) {
       setResults({ error: 'Select source and target catalog, schema, and table.' });
       return;
     }
+
+    const baseSettings = toPayloadSettings(settings);
 
     if (settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
       setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
       return;
     }
 
-    const sourceWhere = useSeparateWhere ? (sourceWhereClause || '1=1') : (whereClause || '1=1');
-    const targetWhere = useSeparateWhere ? (targetWhereClause || '1=1') : (whereClause || '1=1');
-
     setRunning(true);
     try {
-      const pairs = [{
-        source: `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}`,
-        target: `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}`,
-        source_where: sourceWhere,
-        target_where: targetWhere,
-      }];
-      const res = await validationAPI.run({
-        session_id: sessionId,
-        validation_type: settings.validationType,
-        table_pairs: pairs,
-        settings,
-      });
-      setResults(res.data);
+      if (overridePerTable && pairs.length > 1 && settings.validationType === 'deep') {
+        const aggregated = [];
+        for (let i = 0; i < pairs.length; i += 1) {
+          const o = tableValidationOverrides[i] || {};
+          const pairSettings = {
+            ...baseSettings,
+            rowCount: o.rowCount ?? baseSettings.rowCount,
+            schema: o.schema ?? baseSettings.schema,
+            numeric: o.numeric ?? baseSettings.numeric,
+            hash: o.hash ?? baseSettings.hash,
+          };
+
+          if (pairSettings.hash && pairSettings.colDiffEnabled && !(pairSettings.primaryKeys || '').trim()) {
+            setResults({ error: `Primary key is required for table ${i + 1} when hash + column-level mismatch is enabled.` });
+            setRunning(false);
+            return;
+          }
+
+          const res = await validationAPI.run({
+            session_id: sessionId,
+            validation_type: settings.validationType,
+            table_pairs: [pairs[i]],
+            settings: pairSettings,
+          });
+          aggregated.push(...(res.data?.results || []));
+        }
+        setResults({ results: aggregated });
+      } else {
+        const res = await validationAPI.run({
+          session_id: sessionId,
+          validation_type: settings.validationType,
+          table_pairs: pairs,
+          settings: baseSettings,
+        });
+        setResults(res.data);
+      }
     } catch (e) {
       setResults({ error: e.response?.data?.detail || e.message });
     } finally {
@@ -469,57 +522,119 @@ function BrowseTab({ settings, setSettings }) {
         </div>
       </div>
 
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="btn btn-outline btn-sm"
+          onClick={addCurrentPair}
+          disabled={!currentPairReady}
+        >
+          Add Selected Pair
+        </button>
+        {tablePairs.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => { setTablePairs([]); setTableValidationOverrides({}); }}
+          >
+            Clear Pairs
+          </button>
+        )}
+      </div>
+
       <div className="card">
         <div className="card-header">Per-Table WHERE Conditions</div>
         <div className="card-body space-y-3">
-          <div className="text-sm font-semibold text-gray-700">
-            {selectedSrcCatalog && selectedSrcSchema && selectedSrcTable ? `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}` : 'source.table'}
-            {' -> '}
-            {selectedTgtCatalog && selectedTgtSchema && selectedTgtTable ? `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}` : 'target.table'}
-          </div>
-
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              className="form-checkbox"
-              checked={useSeparateWhere}
-              onChange={e => setUseSeparateWhere(e.target.checked)}
-            />
-            <span className="text-sm">Use separate Source/Target WHERE</span>
-          </label>
-
-          {!useSeparateWhere && (
-            <div className="form-group">
-              <label className="form-label">WHERE clause (applies to both source and target)</label>
-              <input
-                className="form-input"
-                value={whereClause}
-                onChange={e => setWhereClause(e.target.value)}
-                placeholder="1=1"
-              />
-            </div>
-          )}
-
-          {useSeparateWhere && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="form-group">
-                <label className="form-label">Source WHERE</label>
-                <input
-                  className="form-input"
-                  value={sourceWhereClause}
-                  onChange={e => setSourceWhereClause(e.target.value)}
-                  placeholder="1=1"
-                />
+          {tablePairs.length === 0 ? (
+            <>
+              <div className="text-sm font-semibold text-gray-700">
+                {selectedSrcCatalog && selectedSrcSchema && selectedSrcTable ? `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}` : 'source.table'}
+                {' -> '}
+                {selectedTgtCatalog && selectedTgtSchema && selectedTgtTable ? `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}` : 'target.table'}
               </div>
-              <div className="form-group">
-                <label className="form-label">Target WHERE</label>
+
+              <label className="flex items-center gap-2 cursor-pointer">
                 <input
-                  className="form-input"
-                  value={targetWhereClause}
-                  onChange={e => setTargetWhereClause(e.target.value)}
-                  placeholder="1=1"
+                  type="checkbox"
+                  className="form-checkbox"
+                  checked={useSeparateWhere}
+                  onChange={e => setUseSeparateWhere(e.target.checked)}
                 />
-              </div>
+                <span className="text-sm">Use separate Source/Target WHERE</span>
+              </label>
+
+              {!useSeparateWhere && (
+                <div className="form-group">
+                  <label className="form-label">WHERE clause (applies to both source and target)</label>
+                  <input
+                    className="form-input"
+                    value={whereClause}
+                    onChange={e => setWhereClause(e.target.value)}
+                    placeholder="1=1"
+                  />
+                </div>
+              )}
+
+              {useSeparateWhere && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="form-group">
+                    <label className="form-label">Source WHERE</label>
+                    <input
+                      className="form-input"
+                      value={sourceWhereClause}
+                      onChange={e => setSourceWhereClause(e.target.value)}
+                      placeholder="1=1"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Target WHERE</label>
+                    <input
+                      className="form-input"
+                      value={targetWhereClause}
+                      onChange={e => setTargetWhereClause(e.target.value)}
+                      placeholder="1=1"
+                    />
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-2">
+              {tablePairs.map((pair, i) => (
+                <div key={`${pair.source}-${pair.target}-${i}`} className="card p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs font-medium text-gray-600">{pair.source} → {pair.target}</div>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={() => {
+                        setTablePairs(prev => prev.filter((_, idx) => idx !== i));
+                        setTableValidationOverrides(prev => {
+                          const next = { ...prev };
+                          delete next[i];
+                          return next;
+                        });
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <input
+                      className="form-input"
+                      placeholder="Source WHERE (1=1)"
+                      value={pair.source_where || ''}
+                      onChange={e => setTablePairs(prev => prev.map((p, idx) => idx === i ? { ...p, source_where: e.target.value } : p))}
+                    />
+                    <input
+                      className="form-input"
+                      placeholder="Target WHERE (1=1)"
+                      value={pair.target_where || ''}
+                      onChange={e => setTablePairs(prev => prev.map((p, idx) => idx === i ? { ...p, target_where: e.target.value } : p))}
+                    />
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
@@ -555,6 +670,55 @@ function BrowseTab({ settings, setSettings }) {
         </div>
       </div>
 
+      {tablePairs.length > 1 && settings.validationType === 'deep' && (
+        <div className="card p-3 space-y-3">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={overridePerTable}
+              onChange={e => setOverridePerTable(e.target.checked)}
+            />
+            <span className="text-sm">Override validations per table</span>
+          </label>
+
+          {overridePerTable && (
+            <div className="space-y-2 pt-2 border-t border-gray-100">
+              {tablePairs.map((pair, i) => {
+                const ov = tableValidationOverrides[i] || {};
+                const checks = [
+                  { key: 'rowCount', label: 'Row Count' },
+                  { key: 'schema', label: 'Schema' },
+                  { key: 'numeric', label: 'Numeric' },
+                  { key: 'hash', label: 'Hash' },
+                ];
+                return (
+                  <div key={`${pair.source}-${pair.target}-${i}`} className="card p-2">
+                    <div className="text-xs font-medium text-gray-600 mb-2">{pair.source} → {pair.target}</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {checks.map((c) => (
+                        <label key={c.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={ov[c.key] ?? settings[c.key]}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), [c.key]: e.target.checked },
+                            }))}
+                          />
+                          <span>{c.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running Validations...</> : <><Play size={18} /> Run Browse Validations</>}
       </button>
@@ -567,11 +731,13 @@ function BrowseTab({ settings, setSettings }) {
 // ═══════════════════════════════════════
 // TAB: MANUAL ENTRY
 // ═══════════════════════════════════════
-function ManualTab({ settings }) {
-  const { isConnected, sessionId } = useConnection();
+function ManualTab({ settings, setSettings }) {
+  const { isConnected, sessionId, sourceEngine } = useConnection();
   const [srcPaths, setSrcPaths] = useState('');
   const [tgtPaths, setTgtPaths] = useState('');
   const [whereClauses, setWhereClauses] = useState({});
+  const [overridePerTable, setOverridePerTable] = useState(false);
+  const [tableValidationOverrides, setTableValidationOverrides] = useState({});
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
 
@@ -580,22 +746,94 @@ function ManualTab({ settings }) {
   const tgtList = parsePaths(tgtPaths);
   const pairsValid = srcList.length > 0 && srcList.length === tgtList.length;
 
+  useEffect(() => {
+    if (!(settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled)) {
+      return;
+    }
+
+    const firstSourceTable = srcList[0];
+    if (!firstSourceTable || firstSourceTable.split('.').length < 3) {
+      setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await schemaAPI.getSchema(sourceEngine, firstSourceTable);
+        const cols = (res.data.columns || [])
+          .map(col => col.column_name || col.COLUMN_NAME || col.name)
+          .filter(Boolean);
+        if (cancelled) return;
+        setSettings(prev => ({
+          ...prev,
+          availablePrimaryKeyColumns: cols,
+          primaryKeys: prev.primaryKeys && cols.includes(prev.primaryKeys) ? prev.primaryKeys : '',
+        }));
+      } catch {
+        if (cancelled) return;
+        setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.validationType, settings.hash, settings.colDiffEnabled, srcPaths, sourceEngine, setSettings]);
+
   const handleRun = async () => {
+    const pairs = srcList.map((s, i) => ({
+      source: s,
+      target: tgtList[i],
+      source_where: whereClauses[`src_${i}`] || '1=1',
+      target_where: whereClauses[`tgt_${i}`] || '1=1',
+    }));
+
+    const baseSettings = toPayloadSettings(settings);
+
+    if (settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
+      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+      return;
+    }
+
     setRunning(true);
     try {
-      const pairs = srcList.map((s, i) => ({
-        source: s,
-        target: tgtList[i],
-        source_where: whereClauses[`src_${i}`] || '1=1',
-        target_where: whereClauses[`tgt_${i}`] || '1=1',
-      }));
-      const res = await validationAPI.run({
-        session_id: sessionId,
-        validation_type: settings.validationType,
-        table_pairs: pairs,
-        settings,
-      });
-      setResults(res.data);
+      if (overridePerTable && pairs.length > 1 && settings.validationType === 'deep') {
+        const aggregated = [];
+        for (let i = 0; i < pairs.length; i += 1) {
+          const o = tableValidationOverrides[i] || {};
+          const pairSettings = {
+            ...baseSettings,
+            rowCount: o.rowCount ?? baseSettings.rowCount,
+            schema: o.schema ?? baseSettings.schema,
+            numeric: o.numeric ?? baseSettings.numeric,
+            hash: o.hash ?? baseSettings.hash,
+          };
+
+          if (pairSettings.hash && pairSettings.colDiffEnabled && !(pairSettings.primaryKeys || '').trim()) {
+            setResults({ error: `Primary key is required for table ${i + 1} when hash + column-level mismatch is enabled.` });
+            setRunning(false);
+            return;
+          }
+
+          const res = await validationAPI.run({
+            session_id: sessionId,
+            validation_type: settings.validationType,
+            table_pairs: [pairs[i]],
+            settings: pairSettings,
+          });
+          aggregated.push(...(res.data?.results || []));
+        }
+        setResults({ results: aggregated });
+      } else {
+        const res = await validationAPI.run({
+          session_id: sessionId,
+          validation_type: settings.validationType,
+          table_pairs: pairs,
+          settings: baseSettings,
+        });
+        setResults(res.data);
+      }
     } catch (e) {
       setResults({ error: e.response?.data?.detail || e.message });
     } finally {
@@ -622,6 +860,40 @@ function ManualTab({ settings }) {
         </div>
       </div>
 
+      {settings.validationType === 'deep' && settings.hash && (
+        <div className="card p-3 space-y-3">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={settings.colDiffEnabled}
+              onChange={e => setSettings(p => ({ ...p, colDiffEnabled: e.target.checked }))}
+            />
+            <span className="text-sm">Perform column-level mismatch</span>
+          </label>
+
+          {settings.colDiffEnabled && (
+            <div className="pt-2 border-t border-gray-100">
+              <div className="form-group">
+                <label className="form-label">Primary Key Column</label>
+                <select
+                  className="form-select"
+                  value={(settings.primaryKeys || '').split(',').map(v => v.trim()).filter(Boolean)[0] || ''}
+                  onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
+                  disabled={!settings.availablePrimaryKeyColumns?.length}
+                >
+                  <option value="">Select primary key column...</option>
+                  {(settings.availablePrimaryKeyColumns || []).map(col => (
+                    <option key={col} value={col}>{col}</option>
+                  ))}
+                </select>
+                <span className="form-hint">Dropdown is loaded from the first source table path.</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {pairsValid && (
         <div className="space-y-3">
           <h3 className="text-sm font-semibold text-gray-700">Per-Table WHERE Conditions</h3>
@@ -634,6 +906,55 @@ function ManualTab({ settings }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {pairsValid && srcList.length > 1 && settings.validationType === 'deep' && (
+        <div className="card p-3 space-y-3">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={overridePerTable}
+              onChange={e => setOverridePerTable(e.target.checked)}
+            />
+            <span className="text-sm">Override validations per table</span>
+          </label>
+
+          {overridePerTable && (
+            <div className="space-y-2 pt-2 border-t border-gray-100">
+              {srcList.map((s, i) => {
+                const ov = tableValidationOverrides[i] || {};
+                const checks = [
+                  { key: 'rowCount', label: 'Row Count' },
+                  { key: 'schema', label: 'Schema' },
+                  { key: 'numeric', label: 'Numeric' },
+                  { key: 'hash', label: 'Hash' },
+                ];
+                return (
+                  <div key={i} className="card p-2">
+                    <div className="text-xs font-medium text-gray-600 mb-2">{s} → {tgtList[i]}</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {checks.map((c) => (
+                        <label key={c.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={ov[c.key] ?? settings[c.key]}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), [c.key]: e.target.checked },
+                            }))}
+                          />
+                          <span>{c.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -653,7 +974,7 @@ function ManualTab({ settings }) {
 // ═══════════════════════════════════════
 // TAB: CSV UPLOAD
 // ═══════════════════════════════════════
-function CSVTab({ settings }) {
+function CSVTab({ settings, setSettings }) {
   const { isConnected, sessionId } = useConnection();
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -677,11 +998,17 @@ function CSVTab({ settings }) {
   };
 
   const handleRun = async () => {
+    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
+      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+      return;
+    }
+
     setRunning(true);
     try {
       const form = new FormData();
       form.append('file', file);
       form.append('session_id', sessionId);
+      form.append('settings', JSON.stringify(toPayloadSettings(settings)));
       const res = await validationAPI.runCSV(form);
       setResults(res.data);
     } catch (e) {
@@ -708,7 +1035,7 @@ function CSVTab({ settings }) {
               <thead><tr>{templateCols.map(c => <th key={c}>{c}</th>)}</tr></thead>
               <tbody>
                 <tr>{['deep','DB','PUBLIC','TABLE1','ws','default','tbl1','1=1','no','','','row_count,schema,numeric,hash','no','yes',''].map((v,i)=><td key={i} className="text-xs">{v}</td>)}</tr>
-                <tr>{['shallow','DB','PUBLIC','TABLE2','ws','default','tbl2','1=1','no','','','','no','yes','0.99'].map((v,i)=><td key={i} className="text-xs">{v}</td>)}</tr>
+                <tr>{['shallow','DB','PUBLIC','TABLE2','ws','default','tbl2','1=1','no','','','','no','yes','99'].map((v,i)=><td key={i} className="text-xs">{v}</td>)}</tr>
               </tbody>
             </table>
           </div>
@@ -740,6 +1067,28 @@ function CSVTab({ settings }) {
         </div>
       </div>
 
+      <div className="card p-3 space-y-3">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="form-checkbox"
+            checked={settings.colDiffEnabled}
+            onChange={e => setSettings(p => ({ ...p, colDiffEnabled: e.target.checked }))}
+          />
+          <span className="text-sm">Perform column-level mismatch</span>
+        </label>
+        <div className="form-group pt-2 border-t border-gray-100">
+          <label className="form-label">Primary Key Column(s)</label>
+          <input
+            className="form-input"
+            value={settings.primaryKeys || ''}
+            onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
+            placeholder="id or id,sub_id"
+          />
+          <span className="form-hint">Used for hash column-level comparison when hash metric is in file.</span>
+        </div>
+      </div>
+
       <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running || !file}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running CSV Validations...</> : <><Play size={18} /> Run CSV Validations</>}
       </button>
@@ -752,36 +1101,114 @@ function CSVTab({ settings }) {
 // ═══════════════════════════════════════
 // TAB: CONFIG DRIVEN
 // ═══════════════════════════════════════
-function ConfigTab({ settings }) {
+function ConfigTab({ settings, setSettings }) {
   const { isConnected, sessionId } = useConnection();
-  const [configText, setConfigText] = useState(JSON.stringify({
-    tables: [
-      {
-        name: "Example Validation",
-        source: "CATALOG.SCHEMA.TABLE",
-        target: "catalog.schema.table",
-        validation_type: "deep",
-        metrics: ["row_count", "schema", "numeric", "hash"],
-        where: "1=1"
-      }
-    ]
-  }, null, 2));
+  const [file, setFile] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [preview, setPreview] = useState(null);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
   const [parseError, setParseError] = useState(null);
 
-  const handleSubmit = async () => {
+  const jsonTemplate = {
+    tables: [
+      {
+        validation_type: "deep",
+        source_catalog: "DB",
+        source_schema: "PUBLIC",
+        source_table: "TABLE1",
+        target_catalog: "ws",
+        target_schema: "default",
+        target_table: "tbl1",
+        where_clause: "1=1",
+        use_separate_where: "no",
+        source_where: "",
+        target_where: "",
+        metrics: "row_count,schema,numeric,hash",
+        case_sensitive: "no",
+        include_timestamp: "yes",
+        row_threshold: ""
+      },
+      {
+        validation_type: "deep",
+        source_catalog: "DB",
+        source_schema: "PUBLIC",
+        source_table: "TABLE2",
+        target_catalog: "ws",
+        target_schema: "default",
+        target_table: "tbl2",
+        where_clause: "1=1",
+        use_separate_where: "no",
+        source_where: "",
+        target_where: "",
+        metrics: "row_count,schema",
+        case_sensitive: "no",
+        include_timestamp: "yes",
+        row_threshold: "99"
+      }
+    ]
+  };
+
+  const templateFields = [
+    'validation_type',
+    'source_catalog',
+    'source_schema',
+    'source_table',
+    'target_catalog',
+    'target_schema',
+    'target_table',
+    'where_clause',
+    'use_separate_where',
+    'source_where',
+    'target_where',
+    'metrics',
+    'case_sensitive',
+    'include_timestamp',
+    'row_threshold',
+  ];
+
+  const handleFileChange = (e) => {
+    const f = e.target.files[0];
     setParseError(null);
-    let parsed;
-    try {
-      parsed = JSON.parse(configText);
-    } catch (e) {
-      setParseError(`Invalid JSON: ${e.message}`);
+    setResults(null);
+    if (!f) {
+      setFile(null);
+      setConfig(null);
+      setPreview(null);
       return;
     }
+
+    setFile(f);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        const rows = Array.isArray(parsed?.tables) ? parsed.tables : [];
+        setConfig(parsed);
+        setPreview(rows.slice(0, 5));
+      } catch (err) {
+        setConfig(null);
+        setPreview(null);
+        setParseError(`Invalid JSON: ${err.message}`);
+      }
+    };
+    reader.readAsText(f);
+  };
+
+  const handleSubmit = async () => {
+    setParseError(null);
+    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
+      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+      return;
+    }
+    if (!config) {
+      setParseError('Please upload a valid JSON config file.');
+      return;
+    }
+
     setRunning(true);
     try {
-      const res = await validationAPI.runConfig({ session_id: sessionId, config: parsed, settings });
+      const res = await validationAPI.runConfig({ session_id: sessionId, config, settings: toPayloadSettings(settings) });
       setResults(res.data);
     } catch (e) {
       setResults({ error: e.response?.data?.detail || e.message });
@@ -796,22 +1223,92 @@ function ConfigTab({ settings }) {
 
   return (
     <div className="space-y-6">
-      <div className="form-group">
-        <label className="form-label">Validation Config (JSON)</label>
-        <textarea
-          className="form-textarea"
-          rows={14}
-          value={configText}
-          onChange={e => setConfigText(e.target.value)}
-          spellCheck={false}
-        />
-        <span className="form-hint">Define table pairs, validation types, and metrics in JSON format.</span>
+      <div className="card">
+        <div className="card-header"><FileText size={16} /> JSON Template Format</div>
+        <div className="card-body space-y-3">
+          <div className="overflow-x-auto">
+            <table className="data-table">
+              <thead>
+                <tr>{templateFields.map(field => <th key={field}>{field}</th>)}</tr>
+              </thead>
+              <tbody>
+                {(jsonTemplate.tables || []).slice(0, 2).map((row, i) => (
+                  <tr key={i}>
+                    {templateFields.map((field) => (
+                      <td key={field} className="text-xs">{String(row?.[field] ?? '')}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button className="btn btn-outline btn-sm" onClick={() => {
+            const blob = new Blob([JSON.stringify(jsonTemplate, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'reconciliation_template.json';
+            a.click();
+          }}>
+            ⬇ Download JSON Template
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header"><Upload size={16} /> Upload JSON</div>
+        <div className="card-body">
+          <input type="file" accept=".json,application/json" onChange={handleFileChange} className="form-input" />
+          {preview && (
+            <div className="mt-4 overflow-x-auto">
+              <p className="text-sm text-gray-500 mb-2">Preview (first 5 tables):</p>
+              <table className="data-table">
+                <thead>
+                  <tr>{templateFields.map(field => <th key={field}>{field}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {preview.map((row, idx) => (
+                    <tr key={idx}>
+                      {templateFields.map((field) => (
+                        <td key={field} className="text-xs">
+                          {Array.isArray(row?.[field]) ? row[field].join(',') : String(row?.[field] ?? '')}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card p-3 space-y-3">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="form-checkbox"
+            checked={settings.colDiffEnabled}
+            onChange={e => setSettings(p => ({ ...p, colDiffEnabled: e.target.checked }))}
+          />
+          <span className="text-sm">Perform column-level mismatch</span>
+        </label>
+        <div className="form-group pt-2 border-t border-gray-100">
+          <label className="form-label">Primary Key Column(s)</label>
+          <input
+            className="form-input"
+            value={settings.primaryKeys || ''}
+            onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
+            placeholder="id or id,sub_id"
+          />
+          <span className="form-hint">Used for hash column-level comparison when hash metric is in file.</span>
+        </div>
       </div>
 
       {parseError && <div className="alert alert-error">{parseError}</div>}
 
-      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running}>
-        {running ? <><Loader2 size={18} className="animate-spin" /> Running Config Validations...</> : <><Play size={18} /> Submit Config</>}
+      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running || !file || !config}>
+        {running ? <><Loader2 size={18} className="animate-spin" /> Running Config Validations...</> : <><Play size={18} /> Run Config Validations</>}
       </button>
 
       {results && <ResultsDisplay results={results} />}
@@ -937,6 +1434,8 @@ function ResultsDisplay({ results }) {
               <h4 className="text-sm font-semibold mb-2">Row Count</h4>
               {rowCountNotSelected ? (
                 <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.row_count?.error ? (
+                <div className="text-sm text-gray-500">{`No row count details available: ${detailRecord.details.row_count.error}`}</div>
               ) : detailRecord.details?.row_count ? (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="p-3 border rounded-lg">Source: <strong>{detailRecord.details.row_count.source_count}</strong></div>
@@ -975,7 +1474,7 @@ function ResultsDisplay({ results }) {
                     </tbody>
                   </table>
                 </div>
-              ) : <div className="text-sm text-gray-500">No schema details available.</div>}
+              ) : <div className="text-sm text-gray-500">{detailRecord.details?.schema?.error ? `No schema details available: ${detailRecord.details.schema.error}` : 'No schema details available.'}</div>}
             </div>
 
             <div>
@@ -1054,7 +1553,7 @@ function ResultsDisplay({ results }) {
                   <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
                   <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
                 </div>
-              ) : null}
+              ) : <div className="text-sm text-gray-500 mb-3">{detailRecord.details?.row_hash?.error ? `No hash details available: ${detailRecord.details.row_hash.error}` : 'No hash details available.'}</div>}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div>
                   <div className="text-xs font-semibold text-red-600 mb-2">
@@ -1127,7 +1626,7 @@ export default function NewValidationPage() {
   const [settings, setSettings] = useState({
     validationType: 'shallow',
     rowCount: false, schema: false, numeric: false, hash: false,
-    useThreshold: false, threshold: 0.99,
+    useThreshold: false, threshold: 99,
     includeTimestamp: false, caseSensitive: false, colDiffEnabled: false,
     primaryKeys: '',
     availablePrimaryKeyColumns: [],
@@ -1147,7 +1646,9 @@ export default function NewValidationPage() {
       </div>
       <div className="page-content space-y-6">
         <CredentialsSection />
-        <ValidationSettings settings={settings} setSettings={setSettings} />
+        {activeTab !== 'csv' && activeTab !== 'config' && (
+          <ValidationSettings settings={settings} setSettings={setSettings} />
+        )}
 
         {/* Table Selection Tabs */}
         <div className="card">
@@ -1164,9 +1665,9 @@ export default function NewValidationPage() {
           </div>
           <div className="p-5">
             {activeTab === 'browse' && <BrowseTab settings={settings} setSettings={setSettings} />}
-            {activeTab === 'manual' && <ManualTab settings={settings} />}
-            {activeTab === 'csv' && <CSVTab settings={settings} />}
-            {activeTab === 'config' && <ConfigTab settings={settings} />}
+            {activeTab === 'manual' && <ManualTab settings={settings} setSettings={setSettings} />}
+            {activeTab === 'csv' && <CSVTab settings={settings} setSettings={setSettings} />}
+            {activeTab === 'config' && <ConfigTab settings={settings} setSettings={setSettings} />}
           </div>
         </div>
       </div>
