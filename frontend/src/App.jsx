@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import NewValidationPage from './pages/NewValidationPage';
 import DataValidationsPage from './pages/DataValidationsPage';
+import ValidationDetailsPage from './pages/ValidationDetailsPage';
 import ValidationDashboardPage from './pages/ValidationDashboardPage';
 import BQSchemaViewerPage from './pages/BQSchemaViewerPage';
 import AdminPage from './pages/AdminPage';
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
         <Route path="/new-validation" element={<ProtectedRoute><NewValidationPage /></ProtectedRoute>} />
         <Route path="/data-validations" element={<ProtectedRoute><DataValidationsPage /></ProtectedRoute>} />
+        <Route path="/data-validations/:validationId" element={<ProtectedRoute><ValidationDetailsPage /></ProtectedRoute>} />
         <Route path="/validation-dashboard" element={<ProtectedRoute><ValidationDashboardPage /></ProtectedRoute>} />
         <Route path="/bq-schema-viewer" element={<ProtectedRoute><BQSchemaViewerPage /></ProtectedRoute>} />
         <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />

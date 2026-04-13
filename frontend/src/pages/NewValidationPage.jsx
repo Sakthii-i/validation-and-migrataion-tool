@@ -1836,7 +1836,7 @@ export default function NewValidationPage() {
   return (
     <div>
       <div className="page-topbar">
-        <h1 className="page-title">New Validation</h1>
+        <h1 className="page-title">Run Validation</h1>
       </div>
       <div className="page-content space-y-6">
         <CredentialsSection />

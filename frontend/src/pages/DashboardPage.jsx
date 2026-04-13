@@ -9,7 +9,7 @@ const PIE_COLORS = ['#2e7d32', '#c62828'];
 
 export default function DashboardPage() {
   const [stats, setStats] = useState(null);
-  const [dateFilter, setDateFilter] = useState('Past 30 days');
+  const [dateFilter, setDateFilter] = useState('All Time');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [showCharts, setShowCharts] = useState(false);

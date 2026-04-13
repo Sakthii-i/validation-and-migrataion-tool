@@ -232,10 +232,10 @@ def get_result_by_id(validation_id: str):
         raise HTTPException(status_code=503, detail="Supabase is not configured for validation details")
 
     row = supabase_store.get_result_by_id(validation_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Validation details not found in Supabase")
-    return row
+    if row:
+        return row
 
+    # Backfill this validation record from Postgres into Supabase, then return from Supabase.
     query = f"""
         SELECT
             validation_id,
@@ -255,14 +255,33 @@ def get_result_by_id(validation_id: str):
     try:
         cur = conn.cursor()
         cur.execute(query, (validation_id,))
-        row = cur.fetchone()
-        if not row:
+        pg_row = cur.fetchone()
+        if not pg_row:
             raise HTTPException(status_code=404, detail="Validation ID not found")
         cols = [desc[0] for desc in cur.description]
-        result = dict(zip(cols, row))
+        result = dict(zip(cols, pg_row))
         for k, v in result.items():
             if hasattr(v, 'isoformat'):
                 result[k] = v.isoformat()
+
+        supabase_store.upsert_results([
+            {
+                "validation_id": result.get("validation_id"),
+                "validation_ts": result.get("validation_ts"),
+                "validation_type": result.get("validation_type"),
+                "source_table_name": result.get("source_table_name"),
+                "target_table_name": result.get("target_table_name"),
+                "row_count": result.get("count_validation"),
+                "schema_check": result.get("schema_check"),
+                "numeric_check": result.get("numeric_check"),
+                "hash_validation": result.get("hash_validation"),
+                "details": result.get("details") or {},
+            }
+        ])
+
+        refreshed = supabase_store.get_result_by_id(validation_id)
+        if refreshed:
+            return refreshed
         return result
     finally:
         conn.close()

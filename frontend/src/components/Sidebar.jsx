@@ -8,8 +8,8 @@ import { useState } from 'react';
 
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/new-validation', label: 'New Validation', icon: Plus },
-  { to: '/data-validations', label: 'Data Validations', icon: Database },
+  { to: '/new-validation', label: 'Run Validation', icon: Plus },
+  { to: '/data-validations', label: 'Validation History', icon: Database },
   { to: '/validation-dashboard', label: 'Validation Dashboard', icon: BarChart3 },
 ];
 
@@ -34,7 +34,7 @@ export default function Sidebar() {
     <div className="sidebar">
       {/* Brand */}
       <div className="sidebar-brand flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center text-lg font-black">E</div>
+        <img src="/eucloid-logo.svg" alt="Eucloid logo" className="w-8 h-8 object-contain" />
         <span>Eucloid</span>
       </div>
 

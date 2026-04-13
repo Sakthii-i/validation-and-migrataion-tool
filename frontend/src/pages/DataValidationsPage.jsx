@@ -4,10 +4,12 @@ import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import { Filter, Download, Search, Eye, Play, Loader2 } from 'lucide-react';
 import { useConnection } from '../context/ConnectionContext';
+import { useNavigate } from 'react-router-dom';
 
 const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 30 days', 'Custom'];
 
 export default function DataValidationsPage() {
+  const navigate = useNavigate();
   const { isConnected, sessionId } = useConnection();
   const [results, setResults] = useState([]);
   const [dateFilter, setDateFilter] = useState('Past 30 days');
@@ -17,7 +19,6 @@ export default function DataValidationsPage() {
   const [loading, setLoading] = useState(true);
   const [pageSize, setPageSize] = useState(50);
   const [currentPage, setCurrentPage] = useState(1);
-  const [detailRow, setDetailRow] = useState(null);
   const [rowRunningKey, setRowRunningKey] = useState(null);
   const [actionError, setActionError] = useState('');
 
@@ -139,53 +140,12 @@ export default function DataValidationsPage() {
 
   const handleViewRow = async (row) => {
     setActionError('');
-    if (row.details) {
-      setDetailRow(row);
-      return;
-    }
-    if (row.validation_id) {
-      try {
-        const res = await resultsAPI.getById(row.validation_id);
-        setDetailRow({ ...row, ...res.data });
-        if (res.data?.details) return;
-      } catch {
-        // Fall back to current row only.
-      }
-    }
-
-    const sourceTable = row.source_table_name || row.src_table_name || row.src_table || row.source_table || row.source;
-    const targetTable = row.target_table_name || row.tgt_table_name || row.tgt_table || row.target_table || row.target;
-
-    if (!isConnected || !sessionId) {
-      setActionError('Connection is not established. Please establish connections to load row details.');
-      setDetailRow(row);
+    if (!row.validation_id) {
+      setActionError('Validation ID is missing; unable to fetch Supabase details.');
       return;
     }
 
-    if (!sourceTable || !targetTable) {
-      setActionError('Source/target table path is missing for this row.');
-      setDetailRow(row);
-      return;
-    }
-
-    try {
-      const payload = {
-        session_id: sessionId,
-        validation_type: String(row.validation_type || 'deep').toLowerCase(),
-        table_pairs: [{ source: sourceTable, target: targetTable, source_where: '1=1', target_where: '1=1' }],
-        settings: buildSettingsFromRow(row),
-      };
-      const res = await validationAPI.run(payload);
-      const first = res?.data?.results?.[0];
-      if (first) {
-        setDetailRow({ ...row, ...normalizeRunRow(first, sourceTable, targetTable) });
-        return;
-      }
-    } catch (e) {
-      setActionError(e.response?.data?.detail || e.message || 'Failed to load row details.');
-    }
-
-    setDetailRow(row);
+    navigate(`/data-validations/${encodeURIComponent(row.validation_id)}`);
   };
 
   const handleRunRow = async (row) => {
@@ -237,24 +197,11 @@ export default function DataValidationsPage() {
     const a = document.createElement('a'); a.href = url; a.download = 'validation_results.csv'; a.click();
   };
 
-  const isNotSelected = (status) => {
-    if (status === null || status === undefined) return true;
-    const text = String(status).trim().toUpperCase();
-    return text === '' || text === 'N/A' || text === 'NONE' || text === '—' || text === '-';
-  };
-
-  const formatNumericValue = (value) => {
-    if (value === null || value === undefined || value === '') return '—';
-    const num = Number(value);
-    return Number.isFinite(num) ? num.toFixed(4) : value;
-  };
-
   return (
     <div>
       <div className="page-topbar">
         <div>
-          <h1 className="page-title">Data Validations</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Rows and stats from PostgreSQL; Eye details from Supabase</p>
+          <h1 className="page-title">Validation History</h1>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn btn-outline btn-sm" onClick={exportCSV}>
@@ -393,165 +340,6 @@ export default function DataValidationsPage() {
           )}
         </div>
 
-        {detailRow && (
-          <div className="card mt-4">
-            <div className="card-header flex items-center justify-between">
-              <span>Validation Details</span>
-              <button className="btn btn-outline btn-sm" onClick={() => setDetailRow(null)}>Close</button>
-            </div>
-            <div className="card-body space-y-6">
-              <div className="text-xs text-gray-500 font-mono">
-                {detailRow.source_table_name || detailRow.src_table_name || '—'} → {detailRow.target_table_name || detailRow.tgt_table_name || '—'}
-              </div>
-
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Row Count</h4>
-                {isNotSelected(detailRow.count_validation || detailRow.row_count) ? (
-                  <div className="text-sm text-gray-500">Not selected.</div>
-                ) : detailRow.details?.row_count ? (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div className="p-3 border rounded-lg">Source: <strong>{detailRow.details.row_count.source_count}</strong></div>
-                    <div className="p-3 border rounded-lg">Target: <strong>{detailRow.details.row_count.target_count}</strong></div>
-                    <div className="p-3 border rounded-lg">Difference: <strong>{detailRow.details.row_count.difference}</strong></div>
-                  </div>
-                ) : <div className="text-sm text-gray-500">No row count details available.</div>}
-              </div>
-
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Schema Details</h4>
-                {isNotSelected(detailRow.schema_check) ? (
-                  <div className="text-sm text-gray-500">Not selected.</div>
-                ) : detailRow.details?.schema?.rows?.length ? (
-                  <div className="overflow-x-auto">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>column_name_src</th>
-                          <th>column_name_tgt</th>
-                          <th>source_type</th>
-                          <th>target_type</th>
-                          <th>status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detailRow.details.schema.rows.map((row, idx) => (
-                          <tr key={idx}>
-                            <td>{row.column_name_src || '—'}</td>
-                            <td>{row.column_name_tgt || '—'}</td>
-                            <td>{row.source_type || '—'}</td>
-                            <td>{row.target_type || '—'}</td>
-                            <td>{row.status || '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : <div className="text-sm text-gray-500">No schema details available.</div>}
-              </div>
-
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Null Counts</h4>
-                {isNotSelected(detailRow.numeric_check) ? (
-                  <div className="text-sm text-gray-500 mb-6">Not selected.</div>
-                ) : (
-                  (() => {
-                    const numericRows = detailRow?.details?.numeric?.rows || [];
-                    const nullCountRows = numericRows.filter((row) => {
-                      const srcNull = Number(row?.source_null_count || 0);
-                      const tgtNull = Number(row?.target_null_count || 0);
-                      return srcNull > 0 || tgtNull > 0;
-                    });
-                    if (!nullCountRows.length) {
-                      return <div className="text-sm text-gray-500 mb-6">{detailRow.details?.numeric?.error ? `No null count details available: ${detailRow.details.numeric.error}` : 'No columns are null.'}</div>;
-                    }
-                    const summary = nullCountRows
-                      .map((row) => {
-                        const srcNull = Number(row?.source_null_count || 0);
-                        const tgtNull = Number(row?.target_null_count || 0);
-                        if (srcNull > 0 && tgtNull > 0) return `${row.column}: Source ${srcNull}, Target ${tgtNull}`;
-                        if (srcNull > 0) return `${row.column}: Source ${srcNull}`;
-                        return `${row.column}: Target ${tgtNull}`;
-                      })
-                      .join(' | ');
-                    return (
-                      <>
-                        <div className="text-sm text-gray-700 mb-2">{summary}</div>
-                        <div className="overflow-x-auto mb-6">
-                          <table className="data-table">
-                            <thead>
-                              <tr>
-                                <th>Column</th>
-                                <th>Source Null Count</th>
-                                <th>Target Null Count</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {nullCountRows.map((row, idx) => (
-                                <tr key={idx}>
-                                  <td>{row.column}</td>
-                                  <td>{row.source_null_count}</td>
-                                  <td>{row.target_null_count}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </>
-                    );
-                  })()
-                )}
-
-                <h4 className="text-sm font-semibold mb-2">Numeric Column Statistics</h4>
-                {isNotSelected(detailRow.numeric_check) ? (
-                  <div className="text-sm text-gray-500">Not selected.</div>
-                ) : detailRow.details?.numeric?.rows?.length ? (
-                  <div className="overflow-x-auto">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Column</th>
-                          <th>Src Min</th>
-                          <th>Src Max</th>
-                          <th>Src Avg</th>
-                          <th>Tgt Min</th>
-                          <th>Tgt Max</th>
-                          <th>Tgt Avg</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detailRow.details.numeric.rows.map((row, idx) => (
-                          <tr key={idx}>
-                            <td>{row.column}</td>
-                            <td>{formatNumericValue(row.source_min)}</td>
-                            <td>{formatNumericValue(row.source_max)}</td>
-                            <td>{formatNumericValue(row.source_avg)}</td>
-                            <td>{formatNumericValue(row.target_min)}</td>
-                            <td>{formatNumericValue(row.target_max)}</td>
-                            <td>{formatNumericValue(row.target_avg)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : <div className="text-sm text-gray-500">{detailRow.details?.numeric?.error ? `No numeric details available: ${detailRow.details.numeric.error}` : 'No numeric details available.'}</div>}
-              </div>
-
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Row Hash Differences</h4>
-                {isNotSelected(detailRow.hash_validation) ? (
-                  <div className="text-sm text-gray-500">Not selected.</div>
-                ) : detailRow.details?.row_hash ? (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                    <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRow.details.row_hash.source_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRow.details.row_hash.target_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRow.details.row_hash.matched_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRow.details.row_hash.source_not_in_target_count ?? 0) + (detailRow.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
-                  </div>
-                ) : <div className="text-sm text-gray-500">No hash details available.</div>}
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

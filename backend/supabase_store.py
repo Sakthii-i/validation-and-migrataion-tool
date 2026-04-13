@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -52,6 +53,21 @@ def _to_iso(value: Any) -> str:
     return str(value)
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    # Last-resort normalization for driver-specific objects.
+    return str(value)
+
+
 def upsert_results(rows: list[dict[str, Any]]) -> None:
     if not is_enabled() or not rows:
         return
@@ -59,16 +75,16 @@ def upsert_results(rows: list[dict[str, Any]]) -> None:
     payload = []
     for row in rows:
         payload.append({
-            "validation_id": row.get("validation_id"),
+            "validation_id": _json_safe(row.get("validation_id")),
             "validation_ts": _to_iso(row.get("validation_ts")),
-            "validation_type": row.get("validation_type"),
-            "src_table_name": row.get("src_table_name") or row.get("source_table_name"),
-            "tgt_table_name": row.get("tgt_table_name") or row.get("target_table_name"),
-            "row_count": row.get("row_count"),
-            "schema_check": row.get("schema_check"),
-            "numeric_check": row.get("numeric_check"),
-            "hash_validation": row.get("hash_validation"),
-            "details": row.get("details") or {},
+            "validation_type": _json_safe(row.get("validation_type")),
+            "src_table_name": _json_safe(row.get("src_table_name") or row.get("source_table_name")),
+            "tgt_table_name": _json_safe(row.get("tgt_table_name") or row.get("target_table_name")),
+            "row_count": _json_safe(row.get("row_count")),
+            "schema_check": _json_safe(row.get("schema_check")),
+            "numeric_check": _json_safe(row.get("numeric_check")),
+            "hash_validation": _json_safe(row.get("hash_validation")),
+            "details": _json_safe(row.get("details") or {}),
         })
 
     try:
