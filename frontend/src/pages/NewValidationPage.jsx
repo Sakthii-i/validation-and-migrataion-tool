@@ -411,12 +411,22 @@ function BrowseTab({ settings, setSettings }) {
         const aggregated = [];
         for (let i = 0; i < pairs.length; i += 1) {
           const o = tableValidationOverrides[i] || {};
+          const overrideThresholdPercent = Number(o.threshold);
+          const overrideThresholdDecimal = Number.isFinite(overrideThresholdPercent)
+            ? Math.max(0, Math.min(100, overrideThresholdPercent)) / 100
+            : baseSettings.threshold;
           const pairSettings = {
             ...baseSettings,
             rowCount: o.rowCount ?? baseSettings.rowCount,
             schema: o.schema ?? baseSettings.schema,
             numeric: o.numeric ?? baseSettings.numeric,
             hash: o.hash ?? baseSettings.hash,
+            caseSensitive: o.caseSensitive ?? baseSettings.caseSensitive,
+            useThreshold: o.useThreshold ?? baseSettings.useThreshold,
+            threshold: (o.useThreshold ?? baseSettings.useThreshold) ? overrideThresholdDecimal : baseSettings.threshold,
+            includeTimestamp: o.includeTimestamp ?? baseSettings.includeTimestamp,
+            colDiffEnabled: o.colDiffEnabled ?? baseSettings.colDiffEnabled,
+            primaryKeys: o.primaryKeys ?? baseSettings.primaryKeys,
           };
 
           if (pairSettings.hash && pairSettings.colDiffEnabled && !(pairSettings.primaryKeys || '').trim()) {
@@ -692,6 +702,9 @@ function BrowseTab({ settings, setSettings }) {
                   { key: 'numeric', label: 'Numeric' },
                   { key: 'hash', label: 'Hash' },
                 ];
+                const hashSelected = ov.hash ?? settings.hash;
+                const colDiffSelected = ov.colDiffEnabled ?? settings.colDiffEnabled;
+                const thresholdEnabled = ov.useThreshold ?? settings.useThreshold;
                 return (
                   <div key={`${pair.source}-${pair.target}-${i}`} className="card p-2">
                     <div className="text-xs font-medium text-gray-600 mb-2">{pair.source} → {pair.target}</div>
@@ -711,6 +724,100 @@ function BrowseTab({ settings, setSettings }) {
                         </label>
                       ))}
                     </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 pt-3 border-t border-gray-100">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="form-checkbox"
+                          checked={ov.caseSensitive ?? settings.caseSensitive}
+                          onChange={(e) => setTableValidationOverrides(prev => ({
+                            ...prev,
+                            [i]: { ...(prev[i] || {}), caseSensitive: e.target.checked },
+                          }))}
+                        />
+                        <span>Case Sensitive</span>
+                      </label>
+
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={thresholdEnabled}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), useThreshold: e.target.checked },
+                            }))}
+                          />
+                          <span>Threshold (%)</span>
+                        </label>
+                        {thresholdEnabled && (
+                          <input
+                            type="number"
+                            className="form-input w-28"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={ov.threshold ?? settings.threshold}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), threshold: e.target.value },
+                            }))}
+                          />
+                        )}
+                      </div>
+                    </div>
+
+                    {hashSelected && (
+                      <div className="space-y-2 mt-3 pt-3 border-t border-gray-100">
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={ov.includeTimestamp ?? settings.includeTimestamp}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), includeTimestamp: e.target.checked },
+                            }))}
+                          />
+                          <span>Include TIMESTAMP columns</span>
+                        </label>
+
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={colDiffSelected}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), colDiffEnabled: e.target.checked },
+                            }))}
+                          />
+                          <span>Perform column-level mismatch</span>
+                        </label>
+
+                        {colDiffSelected && (
+                          <div className="form-group">
+                            <label className="form-label">Primary Key Column</label>
+                            <select
+                              className="form-select"
+                              value={(((ov.primaryKeys ?? settings.primaryKeys) || '').split(',').map(v => v.trim()).filter(Boolean)[0] || '')}
+                              onChange={(e) => setTableValidationOverrides(prev => ({
+                                ...prev,
+                                [i]: { ...(prev[i] || {}), primaryKeys: e.target.value },
+                              }))}
+                              disabled={!settings.availablePrimaryKeyColumns?.length}
+                            >
+                              <option value="">Select primary key column...</option>
+                              {(settings.availablePrimaryKeyColumns || []).map(col => (
+                                <option key={col} value={col}>{col}</option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -802,12 +909,22 @@ function ManualTab({ settings, setSettings }) {
         const aggregated = [];
         for (let i = 0; i < pairs.length; i += 1) {
           const o = tableValidationOverrides[i] || {};
+          const overrideThresholdPercent = Number(o.threshold);
+          const overrideThresholdDecimal = Number.isFinite(overrideThresholdPercent)
+            ? Math.max(0, Math.min(100, overrideThresholdPercent)) / 100
+            : baseSettings.threshold;
           const pairSettings = {
             ...baseSettings,
             rowCount: o.rowCount ?? baseSettings.rowCount,
             schema: o.schema ?? baseSettings.schema,
             numeric: o.numeric ?? baseSettings.numeric,
             hash: o.hash ?? baseSettings.hash,
+            caseSensitive: o.caseSensitive ?? baseSettings.caseSensitive,
+            useThreshold: o.useThreshold ?? baseSettings.useThreshold,
+            threshold: (o.useThreshold ?? baseSettings.useThreshold) ? overrideThresholdDecimal : baseSettings.threshold,
+            includeTimestamp: o.includeTimestamp ?? baseSettings.includeTimestamp,
+            colDiffEnabled: o.colDiffEnabled ?? baseSettings.colDiffEnabled,
+            primaryKeys: o.primaryKeys ?? baseSettings.primaryKeys,
           };
 
           if (pairSettings.hash && pairSettings.colDiffEnabled && !(pairSettings.primaryKeys || '').trim()) {
@@ -931,6 +1048,9 @@ function ManualTab({ settings, setSettings }) {
                   { key: 'numeric', label: 'Numeric' },
                   { key: 'hash', label: 'Hash' },
                 ];
+                const hashSelected = ov.hash ?? settings.hash;
+                const colDiffSelected = ov.colDiffEnabled ?? settings.colDiffEnabled;
+                const thresholdEnabled = ov.useThreshold ?? settings.useThreshold;
                 return (
                   <div key={i} className="card p-2">
                     <div className="text-xs font-medium text-gray-600 mb-2">{s} → {tgtList[i]}</div>
@@ -950,6 +1070,100 @@ function ManualTab({ settings, setSettings }) {
                         </label>
                       ))}
                     </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 pt-3 border-t border-gray-100">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="form-checkbox"
+                          checked={ov.caseSensitive ?? settings.caseSensitive}
+                          onChange={(e) => setTableValidationOverrides(prev => ({
+                            ...prev,
+                            [i]: { ...(prev[i] || {}), caseSensitive: e.target.checked },
+                          }))}
+                        />
+                        <span>Case Sensitive</span>
+                      </label>
+
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={thresholdEnabled}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), useThreshold: e.target.checked },
+                            }))}
+                          />
+                          <span>Threshold (%)</span>
+                        </label>
+                        {thresholdEnabled && (
+                          <input
+                            type="number"
+                            className="form-input w-28"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={ov.threshold ?? settings.threshold}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), threshold: e.target.value },
+                            }))}
+                          />
+                        )}
+                      </div>
+                    </div>
+
+                    {hashSelected && (
+                      <div className="space-y-2 mt-3 pt-3 border-t border-gray-100">
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={ov.includeTimestamp ?? settings.includeTimestamp}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), includeTimestamp: e.target.checked },
+                            }))}
+                          />
+                          <span>Include TIMESTAMP columns</span>
+                        </label>
+
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={colDiffSelected}
+                            onChange={(e) => setTableValidationOverrides(prev => ({
+                              ...prev,
+                              [i]: { ...(prev[i] || {}), colDiffEnabled: e.target.checked },
+                            }))}
+                          />
+                          <span>Perform column-level mismatch</span>
+                        </label>
+
+                        {colDiffSelected && (
+                          <div className="form-group">
+                            <label className="form-label">Primary Key Column</label>
+                            <select
+                              className="form-select"
+                              value={(((ov.primaryKeys ?? settings.primaryKeys) || '').split(',').map(v => v.trim()).filter(Boolean)[0] || '')}
+                              onChange={(e) => setTableValidationOverrides(prev => ({
+                                ...prev,
+                                [i]: { ...(prev[i] || {}), primaryKeys: e.target.value },
+                              }))}
+                              disabled={!settings.availablePrimaryKeyColumns?.length}
+                            >
+                              <option value="">Select primary key column...</option>
+                              {(settings.availablePrimaryKeyColumns || []).map(col => (
+                                <option key={col} value={col}>{col}</option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -977,7 +1191,6 @@ function ManualTab({ settings, setSettings }) {
 function CSVTab({ settings, setSettings }) {
   const { isConnected, sessionId } = useConnection();
   const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
 
@@ -985,16 +1198,6 @@ function CSVTab({ settings, setSettings }) {
     const f = e.target.files[0];
     if (!f) return;
     setFile(f);
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const lines = ev.target.result.split('\n').filter(l => l.trim() && !l.startsWith('#'));
-      if (lines.length > 1) {
-        const headers = lines[0].split(',');
-        const rows = lines.slice(1, 6).map(l => l.split(','));
-        setPreview({ headers, rows });
-      }
-    };
-    reader.readAsText(f);
   };
 
   const handleRun = async () => {
@@ -1055,15 +1258,6 @@ function CSVTab({ settings, setSettings }) {
         <div className="card-header"><Upload size={16} /> Upload CSV</div>
         <div className="card-body">
           <input type="file" accept=".csv" onChange={handleFileChange} className="form-input" />
-          {preview && (
-            <div className="mt-4 overflow-x-auto">
-              <p className="text-sm text-gray-500 mb-2">Preview (first 5 rows):</p>
-              <table className="data-table">
-                <thead><tr>{preview.headers.map((h,i)=><th key={i}>{h.trim()}</th>)}</tr></thead>
-                <tbody>{preview.rows.map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j} className="text-xs">{c.trim()}</td>)}</tr>)}</tbody>
-              </table>
-            </div>
-          )}
         </div>
       </div>
 

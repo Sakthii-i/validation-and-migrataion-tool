@@ -163,9 +163,6 @@ def auth_revoke(req: RevokeRequest):
 def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
 
-    if supabase_store.is_enabled():
-        return supabase_store.dashboard_stats(start_date=s, end_date=e)
-
     where = _where_clause(s, e)
 
     query = f"""
@@ -203,10 +200,6 @@ def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str]
 def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
 
-    if supabase_store.is_enabled():
-        rows = supabase_store.list_results(start_date=s, end_date=e, limit=500)
-        return {"results": rows}
-
     where = _where_clause(s, e)
 
     query = f"""
@@ -235,11 +228,13 @@ def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = 
 
 @router.get("/results/{validation_id}")
 def get_result_by_id(validation_id: str):
-    if supabase_store.is_enabled():
-        row = supabase_store.get_result_by_id(validation_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Validation ID not found")
-        return row
+    if not supabase_store.is_enabled():
+        raise HTTPException(status_code=503, detail="Supabase is not configured for validation details")
+
+    row = supabase_store.get_result_by_id(validation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Validation details not found in Supabase")
+    return row
 
     query = f"""
         SELECT

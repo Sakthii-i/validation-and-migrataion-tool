@@ -254,7 +254,7 @@ export default function DataValidationsPage() {
       <div className="page-topbar">
         <div>
           <h1 className="page-title">Data Validations</h1>
-          <p className="text-xs text-gray-500 mt-0.5">All validation executions fetched from API result store (Supabase when configured)</p>
+          <p className="text-xs text-gray-500 mt-0.5">Rows and stats from PostgreSQL; Eye details from Supabase</p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn btn-outline btn-sm" onClick={exportCSV}>
