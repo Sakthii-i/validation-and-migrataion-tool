@@ -34,7 +34,7 @@ export default function Sidebar() {
     <div className="sidebar">
       {/* Brand */}
       <div className="sidebar-brand flex items-center gap-3">
-        <img src="/eucloid-logo.svg" alt="Eucloid logo" className="w-8 h-8 object-contain" />
+        <img src="/eucloid.jpg" alt="Eucloid logo" className="w-8 h-8 object-contain" />
         <span>Eucloid</span>
       </div>
 

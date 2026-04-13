@@ -1,0 +1,30 @@
+<svg width="600" height="620" viewBox="0 0 600 620" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(300 240) rotate(45) translate(-300 -240)">
+    <rect x="140" y="80" width="320" height="320" rx="42" fill="#153B86"/>
+
+    <rect x="132" y="208" width="336" height="64" fill="#55A8F6"/>
+    <rect x="268" y="72" width="64" height="336" fill="#55A8F6"/>
+
+    <path d="M176 174H292V88" stroke="#55A8F6" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M424 306H308V392" stroke="#55A8F6" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="258" y="198" width="84" height="84" rx="10" stroke="#C9ECEF" stroke-width="20" fill="none"/>
+
+    <line x1="102" y1="240" x2="140" y2="240" stroke="#55A8F6" stroke-width="16" stroke-linecap="round"/>
+    <line x1="460" y1="240" x2="498" y2="240" stroke="#55A8F6" stroke-width="16" stroke-linecap="round"/>
+    <line x1="300" y1="42" x2="300" y2="80" stroke="#55A8F6" stroke-width="16" stroke-linecap="round"/>
+    <line x1="300" y1="400" x2="300" y2="438" stroke="#55A8F6" stroke-width="16" stroke-linecap="round"/>
+
+    <circle cx="96" cy="240" r="32" fill="#55A8F6"/>
+    <circle cx="504" cy="240" r="32" fill="#55A8F6"/>
+    <circle cx="300" cy="36" r="32" fill="#55A8F6"/>
+    <circle cx="300" cy="444" r="32" fill="#55A8F6"/>
+
+    <circle cx="96" cy="240" r="10" fill="#E9EFEA"/>
+    <circle cx="504" cy="240" r="10" fill="#E9EFEA"/>
+    <circle cx="300" cy="36" r="10" fill="#E9EFEA"/>
+    <circle cx="300" cy="444" r="10" fill="#E9EFEA"/>
+  </g>
+
+  <text x="300" y="600" text-anchor="middle" fill="#0F3C8A" font-family="Segoe UI, Arial, sans-serif" font-size="108" font-weight="700" letter-spacing="1">EUCLOID</text>
+</svg>
