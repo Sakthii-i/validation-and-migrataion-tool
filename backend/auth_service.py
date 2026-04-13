@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from backend.auth_config import ADMIN_PASSWORD_HASH, ADMIN_USERNAME
-from backend.auth_crypto import hash_password, verify_password
-from backend.auth_store import delete_user, get_password_hash, get_pg_conn, list_usernames, upsert_user
+from validation_tool.backend.auth_config import ADMIN_PASSWORD_HASH, ADMIN_USERNAME
+from validation_tool.backend.auth_crypto import hash_password, verify_password
+from validation_tool.backend.auth_store import delete_user, get_password_hash, get_pg_conn, list_usernames, upsert_user
 
 
 def is_admin_login(username: str, password: str) -> bool:
