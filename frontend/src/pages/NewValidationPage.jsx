@@ -1,11 +1,11 @@
-import { useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { useConnection } from '../context/ConnectionContext';
-import { metadataAPI, validationAPI } from '../services/api';
+import { metadataAPI, validationAPI, schemaAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import {
   Plug, PlugZap, Database, Server, FolderSearch, FileText, Upload, Settings2,
-  Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, Trash2
+  Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, Trash2, Eye
 } from 'lucide-react';
 
 // ═══════════════════════════════════════
@@ -15,7 +15,6 @@ function CredentialsSection() {
   const {
     sourceEngine, setSourceEngine, sourceCreds, setSourceCreds,
     targetCreds, setTargetCreds, 
-    useStoredCreds, setUseStoredCreds, filePassword, setFilePassword,
     connect, disconnect,
     connectionStatus, isConnected, error
   } = useConnection();
@@ -38,90 +37,39 @@ function CredentialsSection() {
         </select>
       </div>
 
-      <div className="flex items-center gap-2 mb-6">
-        <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-gray-50 border border-gray-200 w-full sm:w-auto">
-          <input
-            type="checkbox"
-            className="form-checkbox"
-            checked={useStoredCreds}
-            onChange={(e) => setUseStoredCreds(e.target.checked)}
-          />
-          <span className="text-sm font-medium">Use Server Stored Credentials (Snowflake/Databricks)</span>
-        </label>
-      </div>
-
-      {useStoredCreds ? (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Source */}
         <div className="card">
-          <div className="card-header bg-primary-50">
-            <Plug size={16} className="text-primary-600" />
-            Unlock Stored Credentials
+          <div className="card-header">
+            <Database size={16} className="text-primary-600" />
+            Source — {sourceEngine}
           </div>
-          <div className="card-body">
-            <div className="form-group max-w-md">
-              <label className="form-label">Master Password</label>
-              <input 
-                className="form-input" 
-                type="password" 
-                value={filePassword} 
-                onChange={e => setFilePassword(e.target.value)} 
-                placeholder="Enter password to unlock credential.txt..." 
-              />
-              <span className="form-hint">This will automatically connect to Snowflake and Databricks.</span>
-            </div>
+          <div className="card-body space-y-3">
+            {sourceEngine === 'BigQuery' ? (
+              <>
+                <div className="form-group">
+                  <label className="form-label">GCP Project ID</label>
+                  <input className="form-input" value={sourceCreds.project_id} onChange={e => updateSource('project_id', e.target.value)} placeholder="my-gcp-project" />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Dataset Location</label>
+                  <input className="form-input" value={sourceCreds.dataset_location} onChange={e => updateSource('dataset_location', e.target.value)} placeholder="US" />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Service Account Key Path</label>
+                  <input className="form-input" value={sourceCreds.bq_key_path} onChange={e => updateSource('bq_key_path', e.target.value)} placeholder="/path/to/key.json" />
+                </div>
+              </>
+            ) : (
+              <div className="alert alert-info">
+                Snowflake source credentials are managed by backend and applied automatically.
+              </div>
+            )}
           </div>
         </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Source */}
-          <div className="card">
-            <div className="card-header">
-              <Database size={16} className="text-primary-600" />
-              Source — {sourceEngine}
-            </div>
-            <div className="card-body space-y-3">
-              {sourceEngine === 'BigQuery' ? (
-                <>
-                  <div className="form-group">
-                    <label className="form-label">GCP Project ID</label>
-                    <input className="form-input" value={sourceCreds.project_id} onChange={e => updateSource('project_id', e.target.value)} placeholder="my-gcp-project" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Dataset Location</label>
-                    <input className="form-input" value={sourceCreds.dataset_location} onChange={e => updateSource('dataset_location', e.target.value)} placeholder="US" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Service Account Key Path</label>
-                    <input className="form-input" value={sourceCreds.bq_key_path} onChange={e => updateSource('bq_key_path', e.target.value)} placeholder="/path/to/key.json" />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="form-group">
-                    <label className="form-label">Account</label>
-                    <input className="form-input" value={sourceCreds.sf_account} onChange={e => updateSource('sf_account', e.target.value)} placeholder="xyz12345.us-east-1" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">User</label>
-                    <input className="form-input" value={sourceCreds.sf_user} onChange={e => updateSource('sf_user', e.target.value)} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Password</label>
-                    <input className="form-input" type="password" value={sourceCreds.sf_password} onChange={e => updateSource('sf_password', e.target.value)} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Warehouse</label>
-                    <input className="form-input" value={sourceCreds.sf_warehouse} onChange={e => updateSource('sf_warehouse', e.target.value)} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Role (optional)</label>
-                    <input className="form-input" value={sourceCreds.sf_role} onChange={e => updateSource('sf_role', e.target.value)} />
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
 
-          {/* Target */}
+        {/* Target */}
+        {sourceEngine === 'BigQuery' ? (
           <div className="card">
             <div className="card-header">
               <Server size={16} className="text-primary-600" />
@@ -142,8 +90,20 @@ function CredentialsSection() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="card">
+            <div className="card-header">
+              <Server size={16} className="text-primary-600" />
+              Target — Databricks
+            </div>
+            <div className="card-body">
+              <div className="alert alert-info">
+                Databricks target credentials are managed by backend and applied automatically.
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {error && <div className="alert alert-error mt-4">{error}</div>}
 
@@ -168,6 +128,8 @@ function CredentialsSection() {
 // VALIDATION SETTINGS
 // ═══════════════════════════════════════
 function ValidationSettings({ settings, setSettings }) {
+  const hashSelected = settings.validationType === 'deep' && settings.hash;
+
   return (
     <CollapsibleSection title="⚙️ Validation Settings" icon={<Settings2 size={16} />} defaultOpen={true}>
       {/* Type */}
@@ -238,7 +200,7 @@ function ValidationSettings({ settings, setSettings }) {
           )}
 
           {/* Timestamp Toggle */}
-          {(settings.hash || settings.validationType === 'deep') && (
+          {hashSelected && (
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" className="form-checkbox" checked={settings.includeTimestamp} onChange={e => setSettings(p => ({ ...p, includeTimestamp: e.target.checked }))} />
               <span className="text-sm">Include TIMESTAMP columns in row hash</span>
@@ -251,13 +213,6 @@ function ValidationSettings({ settings, setSettings }) {
             <span className="text-sm">Case-sensitive schema validation</span>
           </label>
 
-          {/* Col Diff */}
-          {(settings.hash || settings.validationType === 'deep') && (
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" className="form-checkbox" checked={settings.colDiffEnabled} onChange={e => setSettings(p => ({ ...p, colDiffEnabled: e.target.checked }))} />
-              <span className="text-sm">Perform column-level diff on hash mismatch</span>
-            </label>
-          )}
         </div>
       </details>
     </CollapsibleSection>
@@ -267,7 +222,7 @@ function ValidationSettings({ settings, setSettings }) {
 // ═══════════════════════════════════════
 // TAB: BROWSE & SELECT
 // ═══════════════════════════════════════
-function BrowseTab({ settings }) {
+function BrowseTab({ settings, setSettings }) {
   const { isConnected, sessionId, sourceEngine } = useConnection();
   const [srcCatalogs, setSrcCatalogs] = useState([]);
   const [srcSchemas, setSrcSchemas] = useState([]);
@@ -276,43 +231,158 @@ function BrowseTab({ settings }) {
   const [tgtSchemas, setTgtSchemas] = useState([]);
   const [tgtTables, setTgtTables] = useState([]);
   const [selectedSrcCatalog, setSelectedSrcCatalog] = useState('');
-  const [selectedSrcSchemas, setSelectedSrcSchemas] = useState([]);
-  const [selectedSrcTables, setSelectedSrcTables] = useState([]);
+  const [selectedSrcSchema, setSelectedSrcSchema] = useState('');
+  const [selectedSrcTable, setSelectedSrcTable] = useState('');
   const [selectedTgtCatalog, setSelectedTgtCatalog] = useState('');
-  const [selectedTgtSchemas, setSelectedTgtSchemas] = useState([]);
-  const [selectedTgtTables, setSelectedTgtTables] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [selectedTgtSchema, setSelectedTgtSchema] = useState('');
+  const [selectedTgtTable, setSelectedTgtTable] = useState('');
   const [results, setResults] = useState(null);
   const [running, setRunning] = useState(false);
+  const [useSeparateWhere, setUseSeparateWhere] = useState(false);
+  const [whereClause, setWhereClause] = useState('1=1');
+  const [sourceWhereClause, setSourceWhereClause] = useState('1=1');
+  const [targetWhereClause, setTargetWhereClause] = useState('1=1');
 
   const loadCatalogs = async (target) => {
     try {
-      const res = await metadataAPI.getCatalogs(target);
+      const res = await metadataAPI.getCatalogs(target, sessionId);
       return res.data.catalogs || [];
     } catch { return []; }
   };
 
   const loadSchemas = async (target, catalog) => {
     try {
-      const res = await metadataAPI.getSchemas(target, catalog);
+      const res = await metadataAPI.getSchemas(target, catalog, sessionId);
       return res.data.schemas || [];
     } catch { return []; }
   };
 
   const loadTables = async (target, catalog, schema) => {
     try {
-      const res = await metadataAPI.getTables(target, catalog, schema);
+      const res = await metadataAPI.getTables(target, catalog, schema, sessionId);
       return res.data.tables || [];
     } catch { return []; }
   };
 
+  const ensureCatalogs = async (target) => {
+    if (target === 'source' && !srcCatalogs.length) {
+      setSrcCatalogs(await loadCatalogs('source'));
+    }
+    if (target === 'target' && !tgtCatalogs.length) {
+      setTgtCatalogs(await loadCatalogs('target'));
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedSrcCatalog) {
+      setSrcSchemas([]);
+      setSelectedSrcSchema('');
+      setSrcTables([]);
+      setSelectedSrcTable('');
+      return;
+    }
+    (async () => {
+      const schemas = await loadSchemas('source', selectedSrcCatalog);
+      setSrcSchemas(schemas);
+      setSelectedSrcSchema('');
+      setSrcTables([]);
+      setSelectedSrcTable('');
+    })();
+  }, [selectedSrcCatalog]);
+
+  useEffect(() => {
+    if (!selectedSrcCatalog || !selectedSrcSchema) {
+      setSrcTables([]);
+      setSelectedSrcTable('');
+      return;
+    }
+    (async () => {
+      const tables = await loadTables('source', selectedSrcCatalog, selectedSrcSchema);
+      setSrcTables(tables);
+      setSelectedSrcTable('');
+    })();
+  }, [selectedSrcCatalog, selectedSrcSchema]);
+
+  useEffect(() => {
+    if (!selectedSrcCatalog || !selectedSrcSchema || !selectedSrcTable) {
+      setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [] }));
+      return;
+    }
+
+    (async () => {
+      try {
+        const tablePath = `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}`;
+        const res = await schemaAPI.getSchema(sourceEngine, tablePath);
+        const cols = (res.data.columns || [])
+          .map(col => col.column_name || col.COLUMN_NAME || col.name)
+          .filter(Boolean);
+        setSettings(prev => ({
+          ...prev,
+          availablePrimaryKeyColumns: cols,
+          primaryKeys: prev.primaryKeys
+            ? prev.primaryKeys.split(',').map(value => value.trim()).filter(Boolean).every(value => cols.includes(value))
+              ? prev.primaryKeys
+              : ''
+            : '',
+        }));
+      } catch {
+        setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [] }));
+      }
+    })();
+  }, [selectedSrcCatalog, selectedSrcSchema, selectedSrcTable, sourceEngine, setSettings]);
+
+  useEffect(() => {
+    if (!selectedTgtCatalog) {
+      setTgtSchemas([]);
+      setSelectedTgtSchema('');
+      setTgtTables([]);
+      setSelectedTgtTable('');
+      return;
+    }
+    (async () => {
+      const schemas = await loadSchemas('target', selectedTgtCatalog);
+      setTgtSchemas(schemas);
+      setSelectedTgtSchema('');
+      setTgtTables([]);
+      setSelectedTgtTable('');
+    })();
+  }, [selectedTgtCatalog]);
+
+  useEffect(() => {
+    if (!selectedTgtCatalog || !selectedTgtSchema) {
+      setTgtTables([]);
+      setSelectedTgtTable('');
+      return;
+    }
+    (async () => {
+      const tables = await loadTables('target', selectedTgtCatalog, selectedTgtSchema);
+      setTgtTables(tables);
+      setSelectedTgtTable('');
+    })();
+  }, [selectedTgtCatalog, selectedTgtSchema]);
+
   const handleRun = async () => {
+    if (!selectedSrcCatalog || !selectedSrcSchema || !selectedSrcTable || !selectedTgtCatalog || !selectedTgtSchema || !selectedTgtTable) {
+      setResults({ error: 'Select source and target catalog, schema, and table.' });
+      return;
+    }
+
+    if (settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
+      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+      return;
+    }
+
+    const sourceWhere = useSeparateWhere ? (sourceWhereClause || '1=1') : (whereClause || '1=1');
+    const targetWhere = useSeparateWhere ? (targetWhereClause || '1=1') : (whereClause || '1=1');
+
     setRunning(true);
     try {
-      const pairs = selectedSrcTables.map((st, i) => ({
-        source: st,
-        target: selectedTgtTables[i],
-      }));
+      const pairs = [{
+        source: `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}`,
+        target: `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}`,
+        source_where: sourceWhere,
+        target_where: targetWhere,
+      }];
       const res = await validationAPI.run({
         session_id: sessionId,
         validation_type: settings.validationType,
@@ -340,23 +410,27 @@ function BrowseTab({ settings }) {
           <div className="card-body space-y-3">
             <div className="form-group">
               <label className="form-label">Catalog</label>
-              <div className="flex gap-2">
-                <select className="form-select flex-1" value={selectedSrcCatalog} onChange={e => setSelectedSrcCatalog(e.target.value)}>
-                  <option value="">Select catalog...</option>
-                  {srcCatalogs.map(c => <option key={c}>{c}</option>)}
-                </select>
-                <button className="btn btn-outline btn-sm" onClick={async () => setSrcCatalogs(await loadCatalogs('source'))}>Load</button>
-              </div>
+              <select className="form-select" value={selectedSrcCatalog} onFocus={() => ensureCatalogs('source')} onChange={e => setSelectedSrcCatalog(e.target.value)}>
+                <option value="">Select catalog...</option>
+                {srcCatalogs.map(c => <option key={c}>{c}</option>)}
+              </select>
             </div>
             {selectedSrcCatalog && (
               <div className="form-group">
-                <label className="form-label">Schema(s)</label>
-                <div className="flex gap-2">
-                  <select className="form-select flex-1" multiple value={selectedSrcSchemas} onChange={e => setSelectedSrcSchemas([...e.target.selectedOptions].map(o => o.value))} size={4}>
-                    {srcSchemas.map(s => <option key={s}>{s}</option>)}
-                  </select>
-                  <button className="btn btn-outline btn-sm" onClick={async () => setSrcSchemas(await loadSchemas('source', selectedSrcCatalog))}>Load</button>
-                </div>
+                <label className="form-label">Schema</label>
+                <select className="form-select" value={selectedSrcSchema} onChange={e => setSelectedSrcSchema(e.target.value)}>
+                  <option value="">Select schema...</option>
+                  {srcSchemas.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+            )}
+            {selectedSrcSchema && (
+              <div className="form-group">
+                <label className="form-label">Table</label>
+                <select className="form-select" value={selectedSrcTable} onChange={e => setSelectedSrcTable(e.target.value)}>
+                  <option value="">Select table...</option>
+                  {srcTables.map(t => <option key={t}>{t}</option>)}
+                </select>
               </div>
             )}
           </div>
@@ -368,26 +442,116 @@ function BrowseTab({ settings }) {
           <div className="card-body space-y-3">
             <div className="form-group">
               <label className="form-label">Catalog</label>
-              <div className="flex gap-2">
-                <select className="form-select flex-1" value={selectedTgtCatalog} onChange={e => setSelectedTgtCatalog(e.target.value)}>
-                  <option value="">Select catalog...</option>
-                  {tgtCatalogs.map(c => <option key={c}>{c}</option>)}
-                </select>
-                <button className="btn btn-outline btn-sm" onClick={async () => setTgtCatalogs(await loadCatalogs('target'))}>Load</button>
-              </div>
+              <select className="form-select" value={selectedTgtCatalog} onFocus={() => ensureCatalogs('target')} onChange={e => setSelectedTgtCatalog(e.target.value)}>
+                <option value="">Select catalog...</option>
+                {tgtCatalogs.map(c => <option key={c}>{c}</option>)}
+              </select>
             </div>
             {selectedTgtCatalog && (
               <div className="form-group">
-                <label className="form-label">Schema(s)</label>
-                <div className="flex gap-2">
-                  <select className="form-select flex-1" multiple value={selectedTgtSchemas} onChange={e => setSelectedTgtSchemas([...e.target.selectedOptions].map(o => o.value))} size={4}>
-                    {tgtSchemas.map(s => <option key={s}>{s}</option>)}
-                  </select>
-                  <button className="btn btn-outline btn-sm" onClick={async () => setTgtSchemas(await loadSchemas('target', selectedTgtCatalog))}>Load</button>
-                </div>
+                <label className="form-label">Schema</label>
+                <select className="form-select" value={selectedTgtSchema} onChange={e => setSelectedTgtSchema(e.target.value)}>
+                  <option value="">Select schema...</option>
+                  {tgtSchemas.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+            )}
+            {selectedTgtSchema && (
+              <div className="form-group">
+                <label className="form-label">Table</label>
+                <select className="form-select" value={selectedTgtTable} onChange={e => setSelectedTgtTable(e.target.value)}>
+                  <option value="">Select table...</option>
+                  {tgtTables.map(t => <option key={t}>{t}</option>)}
+                </select>
               </div>
             )}
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">Per-Table WHERE Conditions</div>
+        <div className="card-body space-y-3">
+          <div className="text-sm font-semibold text-gray-700">
+            {selectedSrcCatalog && selectedSrcSchema && selectedSrcTable ? `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}` : 'source.table'}
+            {' -> '}
+            {selectedTgtCatalog && selectedTgtSchema && selectedTgtTable ? `${selectedTgtCatalog}.${selectedTgtSchema}.${selectedTgtTable}` : 'target.table'}
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={useSeparateWhere}
+              onChange={e => setUseSeparateWhere(e.target.checked)}
+            />
+            <span className="text-sm">Use separate Source/Target WHERE</span>
+          </label>
+
+          {!useSeparateWhere && (
+            <div className="form-group">
+              <label className="form-label">WHERE clause (applies to both source and target)</label>
+              <input
+                className="form-input"
+                value={whereClause}
+                onChange={e => setWhereClause(e.target.value)}
+                placeholder="1=1"
+              />
+            </div>
+          )}
+
+          {useSeparateWhere && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="form-group">
+                <label className="form-label">Source WHERE</label>
+                <input
+                  className="form-input"
+                  value={sourceWhereClause}
+                  onChange={e => setSourceWhereClause(e.target.value)}
+                  placeholder="1=1"
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Target WHERE</label>
+                <input
+                  className="form-input"
+                  value={targetWhereClause}
+                  onChange={e => setTargetWhereClause(e.target.value)}
+                  placeholder="1=1"
+                />
+              </div>
+            </div>
+          )}
+
+          {settings.validationType === 'deep' && settings.hash && (
+            <label className="flex items-center gap-2 cursor-pointer pt-2 border-t border-gray-100">
+              <input
+                type="checkbox"
+                className="form-checkbox"
+                checked={settings.colDiffEnabled}
+                onChange={e => setSettings(p => ({ ...p, colDiffEnabled: e.target.checked }))}
+              />
+              <span className="text-sm">Perform column-level mismatch</span>
+            </label>
+          )}
+
+          {settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled && (
+            <div className="form-group">
+              <label className="form-label">Primary Key Column</label>
+              <select
+                className="form-select"
+                value={(settings.primaryKeys || '').split(',').map(v => v.trim()).filter(Boolean)[0] || ''}
+                onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
+                disabled={!settings.availablePrimaryKeyColumns?.length}
+              >
+                <option value="">Select primary key column...</option>
+                {(settings.availablePrimaryKeyColumns || []).map(col => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+              </select>
+              <span className="form-hint">Choose a key column from selected source table.</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -659,6 +823,8 @@ function ConfigTab({ settings }) {
 // RESULTS DISPLAY
 // ═══════════════════════════════════════
 function ResultsDisplay({ results }) {
+  const [detailRecord, setDetailRecord] = useState(null);
+
   if (!results) return null;
 
   if (results.error) {
@@ -666,6 +832,46 @@ function ResultsDisplay({ results }) {
   }
 
   const records = results.results || results.validation_ids || [];
+  const numericRows = detailRecord?.details?.numeric?.rows || [];
+  const isNotSelected = (status) => {
+    if (status === null || status === undefined) return true;
+    const text = String(status).trim().toUpperCase();
+    return text === '' || text === 'N/A' || text === 'NONE' || text === '—' || text === '-';
+  };
+
+  const rowCountStatus = detailRecord?.row_count || detailRecord?.count_validation;
+  const schemaStatus = detailRecord?.schema_check;
+  const numericStatus = detailRecord?.numeric_check;
+  const hashStatus = detailRecord?.hash_validation;
+
+  const rowCountNotSelected = isNotSelected(rowCountStatus);
+  const schemaNotSelected = isNotSelected(schemaStatus);
+  const numericNotSelected = isNotSelected(numericStatus);
+  const hashNotSelected = isNotSelected(hashStatus);
+
+  const nullCountRows = numericRows.filter((row) => {
+    const srcNull = Number(row?.source_null_count || 0);
+    const tgtNull = Number(row?.target_null_count || 0);
+    return srcNull > 0 || tgtNull > 0;
+  });
+
+  const nullCountSummary = nullCountRows
+    .map((row) => {
+      const srcNull = Number(row?.source_null_count || 0);
+      const tgtNull = Number(row?.target_null_count || 0);
+      if (srcNull > 0 && tgtNull > 0) {
+        return `${row.column}: Source ${srcNull}, Target ${tgtNull}`;
+      }
+      if (srcNull > 0) return `${row.column}: Source ${srcNull}`;
+      return `${row.column}: Target ${tgtNull}`;
+    })
+    .join(' | ');
+
+  const formatNumericValue = (value) => {
+    if (value === null || value === undefined || value === '') return '—';
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(4) : value;
+  };
 
   if (records.length === 0 && !results.error) {
     return <div className="alert alert-success mt-4">🎉 Validations completed successfully!</div>;
@@ -686,6 +892,7 @@ function ResultsDisplay({ results }) {
                 <th>Schema</th>
                 <th>Numeric</th>
                 <th>Hash</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -698,10 +905,214 @@ function ResultsDisplay({ results }) {
                   <td><StatusBadge status={r.schema_check || '—'} /></td>
                   <td><StatusBadge status={r.numeric_check || '—'} /></td>
                   <td><StatusBadge status={r.hash_validation || '—'} /></td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      title="View validation details"
+                      onClick={() => setDetailRecord(r)}
+                    >
+                      <Eye size={14} />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {detailRecord && (
+        <div className="card mt-4">
+          <div className="card-header flex items-center justify-between">
+            <span>Validation Details</span>
+            <button type="button" className="btn btn-outline btn-sm" onClick={() => setDetailRecord(null)}>Close</button>
+          </div>
+          <div className="card-body space-y-6">
+            <div className="text-xs text-gray-500 font-mono">
+              {detailRecord.src_table || detailRecord.source || '—'} → {detailRecord.tgt_table || detailRecord.target || '—'}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Row Count</h4>
+              {rowCountNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.row_count ? (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="p-3 border rounded-lg">Source: <strong>{detailRecord.details.row_count.source_count}</strong></div>
+                  <div className="p-3 border rounded-lg">Target: <strong>{detailRecord.details.row_count.target_count}</strong></div>
+                  <div className="p-3 border rounded-lg">Difference: <strong>{detailRecord.details.row_count.difference}</strong></div>
+                </div>
+              ) : <div className="text-sm text-gray-500">No row count details available.</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Schema Details</h4>
+              {schemaNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.schema?.rows?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>column_name_src</th>
+                        <th>column_name_tgt</th>
+                        <th>source_type</th>
+                        <th>target_type</th>
+                        <th>status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailRecord.details.schema.rows.map((row, idx) => (
+                        <tr key={idx}>
+                          <td>{row.column_name_src || '—'}</td>
+                          <td>{row.column_name_tgt || '—'}</td>
+                          <td>{row.source_type || '—'}</td>
+                          <td>{row.target_type || '—'}</td>
+                          <td>{row.status || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <div className="text-sm text-gray-500">No schema details available.</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Null Counts</h4>
+              {numericNotSelected ? (
+                <div className="text-sm text-gray-500 mb-6">Not selected.</div>
+              ) : nullCountRows.length ? (
+                <>
+                <div className="text-sm text-gray-700 mb-2">{nullCountSummary}</div>
+                <div className="overflow-x-auto mb-6">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Column</th>
+                        <th>Source Null Count</th>
+                        <th>Target Null Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nullCountRows.map((row, idx) => (
+                        <tr key={idx}>
+                          <td>{row.column}</td>
+                          <td>{row.source_null_count}</td>
+                          <td>{row.target_null_count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                </>
+              ) : <div className="text-sm text-gray-500 mb-6">{detailRecord.details?.numeric?.error ? `No null count details available: ${detailRecord.details.numeric.error}` : 'No columns are null.'}</div>}
+
+              <h4 className="text-sm font-semibold mb-2">Numeric Column Statistics</h4>
+              {numericNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.numeric?.rows?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Column</th>
+                        <th>Src Min</th>
+                        <th>Src Max</th>
+                        <th>Src Avg</th>
+                        <th>Tgt Min</th>
+                        <th>Tgt Max</th>
+                        <th>Tgt Avg</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailRecord.details.numeric.rows.map((row, idx) => (
+                        <tr key={idx}>
+                          <td>{row.column}</td>
+                          <td>{formatNumericValue(row.source_min)}</td>
+                          <td>{formatNumericValue(row.source_max)}</td>
+                          <td>{formatNumericValue(row.source_avg)}</td>
+                          <td>{formatNumericValue(row.target_min)}</td>
+                          <td>{formatNumericValue(row.target_max)}</td>
+                          <td>{formatNumericValue(row.target_avg)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <div className="text-sm text-gray-500">{detailRecord.details?.numeric?.error ? `No numeric details available: ${detailRecord.details.numeric.error}` : 'No numeric details available.'}</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Row Hash Differences</h4>
+              {hashNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.row_hash ? (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                  <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRecord.details.row_hash.source_hash_count ?? 0}</strong></div>
+                  <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRecord.details.row_hash.target_hash_count ?? 0}</strong></div>
+                  <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
+                  <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
+                </div>
+              ) : null}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-xs font-semibold text-red-600 mb-2">
+                    Source not in Target ({detailRecord.details?.row_hash?.source_not_in_target_count ?? 0})
+                  </div>
+                  {detailRecord.details?.row_hash?.source_not_in_target_rows?.length ? (
+                    <div className="overflow-x-auto">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                              <th key={c}>{c}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detailRecord.details.row_hash.source_not_in_target_rows.map((row, i) => (
+                            <tr key={i}>
+                              {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : <div className="text-sm text-gray-500">No rows.</div>}
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-red-600 mb-2">
+                    Target not in Source ({detailRecord.details?.row_hash?.target_not_in_source_count ?? 0})
+                  </div>
+                  {detailRecord.details?.row_hash?.target_not_in_source_rows?.length ? (
+                    <div className="overflow-x-auto">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                              <th key={c}>{c}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detailRecord.details.row_hash.target_not_in_source_rows.map((row, i) => (
+                            <tr key={i}>
+                              {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : <div className="text-sm text-gray-500">No rows.</div>}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -715,9 +1126,11 @@ export default function NewValidationPage() {
   const [activeTab, setActiveTab] = useState('browse');
   const [settings, setSettings] = useState({
     validationType: 'shallow',
-    rowCount: true, schema: true, numeric: false, hash: false,
+    rowCount: false, schema: false, numeric: false, hash: false,
     useThreshold: false, threshold: 0.99,
-    includeTimestamp: true, caseSensitive: false, colDiffEnabled: false,
+    includeTimestamp: false, caseSensitive: false, colDiffEnabled: false,
+    primaryKeys: '',
+    availablePrimaryKeyColumns: [],
   });
 
   const tabs = [
@@ -750,7 +1163,7 @@ export default function NewValidationPage() {
             ))}
           </div>
           <div className="p-5">
-            {activeTab === 'browse' && <BrowseTab settings={settings} />}
+            {activeTab === 'browse' && <BrowseTab settings={settings} setSettings={setSettings} />}
             {activeTab === 'manual' && <ManualTab settings={settings} />}
             {activeTab === 'csv' && <CSVTab settings={settings} />}
             {activeTab === 'config' && <ConfigTab settings={settings} />}

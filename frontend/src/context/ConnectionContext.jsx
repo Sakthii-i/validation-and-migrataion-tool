@@ -1,5 +1,5 @@
 import { createContext, useContext, useState } from 'react';
-import { connectionAPI, metadataAPI } from '../services/api';
+import { connectionAPI } from '../services/api';
 
 const ConnectionContext = createContext(null);
 
@@ -23,7 +23,6 @@ export function ConnectionProvider({ children }) {
   });
 
   const [useStoredCreds, setUseStoredCreds] = useState(false);
-  const [filePassword, setFilePassword] = useState('');
 
   const connect = async () => {
     setConnectionStatus('connecting');
@@ -31,8 +30,8 @@ export function ConnectionProvider({ children }) {
     try {
       const payload = {
         source_engine: sourceEngine,
-        use_stored_credentials: useStoredCreds,
-        file_password: filePassword,
+        use_stored_credentials: sourceEngine === 'Snowflake' ? true : useStoredCreds,
+        file_password: '',
         source: sourceEngine === 'BigQuery'
           ? { project_id: sourceCreds.project_id, dataset_location: sourceCreds.dataset_location, bq_key_path: sourceCreds.bq_key_path }
           : { account: sourceCreds.sf_account, user: sourceCreds.sf_user, password: sourceCreds.sf_password, warehouse: sourceCreds.sf_warehouse, role: sourceCreds.sf_role },
@@ -63,7 +62,6 @@ export function ConnectionProvider({ children }) {
       sourceCreds, setSourceCreds,
       targetCreds, setTargetCreds,
       useStoredCreds, setUseStoredCreds,
-      filePassword, setFilePassword,
       connectionStatus, isConnected, sessionId,
       connect, disconnect, error, setError,
     }}>

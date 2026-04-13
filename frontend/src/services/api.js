@@ -7,7 +7,7 @@ const api = axios.create({
 
 // Add auth token to all requests
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('auth_token');
+  const token = sessionStorage.getItem('auth_token') || localStorage.getItem('auth_token');
   if (token) config.headers['Authorization'] = `Bearer ${token}`;
   return config;
 });
@@ -46,12 +46,12 @@ export const connectionAPI = {
 
 // ── Metadata (catalog/schema/table browsing) ──
 export const metadataAPI = {
-  getCatalogs: (target) =>
-    api.post('/metadata/catalogs', { target }),
-  getSchemas: (target, catalog) =>
-    api.post('/metadata/schemas', { target, catalog }),
-  getTables: (target, catalog, schema) =>
-    api.post('/metadata/tables', { target, catalog, schema }),
+  getCatalogs: (target, sessionId = null) =>
+    api.post('/metadata/catalogs', { target, session_id: sessionId }),
+  getSchemas: (target, catalog, sessionId = null) =>
+    api.post('/metadata/schemas', { target, catalog, session_id: sessionId }),
+  getTables: (target, catalog, schema, sessionId = null) =>
+    api.post('/metadata/tables', { target, catalog, schema_name: schema, session_id: sessionId }),
 };
 
 // ── Validation ──
@@ -66,8 +66,8 @@ export const validationAPI = {
 
 // ── Schema Viewer ──
 export const schemaAPI = {
-  getSchema: (engine, tablePath, filePassword) =>
-    api.post('/schema/view', { engine, table_path: tablePath, file_password: filePassword }),
+  getSchema: (engine, tablePath) =>
+    api.post('/schema/view', { engine, table_path: tablePath }),
 };
 
 export default api;

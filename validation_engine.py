@@ -250,6 +250,12 @@ def run_numeric_validation(
     engine, source_conn, target_conn, src, tgt,
     threshold=None, source_where="1=1", target_where="1=1",
 ):
+    def _to_float_4(value):
+        try:
+            return round(float(value), 4)
+        except (TypeError, ValueError):
+            return None
+
     src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
     tgt_schema = fetch_schema("Databricks", target_conn, tgt["catalog"], tgt["schema"], tgt["table"])
 
@@ -283,7 +289,10 @@ def run_numeric_validation(
                 all_pass = False
                 continue
             try:
-                sf, tf = float(s), float(t)
+                sf, tf = _to_float_4(s), _to_float_4(t)
+                if sf is None or tf is None:
+                    all_pass = False
+                    continue
                 if sf != tf:
                     if threshold and max(abs(sf), abs(tf)) > 0:
                         ratio = min(abs(sf), abs(tf)) / max(abs(sf), abs(tf))

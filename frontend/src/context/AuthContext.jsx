@@ -5,7 +5,7 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
-    const stored = localStorage.getItem('auth_user');
+    const stored = sessionStorage.getItem('auth_user');
     return stored ? JSON.parse(stored) : null;
   });
   const [loading, setLoading] = useState(false);
@@ -21,8 +21,11 @@ export function AuthProvider({ children }) {
       const res = await authAPI.login(username, password, role);
       const userData = { username, role: res.data.role || role, token: res.data.token };
       setUser(userData);
-      localStorage.setItem('auth_user', JSON.stringify(userData));
-      localStorage.setItem('auth_token', userData.token || '');
+      sessionStorage.setItem('auth_user', JSON.stringify(userData));
+      sessionStorage.setItem('auth_token', userData.token || '');
+      // Remove any stale persistent auth values from older builds.
+      localStorage.removeItem('auth_user');
+      localStorage.removeItem('auth_token');
       return userData;
     } catch (err) {
       const msg = err.response?.data?.detail || 'Login failed';
@@ -35,6 +38,8 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     setUser(null);
+    sessionStorage.removeItem('auth_user');
+    sessionStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     localStorage.removeItem('auth_token');
   };

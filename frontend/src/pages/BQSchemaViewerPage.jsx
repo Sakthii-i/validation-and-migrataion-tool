@@ -1,23 +1,85 @@
-import { useState } from 'react';
-import { schemaAPI } from '../services/api';
+import { useEffect, useState } from 'react';
+import { metadataAPI, schemaAPI } from '../services/api';
+import { useConnection } from '../context/ConnectionContext';
 import CollapsibleSection from '../components/CollapsibleSection';
 import { Table2, Search, Loader2 } from 'lucide-react';
 
 export default function BQSchemaViewerPage() {
+  const { isConnected, sessionId } = useConnection();
   const [engine, setEngine] = useState('bigquery');
-  const [tablePath, setTablePath] = useState('');
-  const [filePassword, setFilePassword] = useState('');
+  const [catalogs, setCatalogs] = useState([]);
+  const [schemas, setSchemas] = useState([]);
+  const [tables, setTables] = useState([]);
+  const [selectedCatalog, setSelectedCatalog] = useState('');
+  const [selectedSchema, setSelectedSchema] = useState('');
+  const [selectedTable, setSelectedTable] = useState('');
   const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const sourceTarget = 'source';
+
+  useEffect(() => {
+    setSelectedCatalog('');
+    setSelectedSchema('');
+    setSelectedTable('');
+    setSchemas([]);
+    setTables([]);
+    setSchema(null);
+  }, [engine]);
+
+  useEffect(() => {
+    if (!selectedCatalog || !isConnected) {
+      setSchemas([]);
+      setSelectedSchema('');
+      setTables([]);
+      setSelectedTable('');
+      return;
+    }
+    (async () => {
+      try {
+        const res = await metadataAPI.getSchemas(sourceTarget, selectedCatalog, sessionId);
+        setSchemas(res.data.schemas || []);
+      } catch {
+        setSchemas([]);
+      }
+    })();
+  }, [selectedCatalog, isConnected, sessionId]);
+
+  useEffect(() => {
+    if (!selectedCatalog || !selectedSchema || !isConnected) {
+      setTables([]);
+      setSelectedTable('');
+      return;
+    }
+    (async () => {
+      try {
+        const res = await metadataAPI.getTables(sourceTarget, selectedCatalog, selectedSchema, sessionId);
+        setTables(res.data.tables || []);
+      } catch {
+        setTables([]);
+      }
+    })();
+  }, [selectedCatalog, selectedSchema, isConnected, sessionId]);
+
+  const ensureCatalogs = async () => {
+    if (!isConnected || catalogs.length) return;
+    try {
+      const res = await metadataAPI.getCatalogs(sourceTarget, sessionId);
+      setCatalogs(res.data.catalogs || []);
+    } catch {
+      setCatalogs([]);
+    }
+  };
+
   const handleGetSchema = async () => {
-    if (!tablePath.trim()) return;
+    if (!selectedCatalog || !selectedSchema || !selectedTable) return;
     setLoading(true);
     setError(null);
     setSchema(null);
     try {
-      const res = await schemaAPI.getSchema(engine, tablePath.trim(), filePassword);
+      const tablePath = `${selectedCatalog}.${selectedSchema}.${selectedTable}`;
+      const res = await schemaAPI.getSchema(engine, tablePath);
       setSchema(res.data.columns || []);
     } catch (e) {
       setError(e.response?.data?.detail || 'Failed to fetch schema');
@@ -42,39 +104,45 @@ export default function BQSchemaViewerPage() {
                 <option value="snowflake">Snowflake</option>
               </select>
             </div>
-            {engine === 'snowflake' && (
-              <div className="form-group">
-                <label className="form-label">Master Password</label>
-                <input 
-                  type="password" 
-                  className="form-input" 
-                  value={filePassword} 
-                  onChange={e => setFilePassword(e.target.value)} 
-                  placeholder="Password for credential.txt..." 
-                />
+          </div>
+
+          {!isConnected && <div className="alert alert-info mb-4">Please establish connection first.</div>}
+
+          {isConnected && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div className="form-group">
+                  <label className="form-label">Catalog</label>
+                  <select className="form-select" value={selectedCatalog} onFocus={ensureCatalogs} onChange={e => setSelectedCatalog(e.target.value)}>
+                    <option value="">Select catalog...</option>
+                    {catalogs.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Schema</label>
+                  <select className="form-select" value={selectedSchema} onChange={e => setSelectedSchema(e.target.value)} disabled={!selectedCatalog}>
+                    <option value="">Select schema...</option>
+                    {schemas.map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Table</label>
+                  <select className="form-select" value={selectedTable} onChange={e => setSelectedTable(e.target.value)} disabled={!selectedSchema}>
+                    <option value="">Select table...</option>
+                    {tables.map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
               </div>
-            )}
-          </div>
-          
-          <div className="form-group mb-4">
-            <label className="form-label">
-              Table Name (format: {engine === 'bigquery' ? 'project.dataset.table' : 'catalog.schema.table'})
-            </label>
-            <div className="flex gap-2">
-              <input
-                className="form-input flex-1"
-                placeholder={engine === 'bigquery' ? "my-project.my_dataset.my_table" : "my_database.my_schema.my_table"}
-                value={tablePath}
-                onChange={e => setTablePath(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleGetSchema()}
-              />
-              <button className="btn btn-primary" onClick={handleGetSchema} disabled={loading || !tablePath.trim() || (engine==='snowflake' && !filePassword)}>
-                {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-                Get Schema
-              </button>
-            </div>
-            <span className="form-hint">Fully qualified path is required.</span>
-          </div>
+
+              <div className="form-group mb-4">
+                <button className="btn btn-primary" onClick={handleGetSchema} disabled={loading || !selectedCatalog || !selectedSchema || !selectedTable}>
+                  {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+                  Get Schema
+                </button>
+                <span className="form-hint">Select catalog, schema, and table from dropdowns.</span>
+              </div>
+            </>
+          )}
         </CollapsibleSection>
 
         <CollapsibleSection title="Schema Details" icon={<Table2 size={16} />}>

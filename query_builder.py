@@ -64,7 +64,7 @@ def build_schema_query(engine, catalog, schema, table):
     if engine == "snowflake":
         return f"""
         SELECT
-            lower(column_name) as column_name,
+            column_name,
             data_type,
             is_nullable
         FROM {catalog}.information_schema.columns
@@ -147,8 +147,9 @@ def _quote_col(engine: str, col_name: str) -> str:
     engine = engine.lower()
     if engine in ["bigquery", "databricks"]:
         return f"`{col_name}`"
-    # Snowflake is case-sensitive when quoted; the app's schema query
-    # returns lower(column_name), so keep unquoted identifiers here.
+    # Snowflake identifiers are case-sensitive when quoted.
+    # We preserve source case from INFORMATION_SCHEMA, so unquoted refs
+    # keep compatibility with standard uppercase object names.
     return col_name
 
 
