@@ -26,13 +26,27 @@ from validation_tool.backend.postgres_store import (
 from validation_tool.backend.session_store import create_session
 from validation_tool.worker.queue import get_queue
 from validation_tool.worker.tasks import run_validation_task
+from fastapi.middleware.cors import CORSMiddleware
+
 from .validation_routes import router as validation_router
+from .react_routes import router as react_router
 
 # Then, after creating the app instance, include the router:
 
 
 app = FastAPI(title="Validation API", version="1.0")
+
+# CORS for React dev server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://frontend:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(validation_router, prefix="")
+app.include_router(react_router)
 
 @app.post("/sessions", response_model=CreateSessionResponse, dependencies=[Depends(require_api_key)])
 def create_session_endpoint(req: CreateSessionRequest):
