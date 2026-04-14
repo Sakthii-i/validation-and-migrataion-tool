@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { resultsAPI, validationAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
-import { Filter, Download, Search, Eye, Play, Loader2 } from 'lucide-react';
+import { Filter, Download, Search, Eye, Play, Loader2, Copy, Check } from 'lucide-react';
 import { useConnection } from '../context/ConnectionContext';
 import { useNavigate } from 'react-router-dom';
 
@@ -21,6 +21,7 @@ export default function DataValidationsPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [rowRunningKey, setRowRunningKey] = useState(null);
   const [actionError, setActionError] = useState('');
+  const [copiedValidationId, setCopiedValidationId] = useState('');
 
   useEffect(() => { fetchResults(); }, [dateFilter, customStart, customEnd]);
 
@@ -197,6 +198,27 @@ export default function DataValidationsPage() {
     const a = document.createElement('a'); a.href = url; a.download = 'validation_results.csv'; a.click();
   };
 
+  const handleCopyValidationId = async (validationId) => {
+    if (!validationId) return;
+    try {
+      await navigator.clipboard.writeText(validationId);
+      setCopiedValidationId(validationId);
+      setTimeout(() => setCopiedValidationId(''), 1500);
+    } catch {
+      const temp = document.createElement('textarea');
+      temp.value = validationId;
+      temp.setAttribute('readonly', '');
+      temp.style.position = 'absolute';
+      temp.style.left = '-9999px';
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      document.body.removeChild(temp);
+      setCopiedValidationId(validationId);
+      setTimeout(() => setCopiedValidationId(''), 1500);
+    }
+  };
+
   return (
     <div>
       <div className="page-topbar">
@@ -284,7 +306,28 @@ export default function DataValidationsPage() {
                 <tbody>
                   {displayed.map((r, i) => (
                     <tr key={i}>
-                      <td className="font-mono text-xs text-primary-600">{(r.validation_id || '').slice(0, 20)}...</td>
+                      <td
+                        className="font-mono text-xs text-primary-600"
+                        title={r.validation_id || '—'}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span>
+                            {(r.validation_id || '').length > 20
+                              ? `${(r.validation_id || '').slice(0, 20)}...`
+                              : (r.validation_id || '—')}
+                          </span>
+                          {r.validation_id && (
+                            <button
+                              type="button"
+                              className="text-primary-700 hover:text-primary-900"
+                              title={copiedValidationId === r.validation_id ? 'Copied' : 'Copy full Validation ID'}
+                              onClick={() => handleCopyValidationId(r.validation_id)}
+                            >
+                              {copiedValidationId === r.validation_id ? <Check size={14} /> : <Copy size={14} />}
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className="text-xs whitespace-nowrap">{formatIstDateTime(r.validation_ts)}</td>
                       <td><StatusBadge status={r.validation_type || '—'} /></td>
                       <td className="font-mono text-xs">{r.source_table_name || r.src_table_name || '—'}</td>

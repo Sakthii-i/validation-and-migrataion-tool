@@ -70,9 +70,7 @@ function CredentialsSection() {
                 </div>
               </>
             ) : (
-              <div className="alert alert-info">
-                Snowflake source credentials are managed by backend and applied automatically.
-              </div>
+              null
             )}
           </div>
         </div>
@@ -105,11 +103,7 @@ function CredentialsSection() {
               <Server size={16} className="text-primary-600" />
               Target — Databricks
             </div>
-            <div className="card-body">
-              <div className="alert alert-info">
-                Databricks target credentials are managed by backend and applied automatically.
-              </div>
-            </div>
+            <div className="card-body" />
           </div>
         )}
       </div>

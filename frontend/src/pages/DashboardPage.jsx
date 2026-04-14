@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { dashboardAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
-import { BarChart3, CheckCircle2, XCircle, Hash, Table2, Activity, PieChart } from 'lucide-react';
+import { BarChart3, CheckCircle2, Hash, Table2, Activity, PieChart } from 'lucide-react';
 import { PieChart as RechartPie, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 30 days', 'Custom'];
@@ -30,7 +30,7 @@ export default function DashboardPage() {
   };
 
   const metrics = stats ? [
-    { label: 'Tables Validated', value: stats.tables_validated ?? 0, icon: <Table2 size={20} />, color: 'from-purple-600 to-purple-800' },
+    { label: 'Tables Validated', value: stats.tables_validated ?? 0, icon: <Table2 size={20} />, color: 'from-indigo-600 to-indigo-800' },
     { label: 'Total Validation Runs', value: stats.total_runs ?? 0, icon: <Activity size={20} />, color: 'from-blue-600 to-blue-800' },
     { label: 'Row Count Passed', value: stats.row_count_pass ?? 0, icon: <CheckCircle2 size={20} />, color: 'from-green-600 to-green-800' },
     { label: 'Schema Passed', value: stats.schema_pass ?? 0, icon: <CheckCircle2 size={20} />, color: 'from-emerald-600 to-emerald-800' },
@@ -71,7 +71,9 @@ export default function DashboardPage() {
               {metrics.map((m, i) => (
                 <div key={i} className={`metric-card-colored bg-gradient-to-br ${m.color}`}>
                   <div className="flex items-center gap-2 text-white/80 mb-2">
-                    {m.icon}
+                    <span className="w-7 h-7 rounded-md bg-white/10 flex items-center justify-center">
+                      {m.icon}
+                    </span>
                     <span className="text-[11px] font-medium uppercase tracking-wide">{m.label}</span>
                   </div>
                   <div className="text-3xl font-bold text-white">{m.value.toLocaleString()}</div>

@@ -7,17 +7,17 @@ export default {
   theme: {
     extend: {
       colors: {
-        primary: {
-          50: '#f3e5f5',
-          100: '#e1bee7',
-          200: '#ce93d8',
-          300: '#ba68c8',
-          400: '#ab47bc',
-          500: '#7b1fa2',
-          600: '#6a1b9a',
-          700: '#4a148c',
-          800: '#38006b',
-          900: '#1a0033',
+       primary: {
+          50:  '#eef4ff',
+          100: '#dbe7ff',
+          200: '#b7ceff',
+          300: '#93b5ff',
+          400: '#6f9cff',
+          500: '#3b82f6', // MAIN BLUE (modern)
+          600: '#2563eb',
+          700: '#1d4ed8',
+          800: '#1e40af',
+          900: '#1e3a8a',
         },
         surface: {
           50: '#fafafa',
@@ -26,10 +26,10 @@ export default {
           300: '#e0e0e0',
           400: '#bdbdbd',
         },
-        success: { DEFAULT: '#2e7d32', light: '#4caf50', bg: '#e8f5e9' },
-        danger: { DEFAULT: '#c62828', light: '#ef5350', bg: '#ffebee' },
-        warning: { DEFAULT: '#e65100', light: '#ff9800', bg: '#fff3e0' },
-        info: { DEFAULT: '#0277bd', light: '#29b6f6', bg: '#e1f5fe' },
+        success: { DEFAULT: '#16a34a', light: '#22c55e', bg: '#ecfdf5' },
+        danger:  { DEFAULT: '#dc2626', light: '#ef4444', bg: '#fef2f2' },
+        warning: { DEFAULT: '#d97706', light: '#f59e0b', bg: '#fffbeb' },
+        info:    { DEFAULT: '#2563eb', light: '#3b82f6', bg: '#eff6ff' },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
