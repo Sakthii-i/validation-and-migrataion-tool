@@ -1318,7 +1318,7 @@ function ConfigTab({ settings, setSettings }) {
         row_threshold: ""
       },
       {
-        validation_type: "deep",
+        validation_type: "shallow",
         source_catalog: "DB",
         source_schema: "PUBLIC",
         source_table: "TABLE2",
