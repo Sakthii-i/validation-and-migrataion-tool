@@ -162,6 +162,7 @@ def ensure_validation_table(pg_conn):
         src_table_name TEXT,
         tgt_table_name TEXT,
         validation_type TEXT,
+        run_by TEXT,
         row_count TEXT,
         schema_check TEXT,
         numeric_check TEXT,
@@ -171,6 +172,8 @@ def ensure_validation_table(pg_conn):
     cur = pg_conn.cursor()
     for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
         cur.execute(stmt)
+    # Backward-compatible migrations for existing deployments.
+    cur.execute("ALTER TABLE IF EXISTS table_validation.validation_results ADD COLUMN IF NOT EXISTS run_by TEXT")
     pg_conn.commit()
     cur.close()
 
@@ -377,6 +380,7 @@ def run_row_hash_validation(
 def generate_validation_record(
     validation_type, src, tgt,
     row_selected, schema_selected, numeric_selected, hash_selected,
+    run_by: str | None = None,
 ):
     return {
         "validation_id": str(uuid.uuid4()),
@@ -384,6 +388,7 @@ def generate_validation_record(
         "src_table_name": f"{src['catalog']}.{src['schema']}.{src['table']}",
         "tgt_table_name": f"{tgt['catalog']}.{tgt['schema']}.{tgt['table']}",
         "validation_type": validation_type,
+        "run_by": run_by,
         "row_count": row_selected if row_selected else None,
         "schema_check": schema_selected if schema_selected else None,
         "numeric_check": (
@@ -410,8 +415,8 @@ def insert_validation_result(record):
         insert_sql = """
         INSERT INTO table_validation.validation_results (
             validation_id, validation_ts, src_table_name, tgt_table_name,
-            validation_type, row_count, schema_check, numeric_check, hash_validation
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            validation_type, run_by, row_count, schema_check, numeric_check, hash_validation
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             record.get("validation_id"),
@@ -419,6 +424,7 @@ def insert_validation_result(record):
             record.get("src_table_name"),
             record.get("tgt_table_name"),
             record.get("validation_type"),
+            record.get("run_by"),
             record.get("row_count"),
             record.get("schema_check"),
             record.get("numeric_check"),

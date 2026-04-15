@@ -1,14 +1,24 @@
 import { useState, useEffect } from 'react';
-import { dashboardAPI } from '../services/api';
+import { useNavigate } from 'react-router-dom';
+import { dashboardAPI, resultsAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import { BarChart3, RefreshCw } from 'lucide-react';
 
 export default function ValidationDashboardPage() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [validations, setValidations] = useState([]);
+  const [validationsLoading, setValidationsLoading] = useState(true);
 
-  useEffect(() => { fetchStats(); }, []);
+  useEffect(() => {
+    fetchAll();
+  }, []);
+
+  const fetchAll = async () => {
+    await Promise.all([fetchStats(), fetchValidations()]);
+  };
 
   const fetchStats = async () => {
     setLoading(true);
@@ -20,6 +30,56 @@ export default function ValidationDashboardPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchValidations = async () => {
+    setValidationsLoading(true);
+    try {
+      const res = await resultsAPI.list('All Time');
+      setValidations(res.data?.results || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setValidationsLoading(false);
+    }
+  };
+
+  const normalizeStatus = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value).trim().toUpperCase();
+  };
+
+  const isSelectedStatus = (value) => {
+    const text = normalizeStatus(value);
+    return text && text !== '-' && text !== 'N/A' && text !== 'NONE' && text !== '—';
+  };
+
+  const overallStatusForRow = (row) => {
+    const fields = [
+      row?.count_validation ?? row?.row_count,
+      row?.schema_check,
+      row?.numeric_check,
+      row?.hash_validation,
+    ];
+    const selected = fields.filter(isSelectedStatus).map(normalizeStatus);
+    if (!selected.length) return 'N/A';
+    return selected.every((s) => s === 'PASS') ? 'PASS' : 'FAIL';
+  };
+
+  const formatIstDateTime = (value) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
   };
 
   const totalPass = (stats?.row_count_pass || 0) + (stats?.schema_pass || 0) + (stats?.numeric_pass || 0) + (stats?.row_hash_pass || 0);
@@ -34,20 +94,13 @@ export default function ValidationDashboardPage() {
     { label: 'Error', value: Math.max(0, errors), cls: 'bg-orange-500 text-white' },
   ];
 
-  const breakdownRows = stats ? [
-    { metric: 'Row Count', pass: stats.row_count_pass, fail: stats.row_count_fail },
-    { metric: 'Schema', pass: stats.schema_pass, fail: stats.schema_fail },
-    { metric: 'Numeric Stats', pass: stats.numeric_pass, fail: stats.numeric_fail },
-    { metric: 'Row Hash', pass: stats.row_hash_pass, fail: stats.row_hash_fail },
-  ] : [];
-
   return (
     <div>
       <div className="page-topbar">
         <h1 className="page-title flex items-center gap-2">
           <BarChart3 size={22} /> Validation Dashboard
         </h1>
-        <button className="btn btn-outline btn-sm" onClick={fetchStats}>
+        <button className="btn btn-outline btn-sm" onClick={fetchAll}>
           <RefreshCw size={14} /> Refresh
         </button>
       </div>
@@ -67,36 +120,52 @@ export default function ValidationDashboardPage() {
                 ))}
               </div>
 
-              {/* Breakdown Table */}
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Metric</th>
-                    <th>Pass</th>
-                    <th>Fail</th>
-                    <th>Total</th>
-                    <th>Pass Rate</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {breakdownRows.map((r, i) => {
-                    const total = (r.pass || 0) + (r.fail || 0);
-                    const rate = total > 0 ? ((r.pass / total) * 100).toFixed(1) : '—';
-                    const status = total === 0 ? 'N/A' : (r.fail === 0 ? 'PASS' : 'FAIL');
-                    return (
-                      <tr key={i}>
-                        <td className="font-medium">{r.metric}</td>
-                        <td className="text-green-700 font-semibold">{(r.pass || 0).toLocaleString()}</td>
-                        <td className="text-red-700 font-semibold">{(r.fail || 0).toLocaleString()}</td>
-                        <td>{total.toLocaleString()}</td>
-                        <td>{rate !== '—' ? `${rate}%` : '—'}</td>
-                        <td><StatusBadge status={status} /></td>
+              {/* Validation Jobs Table */}
+              {validationsLoading ? (
+                <div className="flex justify-center py-8"><span className="spinner"></span></div>
+              ) : validations.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">No validation runs found.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Validation ID</th>
+                        <th>Status</th>
+                        <th>Timestamp (IST)</th>
+                        <th>User</th>
+                        <th>Actions</th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                    </thead>
+                    <tbody>
+                      {validations.map((row) => {
+                        const validationId = row?.validation_id;
+                        const status = overallStatusForRow(row);
+                        const userValue = row?.run_by || row?.username || row?.user || 'N/A';
+                        return (
+                          <tr key={validationId || `${row?.validation_ts}-${Math.random().toString(16).slice(2)}`}>
+                            <td className="font-mono text-xs text-primary-600" title={validationId || '—'}>
+                              {(validationId || '').length > 28 ? `${validationId.slice(0, 28)}...` : (validationId || '—')}
+                            </td>
+                            <td><StatusBadge status={status} /></td>
+                            <td className="text-xs whitespace-nowrap">{formatIstDateTime(row?.validation_ts)}</td>
+                            <td className="text-xs whitespace-nowrap">{userValue || 'N/A'}</td>
+                            <td>
+                              <button
+                                className="btn btn-outline btn-sm"
+                                onClick={() => validationId && navigate(`/data-validations/${encodeURIComponent(validationId)}`)}
+                                disabled={!validationId}
+                              >
+                                View Details
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </>
           )}
         </CollapsibleSection>

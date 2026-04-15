@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useConnection } from '../context/ConnectionContext';
+import { useAuth } from '../context/AuthContext';
 import { metadataAPI, validationAPI, schemaAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
@@ -227,6 +228,7 @@ function ValidationSettings({ settings, setSettings }) {
 // ═══════════════════════════════════════
 function BrowseTab({ settings, setSettings }) {
   const { isConnected, sessionId, sourceEngine } = useConnection();
+  const { user } = useAuth();
   const [srcCatalogs, setSrcCatalogs] = useState([]);
   const [srcSchemas, setSrcSchemas] = useState([]);
   const [srcTables, setSrcTables] = useState([]);
@@ -432,6 +434,7 @@ function BrowseTab({ settings, setSettings }) {
           const res = await validationAPI.run({
             session_id: sessionId,
             validation_type: settings.validationType,
+            run_by: user?.username || undefined,
             table_pairs: [pairs[i]],
             settings: pairSettings,
           });
@@ -442,6 +445,7 @@ function BrowseTab({ settings, setSettings }) {
         const res = await validationAPI.run({
           session_id: sessionId,
           validation_type: settings.validationType,
+          run_by: user?.username || undefined,
           table_pairs: pairs,
           settings: baseSettings,
         });
@@ -834,6 +838,7 @@ function BrowseTab({ settings, setSettings }) {
 // ═══════════════════════════════════════
 function ManualTab({ settings, setSettings }) {
   const { isConnected, sessionId, sourceEngine } = useConnection();
+  const { user } = useAuth();
   const [srcPaths, setSrcPaths] = useState('');
   const [tgtPaths, setTgtPaths] = useState('');
   const [whereClauses, setWhereClauses] = useState({});
@@ -930,6 +935,7 @@ function ManualTab({ settings, setSettings }) {
           const res = await validationAPI.run({
             session_id: sessionId,
             validation_type: settings.validationType,
+            run_by: user?.username || undefined,
             table_pairs: [pairs[i]],
             settings: pairSettings,
           });
@@ -940,6 +946,7 @@ function ManualTab({ settings, setSettings }) {
         const res = await validationAPI.run({
           session_id: sessionId,
           validation_type: settings.validationType,
+          run_by: user?.username || undefined,
           table_pairs: pairs,
           settings: baseSettings,
         });
@@ -1291,6 +1298,7 @@ function CSVTab({ settings, setSettings }) {
 // ═══════════════════════════════════════
 function ConfigTab({ settings, setSettings }) {
   const { isConnected, sessionId } = useConnection();
+  const { user } = useAuth();
   const [file, setFile] = useState(null);
   const [config, setConfig] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -1396,7 +1404,7 @@ function ConfigTab({ settings, setSettings }) {
 
     setRunning(true);
     try {
-      const res = await validationAPI.runConfig({ session_id: sessionId, config, settings: toPayloadSettings(settings) });
+      const res = await validationAPI.runConfig({ session_id: sessionId, run_by: user?.username || undefined, config, settings: toPayloadSettings(settings) });
       setResults(res.data);
     } catch (e) {
       setResults({ error: e.response?.data?.detail || e.message });

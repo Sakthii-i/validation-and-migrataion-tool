@@ -58,6 +58,34 @@ def _execute(conn, query):
     cur.close()
     return [dict(zip(columns, row)) for row in rows]
 
+
+def _ensure_results_table(conn) -> None:
+    """Best-effort schema ensure/migration for table_validation.validation_results.
+
+    Keeps the React endpoints resilient across existing deployments.
+    """
+    cur = conn.cursor()
+    cur.execute("CREATE SCHEMA IF NOT EXISTS table_validation")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS table_validation.validation_results (
+            validation_id TEXT PRIMARY KEY,
+            validation_ts TIMESTAMPTZ,
+            src_table_name TEXT,
+            tgt_table_name TEXT,
+            validation_type TEXT,
+            run_by TEXT,
+            row_count TEXT,
+            schema_check TEXT,
+            numeric_check TEXT,
+            hash_validation TEXT
+        )
+        """
+    )
+    cur.execute("ALTER TABLE IF EXISTS table_validation.validation_results ADD COLUMN IF NOT EXISTS run_by TEXT")
+    conn.commit()
+    cur.close()
+
 DASHBOARD_TABLE = "table_validation.validation_results"
 DATE_FILTER_MAP = {
     "Today": 0,
@@ -207,6 +235,7 @@ def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = 
             validation_id, validation_ts, validation_type,
             src_table_name AS source_table_name,
             tgt_table_name AS target_table_name,
+            run_by,
             row_count AS count_validation,
             hash_validation, numeric_check, schema_check
         FROM {DASHBOARD_TABLE}
@@ -216,6 +245,7 @@ def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = 
     """
     conn = _pg()
     try:
+        _ensure_results_table(conn)
         rows = _execute(conn, query)
         # Convert datetimes to strings
         for row in rows:
@@ -243,6 +273,7 @@ def get_result_by_id(validation_id: str):
             validation_type,
             src_table_name AS source_table_name,
             tgt_table_name AS target_table_name,
+            run_by,
             row_count AS count_validation,
             hash_validation,
             numeric_check,
@@ -253,6 +284,7 @@ def get_result_by_id(validation_id: str):
     """
     conn = _pg()
     try:
+        _ensure_results_table(conn)
         cur = conn.cursor()
         cur.execute(query, (validation_id,))
         pg_row = cur.fetchone()
@@ -432,6 +464,7 @@ class RunValidationRequest(BaseModel):
     validation_type: str = "shallow"
     table_pairs: list = []
     settings: dict = {}
+    run_by: Optional[str] = None
 
 @router.post("/validate/run")
 def run_validation(req: RunValidationRequest):
@@ -775,6 +808,7 @@ def run_validation(req: RunValidationRequest):
                 bool_to_status(results_map.get("Schema Validation")),
                 bool_to_status(results_map.get("Numeric Statistics Validation")),
                 bool_to_status(results_map.get("Row Hash Validation")),
+                req.run_by,
             )
             try:
                 insert_validation_result(record)
@@ -784,6 +818,7 @@ def run_validation(req: RunValidationRequest):
             results_list.append({
                 "validation_id": record.get("validation_id"),
                 "validation_ts": record.get("timestamp"),
+                "run_by": record.get("run_by"),
                 "source_table_name": f"{src_cat}.{src_sch}.{src_tbl}",
                 "target_table_name": f"{tgt_cat}.{tgt_sch}.{tgt_tbl}",
                 "src_table": f"{src_cat}.{src_sch}.{src_tbl}",
@@ -977,6 +1012,7 @@ def view_schema(req: SchemaViewRequest):
 
 class ConfigValidationRequest(BaseModel):
     session_id: Optional[str] = None
+    run_by: Optional[str] = None
     config: dict
     settings: dict = {}
 
@@ -1056,6 +1092,7 @@ def run_config_validation(req: ConfigValidationRequest):
         run_req = RunValidationRequest(
             session_id=req.session_id,
             validation_type=str(t.get("validation_type", "shallow") or "shallow").lower(),
+            run_by=req.run_by,
             table_pairs=[{
                 "source": src,
                 "target": tgt,
