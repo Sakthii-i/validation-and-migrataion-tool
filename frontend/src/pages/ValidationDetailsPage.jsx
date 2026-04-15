@@ -225,12 +225,20 @@ export default function ValidationDetailsPage() {
                 {isNotSelected(detailRow.hash_validation) ? (
                   <div className="text-sm text-gray-500">Not selected.</div>
                 ) : detailRow.details?.row_hash ? (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                    <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRow.details.row_hash.source_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRow.details.row_hash.target_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRow.details.row_hash.matched_hash_count ?? 0}</strong></div>
-                    <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRow.details.row_hash.source_not_in_target_count ?? 0) + (detailRow.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
-                  </div>
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                      <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRow.details.row_hash.source_hash_count ?? 0}</strong></div>
+                      <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRow.details.row_hash.target_hash_count ?? 0}</strong></div>
+                      <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRow.details.row_hash.matched_hash_count ?? 0}</strong></div>
+                      <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRow.details.row_hash.source_not_in_target_count ?? 0) + (detailRow.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
+                    </div>
+                    <div className="p-3 border rounded-lg bg-gray-50 text-sm">
+                      <span className="font-semibold text-gray-700">Not matched columns: </span>
+                      {(detailRow.details.row_hash.mismatched_columns || []).length > 0
+                        ? detailRow.details.row_hash.mismatched_columns.join(', ')
+                        : 'None'}
+                    </div>
+                  </>
                 ) : <div className="text-sm text-gray-500">No hash details available.</div>}
               </div>
             </div>

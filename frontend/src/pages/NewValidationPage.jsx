@@ -1735,12 +1735,20 @@ function ResultsDisplay({ results }) {
               {hashNotSelected ? (
                 <div className="text-sm text-gray-500">Not selected.</div>
               ) : detailRecord.details?.row_hash ? (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                  <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRecord.details.row_hash.source_hash_count ?? 0}</strong></div>
-                  <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRecord.details.row_hash.target_hash_count ?? 0}</strong></div>
-                  <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
-                  <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
-                </div>
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRecord.details.row_hash.source_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRecord.details.row_hash.target_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
+                  </div>
+                  <div className="p-3 border rounded-lg bg-gray-50 text-sm mb-4">
+                    <span className="font-semibold text-gray-700">Not matched columns: </span>
+                    {(detailRecord.details.row_hash.mismatched_columns || []).length > 0
+                      ? detailRecord.details.row_hash.mismatched_columns.join(', ')
+                      : 'None'}
+                  </div>
+                </>
               ) : <div className="text-sm text-gray-500 mb-3">{detailRecord.details?.row_hash?.error ? `No hash details available: ${detailRecord.details.row_hash.error}` : 'No hash details available.'}</div>}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div>

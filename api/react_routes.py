@@ -666,6 +666,7 @@ def run_validation(req: RunValidationRequest):
                     src_only_rows = []
                     tgt_only_rows = []
                     hash_columns = []
+                    mismatched_columns = []
                     if src_columns:
                         src_query = build_row_hash_query(
                             engine, src["catalog"], src["schema"], src["table"],
@@ -748,8 +749,15 @@ def run_validation(req: RunValidationRequest):
                             target_conn,
                         )
 
+                        for col_name in hash_columns:
+                            src_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in src_only_rows}
+                            tgt_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in tgt_only_rows}
+                            if src_vals != tgt_vals:
+                                mismatched_columns.append(col_name)
+
                     details["row_hash"] = {
                         "columns": hash_columns,
+                        "mismatched_columns": mismatched_columns,
                         "source_hash_count": len(src_hashes),
                         "target_hash_count": len(tgt_hashes),
                         "matched_hash_count": len(matched_hashes),
