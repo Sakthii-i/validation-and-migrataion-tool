@@ -232,11 +232,67 @@ export default function ValidationDetailsPage() {
                       <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRow.details.row_hash.matched_hash_count ?? 0}</strong></div>
                       <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRow.details.row_hash.source_not_in_target_count ?? 0) + (detailRow.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
                     </div>
-                    <div className="p-3 border rounded-lg bg-gray-50 text-sm">
+                    <div className="p-3 border rounded-lg bg-gray-50 text-sm mb-4">
                       <span className="font-semibold text-gray-700">Not matched columns: </span>
                       {(detailRow.details.row_hash.mismatched_columns || []).length > 0
                         ? detailRow.details.row_hash.mismatched_columns.join(', ')
                         : 'None'}
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-xs font-semibold text-red-600 mb-2">
+                          Source not in Target ({detailRow.details?.row_hash?.source_not_in_target_count ?? 0})
+                        </div>
+                        {detailRow.details?.row_hash?.source_not_in_target_rows?.length ? (
+                          <div className="overflow-x-auto">
+                            <table className="data-table">
+                              <thead>
+                                <tr>
+                                  {(detailRow.details?.row_hash?.columns || []).map((c) => (
+                                    <th key={c}>{c}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {detailRow.details.row_hash.source_not_in_target_rows.map((row, i) => (
+                                  <tr key={i}>
+                                    {(detailRow.details?.row_hash?.columns || []).map((c) => (
+                                      <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : <div className="text-sm text-gray-500">No rows.</div>}
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-red-600 mb-2">
+                          Target not in Source ({detailRow.details?.row_hash?.target_not_in_source_count ?? 0})
+                        </div>
+                        {detailRow.details?.row_hash?.target_not_in_source_rows?.length ? (
+                          <div className="overflow-x-auto">
+                            <table className="data-table">
+                              <thead>
+                                <tr>
+                                  {(detailRow.details?.row_hash?.columns || []).map((c) => (
+                                    <th key={c}>{c}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {detailRow.details.row_hash.target_not_in_source_rows.map((row, i) => (
+                                  <tr key={i}>
+                                    {(detailRow.details?.row_hash?.columns || []).map((c) => (
+                                      <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : <div className="text-sm text-gray-500">No rows.</div>}
+                      </div>
                     </div>
                   </>
                 ) : <div className="text-sm text-gray-500">No hash details available.</div>}
