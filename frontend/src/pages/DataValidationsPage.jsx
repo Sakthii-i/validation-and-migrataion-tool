@@ -4,6 +4,7 @@ import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import { Filter, Download, Search, Eye, Play, Loader2, Copy, Check } from 'lucide-react';
 import { useConnection } from '../context/ConnectionContext';
+import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
 const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 30 days', 'Custom'];
@@ -11,6 +12,7 @@ const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 
 export default function DataValidationsPage() {
   const navigate = useNavigate();
   const { isConnected, sessionId } = useConnection();
+  const { user } = useAuth();
   const [results, setResults] = useState([]);
   const [dateFilter, setDateFilter] = useState('Past 30 days');
   const [customStart, setCustomStart] = useState('');
@@ -170,6 +172,7 @@ export default function DataValidationsPage() {
       const payload = {
         session_id: sessionId,
         validation_type: String(row.validation_type || 'deep').toLowerCase(),
+        run_by: user?.username || undefined,
         table_pairs: [{ source: sourceTable, target: targetTable, source_where: '1=1', target_where: '1=1' }],
         settings: buildSettingsFromRow(row),
       };

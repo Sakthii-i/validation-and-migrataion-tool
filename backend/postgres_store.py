@@ -28,6 +28,7 @@ def ensure_validation_results_table(pg_conn) -> None:
         src_table_name TEXT,
         tgt_table_name TEXT,
         validation_type TEXT,
+        run_by TEXT,
         row_count TEXT,
         schema_check TEXT,
         numeric_check TEXT,
@@ -38,6 +39,8 @@ def ensure_validation_results_table(pg_conn) -> None:
     cur = pg_conn.cursor()
     for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
         cur.execute(stmt)
+    # Backward-compatible migrations for existing deployments.
+    cur.execute("ALTER TABLE IF EXISTS table_validation.validation_results ADD COLUMN IF NOT EXISTS run_by TEXT")
     pg_conn.commit()
     cur.close()
 
@@ -104,16 +107,18 @@ def insert_validation_result(pg_conn, record: dict) -> None:
             src_table_name,
             tgt_table_name,
             validation_type,
+            run_by,
             row_count,
             schema_check,
             numeric_check,
             hash_validation
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (validation_id) DO UPDATE SET
             validation_ts = EXCLUDED.validation_ts,
             src_table_name = EXCLUDED.src_table_name,
             tgt_table_name = EXCLUDED.tgt_table_name,
             validation_type = EXCLUDED.validation_type,
+            run_by = COALESCE(EXCLUDED.run_by, table_validation.validation_results.run_by),
             row_count = EXCLUDED.row_count,
             schema_check = EXCLUDED.schema_check,
             numeric_check = EXCLUDED.numeric_check,
@@ -125,6 +130,7 @@ def insert_validation_result(pg_conn, record: dict) -> None:
             record.get("src_table_name"),
             record.get("tgt_table_name"),
             record.get("validation_type"),
+            record.get("run_by"),
             record.get("row_count"),
             record.get("schema_check"),
             record.get("numeric_check"),

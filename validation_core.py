@@ -73,6 +73,7 @@ def ensure_validation_table(pg_conn: PgConnection):
         src_table_name TEXT,
         tgt_table_name TEXT,
         validation_type TEXT,
+        run_by TEXT,
         row_count TEXT,
         schema_check TEXT,
         numeric_check TEXT,
@@ -82,6 +83,8 @@ def ensure_validation_table(pg_conn: PgConnection):
     cur = pg_conn.cursor()
     for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
         cur.execute(stmt)
+    # Backward-compatible migrations for existing deployments.
+    cur.execute("ALTER TABLE IF EXISTS table_validation.validation_results ADD COLUMN IF NOT EXISTS run_by TEXT")
     pg_conn.commit()
     cur.close()
 
@@ -126,8 +129,8 @@ def insert_validation_result(record: dict) -> str:
         insert_sql = """
         INSERT INTO table_validation.validation_results (
             validation_id, validation_ts, src_table_name, tgt_table_name,
-            validation_type, row_count, schema_check, numeric_check, hash_validation
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            validation_type, run_by, row_count, schema_check, numeric_check, hash_validation
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             record["validation_id"],
@@ -135,6 +138,7 @@ def insert_validation_result(record: dict) -> str:
             record["src_table_name"],
             record["tgt_table_name"],
             record["validation_type"],
+            record.get("run_by"),
             record["row_count"],
             record["schema_check"],
             record["numeric_check"],
