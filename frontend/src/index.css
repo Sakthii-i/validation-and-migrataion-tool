@@ -133,7 +133,7 @@
 
   /* Login Page */
   .login-container {
-    @apply min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-800 via-primary-700 to-primary-900;
+    @apply min-h-screen flex items-center justify-center bg-gradient-to-br from-white via-slate-50 to-gray-100;
   }
   .login-card {
     @apply bg-white rounded-2xl shadow-modal p-8 w-full max-w-md;

@@ -18,23 +18,6 @@ export default function LoginPage() {
 
   return (
     <div className="login-container">
-      {/* Floating particles decoration */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {[...Array(6)].map((_, i) => (
-          <div
-            key={i}
-            className="absolute rounded-full bg-white/5"
-            style={{
-              width: `${60 + i * 40}px`,
-              height: `${60 + i * 40}px`,
-              top: `${10 + i * 15}%`,
-              left: `${5 + i * 16}%`,
-              animation: `float ${3 + i}s ease-in-out infinite alternate`,
-            }}
-          />
-        ))}
-      </div>
-
       <div className="login-card relative">
         {/* Logo */}
         <div className="text-center mb-8">
@@ -124,12 +107,6 @@ export default function LoginPage() {
         </p>
       </div>
 
-      <style>{`
-        @keyframes float {
-          from { transform: translateY(0) rotate(0deg); opacity: 0.3; }
-          to { transform: translateY(-20px) rotate(5deg); opacity: 0.6; }
-        }
-      `}</style>
     </div>
   );
 }
