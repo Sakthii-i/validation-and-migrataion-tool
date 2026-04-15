@@ -848,7 +848,10 @@ function ManualTab({ settings, setSettings }) {
   const [results, setResults] = useState(null);
 
   const parsePaths = (raw) => raw.replace(/,/g, '\n').split('\n').map(p => p.trim()).filter(Boolean);
-  const srcList = parsePaths(srcPaths);
+  const normalizeSourcePath = (path) => (sourceEngine === 'Snowflake' ? String(path || '').toUpperCase() : path);
+  const normalizeSourceInput = (text) => (sourceEngine === 'Snowflake' ? String(text || '').toUpperCase() : text);
+
+  const srcList = parsePaths(srcPaths).map(normalizeSourcePath);
   const tgtList = parsePaths(tgtPaths);
   const pairsValid = srcList.length > 0 && srcList.length === tgtList.length;
 
@@ -968,7 +971,7 @@ function ManualTab({ settings, setSettings }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="form-group">
           <label className="form-label">Source Table Paths</label>
-          <textarea className="form-textarea" rows={5} placeholder={"catalog.schema.table1\ncatalog.schema.table2"} value={srcPaths} onChange={e => setSrcPaths(e.target.value)} />
+          <textarea className="form-textarea" rows={5} placeholder={"catalog.schema.table1\ncatalog.schema.table2"} value={srcPaths} onChange={e => setSrcPaths(normalizeSourceInput(e.target.value))} />
           <span className="form-hint">One per line, format: catalog.schema.table</span>
         </div>
         <div className="form-group">
@@ -1326,7 +1329,7 @@ function ConfigTab({ settings, setSettings }) {
         row_threshold: ""
       },
       {
-        validation_type: "deep",
+        validation_type: "shallow",
         source_catalog: "DB",
         source_schema: "PUBLIC",
         source_table: "TABLE2",
