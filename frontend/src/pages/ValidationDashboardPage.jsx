@@ -1,14 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { dashboardAPI, resultsAPI } from '../services/api';
+import { resultsAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import { BarChart3, RefreshCw } from 'lucide-react';
 
 export default function ValidationDashboardPage() {
   const navigate = useNavigate();
-  const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [validations, setValidations] = useState([]);
   const [validationsLoading, setValidationsLoading] = useState(true);
 
@@ -17,19 +15,7 @@ export default function ValidationDashboardPage() {
   }, []);
 
   const fetchAll = async () => {
-    await Promise.all([fetchStats(), fetchValidations()]);
-  };
-
-  const fetchStats = async () => {
-    setLoading(true);
-    try {
-      const res = await dashboardAPI.getStats('All Time');
-      setStats(res.data);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+    await fetchValidations();
   };
 
   const fetchValidations = async () => {
@@ -55,6 +41,11 @@ export default function ValidationDashboardPage() {
   };
 
   const overallStatusForRow = (row) => {
+    const explicitOverall = normalizeStatus(row?.overall_status);
+    if (explicitOverall && ['PASS', 'FAIL', 'ERROR'].includes(explicitOverall)) {
+      return explicitOverall;
+    }
+
     const fields = [
       row?.count_validation ?? row?.row_count,
       row?.schema_check,
@@ -62,7 +53,8 @@ export default function ValidationDashboardPage() {
       row?.hash_validation,
     ];
     const selected = fields.filter(isSelectedStatus).map(normalizeStatus);
-    if (!selected.length) return 'N/A';
+    if (!selected.length) return 'ERROR';
+    if (selected.some((s) => s === 'ERROR')) return 'ERROR';
     return selected.every((s) => s === 'PASS') ? 'PASS' : 'FAIL';
   };
 
@@ -82,16 +74,23 @@ export default function ValidationDashboardPage() {
     });
   };
 
-  const totalPass = (stats?.row_count_pass || 0) + (stats?.schema_pass || 0) + (stats?.numeric_pass || 0) + (stats?.row_hash_pass || 0);
-  const totalFail = (stats?.row_count_fail || 0) + (stats?.schema_fail || 0) + (stats?.numeric_fail || 0) + (stats?.row_hash_fail || 0);
-  const totalRuns = stats?.total_runs || 0;
-  const errors = totalRuns - totalPass - totalFail;
+  const statusCounts = validations.reduce(
+    (acc, row) => {
+      const status = overallStatusForRow(row);
+      if (status === 'PASS') acc.pass += 1;
+      else if (status === 'FAIL') acc.fail += 1;
+      else acc.error += 1;
+      acc.total += 1;
+      return acc;
+    },
+    { total: 0, pass: 0, fail: 0, error: 0 },
+  );
 
   const summaryBadges = [
-    { label: 'Total', value: totalRuns, cls: 'bg-primary-600 text-white' },
-    { label: 'Pass', value: totalPass, cls: 'bg-green-600 text-white' },
-    { label: 'Fail', value: totalFail, cls: 'bg-red-600 text-white' },
-    { label: 'Error', value: Math.max(0, errors), cls: 'bg-orange-500 text-white' },
+    { label: 'Total', value: statusCounts.total, cls: 'bg-primary-600 text-white' },
+    { label: 'Pass', value: statusCounts.pass, cls: 'bg-green-600 text-white' },
+    { label: 'Fail', value: statusCounts.fail, cls: 'bg-red-600 text-white' },
+    { label: 'Error', value: statusCounts.error, cls: 'bg-orange-500 text-white' },
   ];
 
   return (
@@ -107,7 +106,7 @@ export default function ValidationDashboardPage() {
 
       <div className="page-content">
         <CollapsibleSection title="Summary" icon={<BarChart3 size={16} />}>
-          {loading ? (
+          {validationsLoading ? (
             <div className="flex justify-center py-8"><span className="spinner"></span></div>
           ) : (
             <>
@@ -121,9 +120,7 @@ export default function ValidationDashboardPage() {
               </div>
 
               {/* Validation Jobs Table */}
-              {validationsLoading ? (
-                <div className="flex justify-center py-8"><span className="spinner"></span></div>
-              ) : validations.length === 0 ? (
+              {validations.length === 0 ? (
                 <div className="text-center py-8 text-gray-500">No validation runs found.</div>
               ) : (
                 <div className="overflow-x-auto">
