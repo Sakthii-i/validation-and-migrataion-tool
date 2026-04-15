@@ -16,6 +16,7 @@ export default function BQSchemaViewerPage() {
   const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [viewMode, setViewMode] = useState('table');
 
   const sourceTarget = 'source';
 
@@ -88,6 +89,27 @@ export default function BQSchemaViewerPage() {
     }
   };
 
+  const generateJSONSchema = () => {
+    if (!schema || schema.length === 0) return '{}';
+    
+    return JSON.stringify({
+      table_name: `${selectedCatalog}.${selectedSchema}.${selectedTable}`,
+      columns: schema.map(col => ({
+        table_catalog: selectedCatalog,
+        table_schema: selectedSchema,
+        table_name: selectedTable,
+        column_name: col.column_name,
+        data_type: col.data_type,
+        is_nullable: col.is_nullable,
+        is_partitioning_column: col.is_partitioning_column || 'NO'
+      }))
+    }, null, 2);
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+  };
+
   return (
     <div>
       <div className="page-topbar">
@@ -154,28 +176,61 @@ export default function BQSchemaViewerPage() {
             <div className="flex justify-center py-8"><span className="spinner"></span></div>
           )}
           {schema && schema.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Column Name</th>
-                    <th>Data Type</th>
-                    <th>Nullable</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {schema.map((col, i) => (
-                    <tr key={i}>
-                      <td className="text-gray-400">{i + 1}</td>
-                      <td className="font-mono text-sm font-medium">{col.column_name}</td>
-                      <td><span className="badge badge-purple">{col.data_type}</span></td>
-                      <td>{col.is_nullable === 'YES' ? <span className="text-green-600">Yes</span> : <span className="text-red-600">No</span>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="flex gap-2 mb-4 border-b border-gray-700">
+                <button 
+                  onClick={() => setViewMode('table')}
+                  className={`px-4 py-2 font-medium text-sm transition-colors ${viewMode === 'table' ? 'text-blue-500 border-b-2 border-blue-500' : 'text-gray-400 hover:text-gray-300'}`}
+                >
+                  Table View
+                </button>
+                <button 
+                  onClick={() => setViewMode('json')}
+                  className={`px-4 py-2 font-medium text-sm transition-colors ${viewMode === 'json' ? 'text-blue-500 border-b-2 border-blue-500' : 'text-gray-400 hover:text-gray-300'}`}
+                >
+                  JSON View
+                </button>
+              </div>
+
+              {viewMode === 'table' && (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Column Name</th>
+                        <th>Data Type</th>
+                        <th>Nullable</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {schema.map((col, i) => (
+                        <tr key={i}>
+                          <td className="text-gray-400">{i + 1}</td>
+                          <td className="font-mono text-sm font-medium">{col.column_name}</td>
+                          <td><span className="badge badge-purple">{col.data_type}</span></td>
+                          <td>{col.is_nullable === 'YES' ? <span className="text-green-600">Yes</span> : <span className="text-red-600">No</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {viewMode === 'json' && (
+                <div className="relative">
+                  <button
+                    onClick={() => copyToClipboard(generateJSONSchema())}
+                    className="absolute top-2 right-2 px-3 py-1 bg-white hover:bg-gray-100 border border-gray-300 rounded text-sm font-medium text-black transition-colors"
+                  >
+                    Copy JSON
+                  </button>
+                  <pre className="bg-gray-900 border border-gray-700 rounded p-4 overflow-x-auto text-sm text-gray-300 pt-10">
+                    {generateJSONSchema()}
+                  </pre>
+                </div>
+              )}
+            </>
           )}
           {schema && schema.length === 0 && (
             <div className="alert alert-warning">No columns found for this table.</div>
