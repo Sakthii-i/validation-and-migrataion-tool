@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { resultsAPI } from '../services/api';
 import StatusBadge from '../components/StatusBadge';
@@ -18,10 +18,12 @@ function formatNumericValue(value) {
 
 export default function ValidationDetailsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { validationId } = useParams();
   const [detailRow, setDetailRow] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const backTarget = location.pathname.startsWith('/validation-dashboard') ? '/validation-dashboard' : '/data-validations';
 
   useEffect(() => {
     const fetchDetails = async () => {
@@ -52,7 +54,7 @@ export default function ValidationDetailsPage() {
         <div>
           <h1 className="page-title">Validation Details</h1>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={() => navigate('/data-validations')}>
+        <button className="btn btn-outline btn-sm" onClick={() => navigate(backTarget)}>
           <ArrowLeft size={14} /> Back
         </button>
       </div>

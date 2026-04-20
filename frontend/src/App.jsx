@@ -46,6 +46,7 @@ export default function App() {
         <Route path="/data-validations" element={<ProtectedRoute><DataValidationsPage /></ProtectedRoute>} />
         <Route path="/data-validations/:validationId" element={<ProtectedRoute><ValidationDetailsPage /></ProtectedRoute>} />
         <Route path="/validation-dashboard" element={<ProtectedRoute><ValidationDashboardPage /></ProtectedRoute>} />
+        <Route path="/validation-dashboard/:validationId" element={<ProtectedRoute><ValidationDetailsPage /></ProtectedRoute>} />
         <Route path="/bq-schema-viewer" element={<ProtectedRoute><BQSchemaViewerPage /></ProtectedRoute>} />
         <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

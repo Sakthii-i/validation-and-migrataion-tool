@@ -150,7 +150,7 @@ export default function ValidationDashboardPage() {
                             <td>
                               <button
                                 className="btn btn-outline btn-sm"
-                                onClick={() => validationId && navigate(`/data-validations/${encodeURIComponent(validationId)}`)}
+                                onClick={() => validationId && navigate(`/validation-dashboard/${encodeURIComponent(validationId)}`)}
                                 disabled={!validationId}
                               >
                                 View Details
