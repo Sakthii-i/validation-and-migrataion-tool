@@ -26,7 +26,8 @@ def is_user_authorized(username: str, password: str) -> bool:
         try:
             stored = get_password_hash(conn, uname)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
     except Exception:
         return False
 
@@ -44,7 +45,8 @@ def grant_user_access(username: str, password: str) -> None:
     try:
         upsert_user(conn, uname, encoded)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def revoke_user_access(username: str) -> bool:
@@ -56,7 +58,8 @@ def revoke_user_access(username: str) -> bool:
     try:
         return delete_user(conn, uname)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def list_authorized_users() -> list[str]:
@@ -64,4 +67,5 @@ def list_authorized_users() -> list[str]:
     try:
         return list_usernames(conn)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
