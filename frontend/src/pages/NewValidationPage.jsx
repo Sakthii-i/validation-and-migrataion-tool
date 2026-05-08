@@ -660,19 +660,35 @@ function BrowseTab({ settings, setSettings }) {
 
           {settings.validationType === 'deep' && settings.hash && settings.colDiffEnabled && (
             <div className="form-group">
-              <label className="form-label">Primary Key Column</label>
-              <select
-                className="form-select"
-                value={(settings.primaryKeys || '').split(',').map(v => v.trim()).filter(Boolean)[0] || ''}
-                onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
-                disabled={!settings.availablePrimaryKeyColumns?.length}
-              >
-                <option value="">Select primary key column...</option>
-                {(settings.availablePrimaryKeyColumns || []).map(col => (
-                  <option key={col} value={col}>{col}</option>
-                ))}
-              </select>
-              <span className="form-hint">Choose a key column from selected source table.</span>
+              <label className="form-label">Primary Key Column(s)</label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-gray-200 rounded-lg max-h-48 overflow-y-auto bg-gray-50/30">
+                {(settings.availablePrimaryKeyColumns || []).map(col => {
+                  const selected = (settings.primaryKeys || '').split(',').map(v => v.trim()).filter(Boolean).includes(col);
+                  return (
+                    <label key={col} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox rounded text-primary-600 focus:ring-primary-500"
+                        checked={selected}
+                        onChange={(e) => {
+                          const currentKeys = (settings.primaryKeys || '').split(',').map(v => v.trim()).filter(Boolean);
+                          const nextKeys = e.target.checked
+                            ? [...currentKeys, col]
+                            : currentKeys.filter(k => k !== col);
+                          setSettings(p => ({ ...p, primaryKeys: nextKeys.join(', ') }));
+                        }}
+                      />
+                      <span className="truncate" title={col}>{col}</span>
+                    </label>
+                  );
+                })}
+                {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                  <div className="col-span-full py-4 text-center text-gray-400 text-xs italic">
+                    Select a source table to see available columns.
+                  </div>
+                )}
+              </div>
+              <span className="form-hint">Select one or more columns to form the primary key for join-based comparison.</span>
             </div>
           )}
         </div>

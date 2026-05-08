@@ -647,11 +647,37 @@ def run_validation(req: RunValidationRequest):
                             target_conn,
                         )
 
-                        for col_name in hash_columns:
-                            src_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in src_only_rows}
-                            tgt_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in tgt_only_rows}
-                            if src_vals != tgt_vals:
-                                mismatched_columns.append(col_name)
+                        # ─── Improved Mismatch Identification ───
+                        pks_input = settings.get("primaryKeys", "")
+                        pks = [k.strip() for k in str(pks_input).split(",") if k.strip()]
+                        
+                        if pks and src_only_rows and tgt_only_rows:
+                            # Use PKs to correlate rows and find specific mismatched columns
+                            # We create a map of PK-tuple -> row for both sides
+                            def get_pk_val(row):
+                                return tuple(str(row.get(k, "")) for k in pks)
+                            
+                            src_pk_map = {get_pk_val(r): r for r in src_only_rows}
+                            tgt_pk_map = {get_pk_val(r): r for r in tgt_only_rows}
+                            
+                            common_pks = set(src_pk_map.keys()) & set(tgt_pk_map.keys())
+                            
+                            for pk_val in common_pks:
+                                s_row = src_pk_map[pk_val]
+                                t_row = tgt_pk_map[pk_val]
+                                for col_name in hash_columns:
+                                    if col_name in pks: continue
+                                    s_val = "" if s_row.get(col_name) is None else str(s_row.get(col_name))
+                                    t_val = "" if t_row.get(col_name) is None else str(t_row.get(col_name))
+                                    if s_val != t_val and col_name not in mismatched_columns:
+                                        mismatched_columns.append(col_name)
+                        else:
+                            # Fallback to the original set-based comparison if no PK is provided
+                            for col_name in hash_columns:
+                                src_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in src_only_rows}
+                                tgt_vals = {"" if r.get(col_name) is None else str(r.get(col_name)) for r in tgt_only_rows}
+                                if src_vals != tgt_vals:
+                                    mismatched_columns.append(col_name)
 
                     details["row_hash"] = {
                         "columns": hash_columns,
