@@ -26,17 +26,17 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 @router.get("/results/{validation_id}")
 async def get_validation_result(validation_id: str, _ = Depends(require_api_key)):
-    from ..validation_core import get_dashboard_postgres_conn
-    conn = get_dashboard_postgres_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM table_validation.validation_results WHERE validation_id = %s", (validation_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Validation ID not found")
-    columns = ["validation_id", "validation_ts", "src_table_name", "tgt_table_name", "validation_type", "row_count", "schema_check", "numeric_check", "hash_validation"]
-    return dict(zip(columns, row))
+    from validation_tool.backend import supabase_store
+    try:
+        row = supabase_store.get_result_by_id(validation_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Validation ID not found")
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get validation result: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve validation result")
 @router.post("/validate")
 async def validate(
     credentials: str = Form(...),

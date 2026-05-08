@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import redis
 
-from validation_tool.backend.postgres_store import (
+from validation_tool.backend.supabase_jobs_store import (
     ensure_jobs_table,
     get_pg_conn,
     insert_validation_result,

@@ -16,7 +16,7 @@ from validation_tool.api.schemas import (
     ValidationResultRow,
 )
 from validation_tool.backend.csv_parser import parse_validations_csv
-from validation_tool.backend.postgres_store import (
+from validation_tool.backend.supabase_jobs_store import (
     ensure_jobs_table,
     get_job,
     get_pg_conn,

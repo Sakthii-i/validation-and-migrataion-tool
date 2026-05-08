@@ -14,12 +14,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
-import psycopg2
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 # ── Internal imports ──
-from validation_tool.connections.postgres import POSTGRES_CONFIG
 from validation_tool.connections.bigquery import connect_bigquery
 from validation_tool.connections.databricks import connect_databricks
 from validation_tool.connections.snowflake import connect_snowflake
@@ -40,53 +38,6 @@ router = APIRouter(prefix="/api")
 # HELPERS
 # ══════════════════════════════════════
 
-def _pg():
-    return psycopg2.connect(
-        host=POSTGRES_CONFIG["host"],
-        port=POSTGRES_CONFIG["port"],
-        dbname=POSTGRES_CONFIG["db"],
-        user=POSTGRES_CONFIG["user"],
-        password=POSTGRES_CONFIG["password"],
-        sslmode=POSTGRES_CONFIG.get("sslmode", "require"),
-    )
-
-def _execute(conn, query):
-    cur = conn.cursor()
-    cur.execute(query)
-    columns = [desc[0] for desc in cur.description] if cur.description else []
-    rows = cur.fetchall() or []
-    cur.close()
-    return [dict(zip(columns, row)) for row in rows]
-
-
-def _ensure_results_table(conn) -> None:
-    """Best-effort schema ensure/migration for table_validation.validation_results.
-
-    Keeps the React endpoints resilient across existing deployments.
-    """
-    cur = conn.cursor()
-    cur.execute("CREATE SCHEMA IF NOT EXISTS table_validation")
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS table_validation.validation_results (
-            validation_id TEXT PRIMARY KEY,
-            validation_ts TIMESTAMPTZ,
-            src_table_name TEXT,
-            tgt_table_name TEXT,
-            validation_type TEXT,
-            run_by TEXT,
-            row_count TEXT,
-            schema_check TEXT,
-            numeric_check TEXT,
-            hash_validation TEXT
-        )
-        """
-    )
-    cur.execute("ALTER TABLE IF EXISTS table_validation.validation_results ADD COLUMN IF NOT EXISTS run_by TEXT")
-    conn.commit()
-    cur.close()
-
-DASHBOARD_TABLE = "table_validation.validation_results"
 DATE_FILTER_MAP = {
     "Today": 0,
     "Past 3 days": 2,
@@ -103,11 +54,6 @@ def _date_range(date_filter, start_date=None, end_date=None):
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=days)
     return str(start), str(end)
-
-def _where_clause(start, end):
-    if not start or not end:
-        return "1=1"
-    return f"validation_ts >= '{start}'::date AND validation_ts <= '{end}'::date + INTERVAL '1 day'"
 
 # ── Active connections store (in-memory, per-process) ──
 _sessions = {}
@@ -136,7 +82,7 @@ class RevokeRequest(BaseModel):
 def auth_login(req: LoginRequest):
     from validation_tool.backend.auth_config import ADMIN_USERNAME, ADMIN_PASSWORD_HASH
     from validation_tool.backend.auth_crypto import verify_password
-    from validation_tool.backend.auth_store import get_pg_conn, get_password_hash
+    from validation_tool.backend.supabase_auth_store import get_password_hash
 
     if req.role == "admin":
         if req.username.strip() != ADMIN_USERNAME:
@@ -147,9 +93,7 @@ def auth_login(req: LoginRequest):
         return {"role": "admin", "token": token, "username": req.username}
     else:
         try:
-            conn = get_pg_conn()
-            stored = get_password_hash(conn, req.username.strip())
-            conn.close()
+            stored = get_password_hash(None, req.username.strip())
         except Exception:
             raise HTTPException(status_code=500, detail="Database connection error")
         if not stored or not verify_password(req.password, stored):
@@ -159,12 +103,11 @@ def auth_login(req: LoginRequest):
 
 @router.get("/auth/users")
 def auth_list_users():
-    from validation_tool.backend.auth_store import get_pg_conn, list_usernames
-    conn = get_pg_conn()
+    from validation_tool.backend.supabase_auth_store import list_usernames
     try:
-        return {"users": list_usernames(conn)}
-    finally:
-        conn.close()
+        return {"users": list_usernames(None)}
+    except Exception:
+        return {"users": []}
 
 @router.post("/auth/grant")
 def auth_grant(req: GrantRequest):
@@ -190,35 +133,24 @@ def auth_revoke(req: RevokeRequest):
 @router.get("/dashboard/stats")
 def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
-
-    where = _where_clause(s, e)
-
-    query = f"""
-        SELECT
-            COUNT(DISTINCT COALESCE(src_table_name,'') || '|' || COALESCE(tgt_table_name,'')) AS tables_validated,
-            COUNT(*) AS total_runs,
-            SUM(CASE WHEN row_count = 'PASS' THEN 1 ELSE 0 END) AS row_count_pass,
-            SUM(CASE WHEN schema_check = 'PASS' THEN 1 ELSE 0 END) AS schema_pass,
-            SUM(CASE WHEN numeric_check = 'PASS' THEN 1 ELSE 0 END) AS numeric_pass,
-            SUM(CASE WHEN hash_validation = 'PASS' THEN 1 ELSE 0 END) AS row_hash_pass,
-            SUM(CASE WHEN row_count = 'FAIL' THEN 1 ELSE 0 END) AS row_count_fail,
-            SUM(CASE WHEN schema_check = 'FAIL' THEN 1 ELSE 0 END) AS schema_fail,
-            SUM(CASE WHEN numeric_check = 'FAIL' THEN 1 ELSE 0 END) AS numeric_fail,
-            SUM(CASE WHEN hash_validation = 'FAIL' THEN 1 ELSE 0 END) AS row_hash_fail
-        FROM {DASHBOARD_TABLE}
-        WHERE {where}
-    """
-
-    conn = _pg()
+    
     try:
-        result = _execute(conn, query)
-        if result:
-            row = result[0]
-            # Normalize None to 0
-            return {k: (v or 0) for k, v in row.items()}
-        return {}
-    finally:
-        conn.close()
+        stats = supabase_store.dashboard_stats(start_date=s, end_date=e)
+        return stats
+    except Exception as ex:
+        logger.error("Dashboard stats error: %s", ex)
+        return {
+            "tables_validated": 0,
+            "total_runs": 0,
+            "row_count_pass": 0,
+            "schema_pass": 0,
+            "numeric_pass": 0,
+            "row_hash_pass": 0,
+            "row_count_fail": 0,
+            "schema_fail": 0,
+            "numeric_fail": 0,
+            "row_hash_fail": 0,
+        }
 
 # ══════════════════════════════════════
 # RESULTS
@@ -227,96 +159,29 @@ def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str]
 @router.get("/results")
 def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
     s, e = _date_range(date_filter, start_date, end_date)
-
-    where = _where_clause(s, e)
-
-    query = f"""
-        SELECT
-            validation_id, validation_ts, validation_type,
-            src_table_name AS source_table_name,
-            tgt_table_name AS target_table_name,
-            run_by,
-            row_count AS count_validation,
-            hash_validation, numeric_check, schema_check
-        FROM {DASHBOARD_TABLE}
-        WHERE {where}
-        ORDER BY validation_ts DESC
-        LIMIT 500
-    """
-    conn = _pg()
+    
     try:
-        _ensure_results_table(conn)
-        rows = _execute(conn, query)
-        # Convert datetimes to strings
-        for row in rows:
-            for k, v in row.items():
-                if hasattr(v, 'isoformat'):
-                    row[k] = v.isoformat()
+        rows = supabase_store.list_results(start_date=s, end_date=e, limit=500)
         return {"results": rows}
-    finally:
-        conn.close()
+    except Exception as ex:
+        logger.error("List results error: %s", ex)
+        return {"results": []}
 
 @router.get("/results/{validation_id}")
 def get_result_by_id(validation_id: str):
     if not supabase_store.is_enabled():
         raise HTTPException(status_code=503, detail="Supabase is not configured for validation details")
 
-    row = supabase_store.get_result_by_id(validation_id)
-    if row:
-        return row
-
-    # Backfill this validation record from Postgres into Supabase, then return from Supabase.
-    query = f"""
-        SELECT
-            validation_id,
-            validation_ts,
-            validation_type,
-            src_table_name AS source_table_name,
-            tgt_table_name AS target_table_name,
-            run_by,
-            row_count AS count_validation,
-            hash_validation,
-            numeric_check,
-            schema_check
-        FROM {DASHBOARD_TABLE}
-        WHERE validation_id = %s
-        LIMIT 1
-    """
-    conn = _pg()
     try:
-        _ensure_results_table(conn)
-        cur = conn.cursor()
-        cur.execute(query, (validation_id,))
-        pg_row = cur.fetchone()
-        if not pg_row:
-            raise HTTPException(status_code=404, detail="Validation ID not found")
-        cols = [desc[0] for desc in cur.description]
-        result = dict(zip(cols, pg_row))
-        for k, v in result.items():
-            if hasattr(v, 'isoformat'):
-                result[k] = v.isoformat()
-
-        supabase_store.upsert_results([
-            {
-                "validation_id": result.get("validation_id"),
-                "validation_ts": result.get("validation_ts"),
-                "validation_type": result.get("validation_type"),
-                "source_table_name": result.get("source_table_name"),
-                "target_table_name": result.get("target_table_name"),
-                "row_count": result.get("count_validation"),
-                "schema_check": result.get("schema_check"),
-                "numeric_check": result.get("numeric_check"),
-                "hash_validation": result.get("hash_validation"),
-                "details": result.get("details") or {},
-            }
-        ])
-
-        refreshed = supabase_store.get_result_by_id(validation_id)
-        if refreshed:
-            return refreshed
-        return result
-    finally:
-        conn.close()
+        row = supabase_store.get_result_by_id(validation_id)
+        if row:
+            return row
+        raise HTTPException(status_code=404, detail="Validation ID not found")
+    except HTTPException:
+        raise
+    except Exception as ex:
+        logger.error("Get result error: %s", ex)
+        raise HTTPException(status_code=500, detail="Failed to retrieve validation details")
 
 # ══════════════════════════════════════
 # CONNECTIONS

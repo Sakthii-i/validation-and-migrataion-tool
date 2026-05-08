@@ -1,3 +1,16 @@
+"""
+DEPRECATED: PostgreSQL connection configuration is no longer used.
+The application now uses Supabase for all data storage.
+
+This file is kept for backward compatibility with legacy code paths
+but is not actively used by the modern API routes.
+
+Migration to Supabase:
+- Authentication: Use backend.supabase_auth_store instead
+- Job tracking: Use backend.supabase_jobs_store instead
+- Results storage: Use backend.supabase_store instead
+"""
+
 import os
 
 

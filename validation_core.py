@@ -121,36 +121,28 @@ def generate_validation_record(validation_type, src, tgt, row_status, schema_sta
     }
 
 def insert_validation_result(record: dict) -> str:
-    """Insert record into Postgres and return validation_id."""
+    """Insert record into Supabase and return validation_id."""
     try:
-        pg = get_dashboard_postgres_conn()
-        ensure_validation_table(pg)
-        cur = pg.cursor()
-        insert_sql = """
-        INSERT INTO table_validation.validation_results (
-            validation_id, validation_ts, src_table_name, tgt_table_name,
-            validation_type, run_by, row_count, schema_check, numeric_check, hash_validation
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        params = (
-            record["validation_id"],
-            record["timestamp"],
-            record["src_table_name"],
-            record["tgt_table_name"],
-            record["validation_type"],
-            record.get("run_by"),
-            record["row_count"],
-            record["schema_check"],
-            record["numeric_check"],
-            record["hash_validation"],
-        )
-        cur.execute(insert_sql, params)
-        pg.commit()
-        cur.close()
-        pg.close()
+        from validation_tool.backend import supabase_store
+        
+        # Map validation_core record format to supabase_store format
+        supabase_record = {
+            "validation_id": record["validation_id"],
+            "validation_ts": record.get("timestamp"),
+            "src_table_name": record.get("src_table_name"),
+            "tgt_table_name": record.get("tgt_table_name"),
+            "validation_type": record.get("validation_type"),
+            "run_by": record.get("run_by"),
+            "row_count": record.get("row_count"),
+            "schema_check": record.get("schema_check"),
+            "numeric_check": record.get("numeric_check"),
+            "hash_validation": record.get("hash_validation"),
+        }
+        
+        supabase_store.upsert_results([supabase_record])
         return record["validation_id"]
     except Exception as e:
-        logger.error(f"Postgres insert failed: {e}")
+        logger.error(f"Supabase insert failed: {e}")
         raise
 
 # ---------- Query execution & normalization ----------
