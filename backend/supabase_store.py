@@ -84,6 +84,7 @@ def upsert_results(rows: list[dict[str, Any]]) -> None:
             "schema_check": _json_safe(row.get("schema_check")),
             "numeric_check": _json_safe(row.get("numeric_check")),
             "hash_validation": _json_safe(row.get("hash_validation")),
+            "run_by": _json_safe(row.get("run_by")),
             "details": _json_safe(row.get("details") or {}),
         })
 
@@ -113,7 +114,7 @@ def list_results(start_date: str | None = None, end_date: str | None = None, lim
         return []
 
     params: list[tuple[str, str]] = [
-        ("select", "validation_id,validation_ts,validation_type,src_table_name,tgt_table_name,row_count,schema_check,numeric_check,hash_validation,details"),
+        ("select", "validation_id,validation_ts,validation_type,src_table_name,tgt_table_name,row_count,schema_check,numeric_check,hash_validation,run_by,details"),
         ("order", "validation_ts.desc"),
         ("limit", str(limit)),
     ]
@@ -134,6 +135,7 @@ def list_results(start_date: str | None = None, end_date: str | None = None, lim
             "schema_check": row.get("schema_check"),
             "numeric_check": row.get("numeric_check"),
             "hash_validation": row.get("hash_validation"),
+            "run_by": row.get("run_by"),
             "details": row.get("details"),
         })
     return rows
@@ -144,7 +146,7 @@ def get_result_by_id(validation_id: str) -> dict[str, Any] | None:
         return None
 
     query = urlencode({
-        "select": "validation_id,validation_ts,validation_type,src_table_name,tgt_table_name,row_count,schema_check,numeric_check,hash_validation,details",
+        "select": "validation_id,validation_ts,validation_type,src_table_name,tgt_table_name,row_count,schema_check,numeric_check,hash_validation,run_by,details",
         "validation_id": f"eq.{validation_id}",
         "limit": "1",
     })
@@ -164,6 +166,7 @@ def get_result_by_id(validation_id: str) -> dict[str, Any] | None:
         "schema_check": row.get("schema_check"),
         "numeric_check": row.get("numeric_check"),
         "hash_validation": row.get("hash_validation"),
+        "run_by": row.get("run_by"),
         "details": row.get("details"),
     }
 
