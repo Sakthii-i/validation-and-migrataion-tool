@@ -8,6 +8,7 @@ import DataValidationsPage from './pages/DataValidationsPage';
 import ValidationDetailsPage from './pages/ValidationDetailsPage';
 import ValidationDashboardPage from './pages/ValidationDashboardPage';
 import BQSchemaViewerPage from './pages/BQSchemaViewerPage';
+import QueryConverterPage from './pages/QueryConverterPage';
 import AdminPage from './pages/AdminPage';
 
 function ProtectedRoute({ children }) {
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/validation-dashboard" element={<ProtectedRoute><ValidationDashboardPage /></ProtectedRoute>} />
         <Route path="/validation-dashboard/:validationId" element={<ProtectedRoute><ValidationDetailsPage /></ProtectedRoute>} />
         <Route path="/bq-schema-viewer" element={<ProtectedRoute><BQSchemaViewerPage /></ProtectedRoute>} />
+        <Route path="/query-converter" element={<ProtectedRoute><QueryConverterPage /></ProtectedRoute>} />
         <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConnection } from '../context/ConnectionContext';
 import {
-  LayoutDashboard, Plus, Database, BarChart3, Table2, Shield, LogOut, Plug, PlugZap, ChevronDown
+  LayoutDashboard, Plus, Database, BarChart3, Table2, Shield, LogOut, Plug, PlugZap, ChevronDown, RefreshCw
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -15,6 +15,7 @@ const navItems = [
 
 const toolItems = [
   { to: '/bq-schema-viewer', label: 'Schema Viewer', icon: Table2 },
+  { to: '/query-converter', label: 'Query Converter', icon: RefreshCw },
 ];
 
 export default function Sidebar() {

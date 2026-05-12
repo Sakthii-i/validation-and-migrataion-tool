@@ -1,0 +1,218 @@
+mapping_id,category,bigquery_syntax,databricks_sql_syntax,searchable_content,example_bq,example_dbsql
+1,Data Types,STRING,STRING,Data Types|STRING,CREATE TABLE t (col STRING),CREATE TABLE t (col STRING)
+2,Data Types,BYTES,BINARY,Data Types|BYTES,CREATE TABLE t (col BYTES),CREATE TABLE t (col BINARY)
+3,Data Types,INT64,BIGINT,Data Types|INT,CREATE TABLE t (col INT64),CREATE TABLE t (col BIGINT)
+4,Data Types,INTEGER,INT,Data Types|INTEGER,CREATE TABLE t (col INTEGER),CREATE TABLE t (col INT)
+5,Data Types,FLOAT64,DOUBLE,Data Types|FLOAT,Select cast (col as FLOAT64),Select cast (col as DOUBLE)
+6,Data Types,NUMERIC,"DECIMAL(38,9)",Data Types|NUMERIC,CREATE TABLE t (col NUMERIC),"CREATE TABLE t (col DECIMAL(38,9))"
+7,Data Types,BIGNUMERIC,"DECIMAL(38,9)",Data Types|BIGNUMERIC,CREATE TABLE t (col BIGNUMERIC),"CREATE TABLE t (col DECIMAL(38,9))"
+8,Data Types,BOOL,BOOLEAN,Data Types|BOOL,CREATE TABLE t (col BOOL),CREATE TABLE t (col BOOLEAN)
+9,Data Types,DATE,DATE,Data Types|DATE,CREATE TABLE t (col DATE),CREATE TABLE t (col DATE)
+10,Data Types,DATETIME,TIMESTAMP,Data Types|DATETIME,CREATE TABLE t (col DATETIME),CREATE TABLE t (col TIMESTAMP)
+11,Data Types,TIME,STRING,Data Types|TIME,CREATE TABLE t (col TIME),CREATE TABLE t (col STRING)
+12,Data Types,TIMESTAMP,TIMESTAMP,Data Types|TIMESTAMP,CREATE TABLE t (col TIMESTAMP),CREATE TABLE t (col TIMESTAMP)
+13,Data Types,-,-,Data Types|,-,-
+14,Data Types,-,-,Data Types|,-,-
+15,Data Types,GEOGRAPHY,STRING,Data Types|GEOGRAPHY,CREATE TABLE t (col GEOGRAPHY),CREATE TABLE t (col STRING)
+16,Data Types,JSON,STRING,Data Types|JSON,CREATE TABLE t (col JSON),CREATE TABLE t (col STRING)
+17,Data Types,INTERVAL,INTERVAL,Data Types|INTERVAL,CREATE TABLE t (col INTERVAL),CREATE TABLE t (col INTERVAL)
+18,Data Types,RANGE<type>,"STRUCT<start:type,end:type>",Data Types|RANGE,CREATE TABLE t (col RANGE<type>),"CREATE TABLE t (col STRUCT<start:type,end:type>)"
+19,String Functions,LENGTH(str),LENGTH(str),String Functions|LENGTH,SELECT LENGTH('hello'),SELECT LENGTH('hello')
+20,String Functions,"SUBSTR(str, pos, len)","SUBSTRING(str, pos, len)",String Functions|SUBSTR,"SELECT SUBSTR('hello', 1, 3)","SELECT SUBSTRING('hello', 1, 3)"
+21,String Functions,null,null,String Functions,null,null
+22,String Functions,null,null,String Functions,null,null
+23,String Functions,"CONCAT(str1, str2, ...)","CONCAT(str1, str2, ...)",String Functions|CONCAT,"SELECT CONCAT('a', 'b')","SELECT CONCAT('a', 'b')"
+24,String Functions,TRIM(str),TRIM(str),String Functions|TRIM,SELECT TRIM(' hello '),SELECT TRIM(' hello ')
+25,String Functions,LTRIM(str),LTRIM(str),String Functions|LTRIM,SELECT LTRIM(' hello'),SELECT LTRIM(' hello')
+26,String Functions,RTRIM(str),RTRIM(str),String Functions|RTRIM,SELECT RTRIM('hello '),SELECT RTRIM('hello ')
+27,String Functions,"REPLACE(str, old, new)","REPLACE(str, old, new)",String Functions|REPLACE,"SELECT REPLACE('hello', 'l', 'x')","SELECT REPLACE('hello', 'l', 'x')"
+28,String Functions,"SPLIT(str, delimiter)","SPLIT(str, delimiter)",String Functions|SPLIT,"SELECT SPLIT('a,b,c', ',')","SELECT SPLIT('a,b,c', ',')"
+29,String Functions,"STRPOS(str, substr)","LOCATE(substr, str)",String Functions|STRPOS,"SELECT STRPOS('hello', 'l')","SELECT LOCATE('l', 'hello')"
+30,String Functions,"LEFT(str, len)","LEFT(str, len)",String Functions|LEFT,"SELECT LEFT('hello', 2)","SELECT LEFT('hello', 2)"
+31,String Functions,"RIGHT(str, len)","RIGHT(str, len)",String Functions|RIGHT,"SELECT RIGHT('hello', 2)","SELECT RIGHT('hello', 2)"
+32,String Functions,"REPEAT(str, times)","REPEAT(str, times)",String Functions|REPEAT,"SELECT REPEAT('a', 3)","SELECT REPEAT('a', 3)"
+33,String Functions,REVERSE(str),REVERSE(str),String Functions|REVERSE,SELECT REVERSE('hello'),SELECT REVERSE('hello')
+34,String Functions,"REGEXP_CONTAINS(str, pattern)",str RLIKE pattern,String Functions|REGEXP_CONTAINS,"SELECT REGEXP_CONTAINS('hello', 'h.*')",SELECT 'hello' RLIKE 'h.*'
+35,String Functions,"REGEXP_EXTRACT(str, pattern)","REGEXP_EXTRACT(str, pattern, 0)",String Functions|REGEXP_EXTRACT,"SELECT REGEXP_EXTRACT('a123b', '[0-9]+')","SELECT REGEXP_EXTRACT('a123b', '[0-9]+', 0)"
+36,String Functions,"REGEXP_REPLACE(str, pattern, replacement)","REGEXP_REPLACE(str, pattern, replacement)",String Functions|REGEXP_REPLACE,"SELECT REGEXP_REPLACE('hello', 'l+', 'x')","SELECT REGEXP_REPLACE('hello', 'l+', 'x')"
+37,String Functions,"FORMAT('%s %d', str, num)","FORMAT_STRING('%s %d', str, num)",String Functions|FORMAT,"SELECT FORMAT('%s %d', 'hello', 5)","SELECT FORMAT_STRING('%s %d', 'hello', 5)"
+38,String Functions,SAFE_CAST(expr AS STRING),TRY_CAST(expr AS STRING),String Functions|SAFE_CAST,SELECT SAFE_CAST(123 AS STRING),SELECT TRY_CAST(123 AS STRING)
+39,Date/Time Functions,CURRENT_DATE(),CURRENT_DATE(),Date/Time Functions|CURRENT_DATE,SELECT CURRENT_DATE(),SELECT CURRENT_DATE()
+40,Date/Time Functions,CURRENT_DATETIME(),CURRENT_TIMESTAMP(),Date/Time Functions|CURRENT_DATETIME,SELECT CURRENT_DATETIME(),SELECT CURRENT_TIMESTAMP()
+41,Date/Time Functions,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP(),Date/Time Functions|CURRENT_TIMESTAMP,SELECT CURRENT_TIMESTAMP(),SELECT CURRENT_TIMESTAMP()
+42,Date/Time Functions,"DATE_ADD(date, INTERVAL days DAY)","DATE_ADD(date, days)",Date/Time Functions|DATE_ADD,"SELECT DATE_ADD('2023-01-01', INTERVAL 5 DAY)","SELECT DATE_ADD('2023-01-01', 5)"
+43,Date/Time Functions,"DATE_SUB(date, INTERVAL days DAY)","DATE_SUB(date, days)",Date/Time Functions|DATE_SUB,"SELECT DATE_SUB('2023-01-01', INTERVAL 5 DAY) ; 
+DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)","SELECT DATE_SUB('2023-01-01', 5) ; select add_months(current_date(), -12)"
+44,Date/Time Functions,"DATE_DIFF(end_date, start_date, DAY)","DATEDIFF(end_date, start_date)",Date/Time Functions|DATE_DIFF,"SELECT DATE_DIFF('2023-01-05', '2023-01-01', DAY)","SELECT DATEDIFF('2023-01-05', '2023-01-01')"
+45,Date/Time Functions,EXTRACT(YEAR FROM date),YEAR(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(YEAR FROM '2023-01-01'),SELECT YEAR('2023-01-01')
+46,Date/Time Functions,EXTRACT(MONTH FROM date),MONTH(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(MONTH FROM '2023-01-01'); SELECT EXTRACT(QUARTER FROM order_date) as quarter,SELECT MONTH('2023-01-01'); SELECT quarter(order_date) as quarter
+47,Date/Time Functions,EXTRACT(DAY FROM date),DAY(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(DAY FROM '2023-01-01'),SELECT DAY('2023-01-01')
+48,Date/Time Functions,EXTRACT(DAYOFWEEK FROM date),DAYOFWEEK(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(DAYOFWEEK FROM '2023-01-01'),SELECT DAYOFWEEK('2023-01-01')
+49,Date/Time Functions,EXTRACT(DAYOFYEAR FROM date),DAYOFYEAR(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(DAYOFYEAR FROM '2023-01-01'),SELECT DAYOFYEAR('2023-01-01')
+50,Date/Time Functions,EXTRACT(WEEK FROM date),WEEKOFYEAR(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(WEEK FROM '2023-01-01'),SELECT WEEKOFYEAR('2023-01-01')
+51,Date/Time Functions,EXTRACT(ISOWEEK FROM date),WEEKOFYEAR(date),Date/Time Functions|EXTRACT,SELECT EXTRACT(ISOWEEK FROM '2023-01-01'),SELECT WEEKOFYEAR('2023-01-01')
+52,Date/Time Functions,"FORMAT_DATE('%Y-%m-%d', date)","DATE_FORMAT(date, 'yyyy-MM-dd')",Date/Time Functions|FORMAT_DATE,"SELECT FORMAT_DATE('%Y-%m-%d', DATE '2023-01-01')","SELECT DATE_FORMAT('2023-01-01', 'yyyy-MM-dd')"
+53,Date/Time Functions,"PARSE_DATE('%Y-%m-%d', str)","TO_DATE(str, 'yyyy-MM-dd')",Date/Time Functions|PARSE_DATE,"SELECT PARSE_DATE('%Y-%m-%d', '2023-01-01')","SELECT TO_DATE('2023-01-01', 'yyyy-MM-dd')"
+54,Date/Time Functions,"DATETIME_ADD(datetime, INTERVAL hours HOUR)",datetime + INTERVAL hours HOURS,Date/Time Functions|DATETIME_ADD,"SELECT DATETIME_ADD('2023-01-01 10:00:00', INTERVAL 2 HOUR)",SELECT '2023-01-01 10:00:00' + INTERVAL 2 HOURS
+55,Date/Time Functions,"TIMESTAMP_DIFF(end_ts, start_ts, HOUR)","TIMESTAMPDIFF(HOUR, start_ts, end_ts)",Date/Time Functions|TIMESTAMP_DIFF,"SELECT TIMESTAMP_DIFF('2023-01-01 12:00:00', '2023-01-01 10:00:00', HOUR)","SELECT TIMESTAMPDIFF(HOUR, '2023-01-01 10:00:00', '2023-01-01 12:00:00')"
+56,Date/Time Functions,"DATE_TRUNC(date, MONTH)","DATE_TRUNC('MONTH', date)",Date/Time Functions|DATE_TRUNC,"SELECT DATE_TRUNC('2023-05-15', MONTH)","SELECT DATE_TRUNC('MONTH', '2023-05-15')"
+57,Date/Time Functions,UNIX_DATE(date),unix_date(date),Date/Time Functions|UNIX_DATE,SELECT UNIX_DATE('2023-01-01'),SELECT unix_date('2023-01-01')
+58,Date/Time Functions,DATE_FROM_UNIX_DATE(days),date_from_unix_date(days),Date/Time Functions|DATE_FROM_UNIX_DATE,SELECT DATE_FROM_UNIX_DATE(19358),SELECT date_from_unix_date(19358)
+59,Date/Time Functions,UNIX_SECONDS(timestamp),unix_seconds(timestamp),Date/Time Functions|UNIX_SECONDS,SELECT UNIX_SECONDS('2023-01-01 00:00:00'),SELECT unix_seconds('2023-01-01 00:00:00')
+60,Date/Time Functions,TIMESTAMP_SECONDS(seconds),timestamp_seconds(seconds),Date/Time Functions|TIMESTAMP_SECONDS,SELECT TIMESTAMP_SECONDS(1672531200),SELECT timestamp_seconds(1672531200)
+61,Mathematical Functions,ABS(x),ABS(x),Mathematical Functions|ABS,SELECT ABS(-5),SELECT ABS(-5)
+62,Mathematical Functions,CEIL(x),CEIL(x),Mathematical Functions|CEIL,SELECT CEIL(4.2),SELECT CEIL(4.2)
+63,Mathematical Functions,FLOOR(x),FLOOR(x),Mathematical Functions|FLOOR,SELECT FLOOR(4.8),SELECT FLOOR(4.8)
+64,Mathematical Functions,"ROUND(x, digits)","ROUND(x, digits)",Mathematical Functions|ROUND,"SELECT ROUND(3.14159, 2)","SELECT ROUND(3.14159, 2)"
+65,Mathematical Functions,SQRT(x),SQRT(x),Mathematical Functions|SQRT,SELECT SQRT(16),SELECT SQRT(16)
+66,Mathematical Functions,"POW(x, y)","POWER(x, y)",Mathematical Functions|POW,"SELECT POW(2, 3)","SELECT POWER(2, 3)"
+67,Mathematical Functions,EXP(x),EXP(x),Mathematical Functions|EXP,SELECT EXP(1),SELECT EXP(1)
+68,Mathematical Functions,LN(x),LN(x),Mathematical Functions|LN,SELECT LN(2.718),SELECT LN(2.718)
+69,Mathematical Functions,"LOG(x, base)","LOG(base, x)",Mathematical Functions|LOG,"SELECT LOG(100, 10)","SELECT LOG(10, 100)"
+70,Mathematical Functions,LOG10(x),LOG10(x),Mathematical Functions|LOG,SELECT LOG10(100),SELECT LOG10(100)
+71,Mathematical Functions,SIN(x),SIN(x),Mathematical Functions|SIN,SELECT SIN(3.14159/2),SELECT SIN(3.14159/2)
+72,Mathematical Functions,COS(x),COS(x),Mathematical Functions|COS,SELECT COS(0),SELECT COS(0)
+73,Mathematical Functions,TAN(x),TAN(x),Mathematical Functions|TAN,SELECT TAN(3.14159/4),SELECT TAN(3.14159/4)
+74,Mathematical Functions,"MOD(x, y)",x % y,Mathematical Functions|MOD,"SELECT MOD(10, 3)",SELECT 10 % 3
+75,Mathematical Functions,"DIV(x, y)",x DIV y,Mathematical Functions|DIV,"SELECT DIV(10, 3)",SELECT 10 DIV 3
+76,Mathematical Functions,"GREATEST(x, y, ...)","GREATEST(x, y, ...)",Mathematical Functions|GREATEST,"SELECT GREATEST(1, 5, 3)","SELECT GREATEST(1, 5, 3)"
+77,Mathematical Functions,"LEAST(x, y, ...)","LEAST(x, y, ...)",Mathematical Functions|LEAST,"SELECT LEAST(1, 5, 3)","SELECT LEAST(1, 5, 3)"
+78,Array Functions,ARRAY_LENGTH(array),SIZE(array),Array Functions|ARRAY_LENGTH,"SELECT ARRAY_LENGTH([1,2,3])","SELECT SIZE(ARRAY(1,2,3))"
+79,Array Functions,"ARRAY_CONCAT(array1, array2)","concat(array1, array2)",Array Functions|ARRAY_CONCAT,"SELECT ARRAY_CONCAT([1,2], [3,4])","SELECT concat(ARRAY(1,2), ARRAY(3,4))"
+80,Array Functions,"ARRAY_TO_STRING(array, delimiter)","ARRAY_JOIN(array, delimiter)",Array Functions|ARRAY_TO_STRING,"SELECT ARRAY_TO_STRING([1,2,3], ',')","SELECT ARRAY_JOIN(ARRAY(1,2,3), ',')"
+81,Array Functions,UNNEST(array),EXPLODE(array),Array Functions|UNNEST,"WITH sessions AS (SELECT 'u1' AS user_id,['login','browse','checkout'] AS events) SELECT user_id,event,ARRAY_LENGTH(events) AS total_events
+FROM sessions, UNNEST(events) AS event;","WITH sessions AS ( SELECT 'u1' AS user_id, ARRAY('login','browse','checkout') AS events)
+SELECT user_id, event, SIZE(events) AS total_events FROM sessions LATERAL VIEW EXPLODE(events) AS event
+"
+82,Array Functions,UNNEST(array) WITH OFFSET,POSEXPLODE(array),Array Functions|UNNEST,"WITH sessions AS ( SELECT 'u1' AS user_id, ['login','browse','checkout'] AS events) SELECT user_id,event,ARRAY_LENGTH(events) AS total_events FROM sessions,UNNEST(events) WITH OFFSET AS event","WITH sessions AS ( SELECT 'u1' AS user_id, ARRAY('login','browse','checkout') AS events)
+SELECT user_id, event, SIZE(events) AS total_event FROM sessions LATERAL VIEW POSEXPLODE(events) AS event"
+83,Array Functions,"ARRAY_SLICE(array, start, length)","SLICE(array, start, length)",Array Functions|ARRAY_SLICE,"SELECT ARRAY_SLICE([1,2,3,4], 1, 2)","SELECT SLICE(ARRAY(1,2,3,4), 1, 2)"
+84,Array Functions,ARRAY_REVERSE(array),REVERSE(array),Array Functions|ARRAY_REVERSE,"SELECT ARRAY_REVERSE([1,2,3])","SELECT REVERSE(ARRAY(1,2,3))"
+85,Array Functions,ARRAY_AGG(column),COLLECT_LIST(column),Array Functions|ARRAY_AGG,"Select ARRAY_AGG(STRUCT(customer_id, order_amount) ORDER BY order_amount DESC LIMIT 3) as top_orders","select collect_list(named_struct('customer_id', customer_id, 'order_amount', order_amount)) as top_orders
+FROM (
+ SELECT customer_id,
+ order_amount,
+ ROW_NUMBER() OVER (PARTITION BY product_category ORDER BY order_amount DESC) as rn qualify rn<=3)"
+86,Array Functions,ARRAY(SELECT ..),ARRAY((SELECT ...)),Array Functions|ARRAY,"SELECT ARRAY(SELECT STRUCT(prod1) FROM all_prods) AS prd_st, ARRAY(SELECT STRUCT(prod2) FROM all_prods_2) AS prd_st_2","SELECT (SELECT collect_list(struct(prod1)) FROM all_prods) AS pd_st ,(select collect_list(struct(prod2)) FROM all_prods) AS pd_st_2"
+87,Array Functions,array[OFFSET(0)],array[0],Array Functions|array,SELECT arr[OFFSET(0)],SELECT arr[0]
+88,Array Functions,array[ORDINAL(1)],array[0],Array Functions|array,SELECT arr[ORDINAL(1)],SELECT arr[0]
+89,Array Functions,ARRAY_FIRST(array),array[0],Array Functions|ARRAY_FIRST,SELECT ARRAY_FIRST(x),SELECT x[0]
+90,Array Functions,ARRAY_LAST(array),array[SIZE(array)-1],Array Functions|ARRAY_LAST,"SELECT ARRAY_LAST([1,2,3])","SELECT ARRAY(1,2,3)[SIZE(ARRAY(1,2,3))-1]"
+91,Array Functions,"ARRAY_INCLUDES(array, value)","ARRAY_CONTAINS(array, value)",Array Functions|ARRAY_INCLUDES,"SELECT ARRAY_INCLUDES([1,2,3], 2)","SELECT ARRAY_CONTAINS(ARRAY(1,2,3), 2)"
+92,Array Functions,"ARRAY_TRANSFORM(array, lambda)","TRANSFORM(array, lambda)",Array Functions|ARRAY_TRANSFORM,"SELECT ARRAY_TRANSFORM([1,2,3], x -> x * 2)","SELECT TRANSFORM(ARRAY(1,2,3), x -> x * 2)"
+93,Array Functions,"ARRAY_FILTER(array, lambda)","FILTER(array, lambda)",Array Functions|ARRAY_FILTER,"SELECT ARRAY_FILTER([1,2,3], x -> x > 1)","SELECT FILTER(ARRAY(1,2,3), x -> x > 1)"
+93,Aggregate Functions,"STRING_AGG(col, delimiter)",COLLECT_LIST(col),Aggregate Functions|STRING_AGG,"SELECT STRING_AGG(name, ',')","SELECT ARRAY_JOIN(COLLECT_LIST(name), ',')"
+94,Aggregate Functions,ANY_VALUE(col),FIRST(col),Aggregate Functions|ANY_VALUE,SELECT ANY_VALUE(col) FROM table,SELECT FIRST(col) FROM table
+95,Aggregate Functions,STDDEV(col),STDDEV(col),Aggregate Functions|STDDEV,SELECT STDDEV(amount) FROM table,SELECT STDDEV(amount) FROM table
+96,Aggregate Functions,VARIANCE(col),VARIANCE(col),Aggregate Functions|VARIANCE,SELECT VARIANCE(amount) FROM table,SELECT VARIANCE(amount) FROM table
+97,Aggregate Functions,APPROX_COUNT_DISTINCT(col),APPROX_COUNT_DISTINCT(col),Aggregate Functions|APPROX_COUNT_DISTINCT,SELECT APPROX_COUNT_DISTINCT(col),SELECT APPROX_COUNT_DISTINCT(col)
+98,Aggregate Functions,"APPROX_QUANTILES(col, 4)","PERCENTILE_APPROX(col, 0.25)",Aggregate Functions|APPROX_QUANTILES,"SELECT APPROX_QUANTILES(amount, 4)[OFFSET(1)]","SELECT PERCENTILE_APPROX(amount, 0.25)"
+99,Window Functions,SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING),SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING),Window Functions|SUM,SELECT SUM(amount) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING),SELECT SUM(amount) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING)
+100,Conditional Functions,"IF(condition, true_val, false_val)","IF(condition, true_val, false_val)",Conditional Functions|IF,"SELECT IF(amount > 100, 'High', 'Low')","SELECT IF(amount > 100, 'High', 'Low')"
+101,Conditional Functions,CASE WHEN ... THEN ... ELSE ... END,CASE WHEN ... THEN ... ELSE ... END,Conditional Functions|CASE,SELECT CASE WHEN amount > 100 THEN 'High' ELSE 'Low' END,SELECT CASE WHEN amount > 100 THEN 'High' ELSE 'Low' END
+103,Conditional Functions,"NULLIF(expr1, expr2)","NULLIF(expr1, expr2)",Conditional Functions|NULLIF,"SELECT NULLIF(col, 0)","SELECT NULLIF(col, 0)"
+104,Conditional Functions,"COALESCE(expr1, expr2, ...)","COALESCE(expr1, expr2, ...)",Conditional Functions|COALESCE,"SELECT COALESCE(col1, col2, 'default')","SELECT COALESCE(col1, col2, 'default')"
+105,Conditional Functions,IS NULL,IS NULL,Conditional Functions|IS,SELECT * WHERE col IS NULL,SELECT * WHERE col IS NULL
+106,Conditional Functions,IS NOT NULL,IS NOT NULL,Conditional Functions|IS,SELECT * WHERE col IS NOT NULL,SELECT * WHERE col IS NOT NULL
+107,Syntax Differences,`project.dataset.table`,catalog.schema.table,Syntax Differences|,FROM `my-project.my_dataset.my_table`,FROM my_catalog.my_schema.my_table
+108,Syntax Differences,"STRUCT<field1 type1, field2 type2>","STRUCT<field1:type1, field2:type2>",Syntax Differences|STRUCT,"STRUCT<name STRING, age INT64>","STRUCT<name:STRING, age:INT>"
+109,Syntax Differences,||,OR,Syntax Differences|,WHERE condition1 || condition2,WHERE condition1 OR condition2
+110,Syntax Differences,&&,AND,Syntax Differences|,WHERE condition1 && condition2,WHERE condition1 AND condition2
+111,Syntax Differences,!=,<> or !=,Syntax Differences|,WHERE col != 'value',WHERE col <> 'value'
+112,Syntax Differences,JOIN table USING(column),JOIN table ON table1.column = table2.column,Syntax Differences|JOIN,JOIN t2 USING(id),JOIN t2 ON t1.id = t2.id
+113,Syntax Differences,# Comment,#NAME?,Syntax Differences|,# This is a comment,#NAME?
+114,Syntax Differences,/* Multi-line comment */,/* Multi-line comment */,Syntax Differences|,/* Comment */,/* Comment */
+115,Syntax Differences,LIMIT count OFFSET skip,"LIMIT skip, count",Syntax Differences|LIMIT,LIMIT 10 OFFSET 5,"LIMIT 5, 10"
+116,Syntax Differences,CREATE OR REPLACE TABLE,CREATE OR REPLACE TABLE,Syntax Differences|CREATE,CREATE OR REPLACE TABLE t AS SELECT ...,CREATE OR REPLACE TABLE t AS SELECT ...
+118,Syntax Differences,"SELECT * EXCEPT(col1, col2)","SELECT * FROM table EXCEPT SELECT col1, col2 FROM table",Syntax Differences|SELECT,SELECT * EXCEPT(col1) FROM table,"SELECT col3, col4, ... FROM table"
+119,Syntax Differences,SELECT * REPLACE(expr AS col),"SELECT *, expr AS col FROM (SELECT * EXCEPT col FROM table)",Syntax Differences|SELECT,SELECT * REPLACE(UPPER(name) AS name),Complex subquery needed
+120,Syntax Differences,WITH RECURSIVE cte AS (...),WITH RECURSIVE cte AS (...),Syntax Differences|WITH,WITH RECURSIVE cte AS (SELECT ... UNION ALL SELECT ...),WITH RECURSIVE cte AS (SELECT ... UNION ALL SELECT ...)
+121,Syntax Differences,QUALIFY1 window_function_condition,Use subquery with window function,Syntax Differences|QUALIFY,SELECT * FROM table QUALIFY1 ROW_NUMBER() OVER (...) = 1,"SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) as rn FROM table) WHERE rn = 1"
+122,JSON Functions,"JSON_EXTRACT(json_string, path)","GET_JSON_OBJECT(json_string, path)",JSON Functions|JSON_EXTRACT,"SELECT JSON_EXTRACT(json_col, '$.name')","SELECT GET_JSON_OBJECT(json_col, '$.name')"
+123,JSON Functions,"JSON_EXTRACT_SCALAR(json_string, path)","GET_JSON_OBJECT(json_string, path)",JSON Functions|JSON_EXTRACT_SCALAR,"SELECT JSON_EXTRACT_SCALAR(json_col, '$.age')","SELECT GET_JSON_OBJECT(json_col, '$.age')"
+124,JSON Functions,"JSON_VALUE(json_string, path)","GET_JSON_OBJECT(json_string, path)",JSON Functions|JSON_VALUE,"SELECT JSON_VALUE(json_col, '$.name')","SELECT GET_JSON_OBJECT(json_col, '$.name')"
+125,JSON Functions,TO_JSON_STRING(value),TO_JSON(value),JSON Functions|TO_JSON_STRING,SELECT TO_JSON_STRING(struct_col),SELECT TO_JSON(struct_col)
+126,JSON Functions,PARSE_JSON(json_string),"FROM_JSON(json_string, schema)",JSON Functions|PARSE_JSON,"SELECT PARSE_JSON('{""a"":1}')","SELECT FROM_JSON('{""a"":1}', 'a INT')"
+127,JSON Functions,"JSON_QUERY(json_string, path)","GET_JSON_OBJECT(json_string, path)",JSON Functions|JSON_QUERY,"SELECT JSON_QUERY(json_col, '$.items')","SELECT GET_JSON_OBJECT(json_col, '$.items')"
+128,DDL/DML Statements,INSERT INTO table VALUES (...),INSERT INTO table VALUES (...),DDL/DML Statements|INSERT,"INSERT INTO table VALUES (1, 'a')","INSERT INTO table VALUES (1, 'a')"
+129,DDL/DML Statements,INSERT INTO table SELECT ...,INSERT INTO table SELECT ...,DDL/DML Statements|INSERT,INSERT INTO table SELECT * FROM other,INSERT INTO table SELECT * FROM other
+130,DDL/DML Statements,UPDATE table SET col = val WHERE ...,UPDATE table SET col = val WHERE ...,DDL/DML Statements|UPDATE,UPDATE table SET amount = 100 WHERE id = 1,UPDATE table SET amount = 100 WHERE id = 1
+131,DDL/DML Statements,DELETE FROM table WHERE ...,DELETE FROM table WHERE ...,DDL/DML Statements|DELETE,DELETE FROM table WHERE id = 1,DELETE FROM table WHERE id = 1
+132,DDL/DML Statements,MERGE INTO target USING source ON ...,MERGE INTO target USING source ON ...,DDL/DML Statements|MERGE,MERGE INTO target t USING source s ON t.id = s.id,MERGE INTO target t USING source s ON t.id = s.id
+133,DDL/DML Statements,CREATE TABLE ... PARTITION BY col,CREATE TABLE ... PARTITIONED BY (col),DDL/DML Statements|CREATE,CREATE TABLE t PARTITION BY date_col,CREATE TABLE t PARTITIONED BY (date_col)
+134,DDL/DML Statements,CREATE TABLE ... CLUSTER BY col,CREATE TABLE ... CLUSTERED BY (col) INTO n BUCKETS,DDL/DML Statements|CREATE,CREATE TABLE t CLUSTER BY id,CREATE TABLE t CLUSTERED BY (id) INTO 10 BUCKETS
+135,DDL/DML Statements,ALTER TABLE ADD COLUMN,ALTER TABLE ADD COLUMN,DDL/DML Statements|ALTER,ALTER TABLE t ADD COLUMN new_col STRING,ALTER TABLE t ADD COLUMN new_col STRING
+136,DDL/DML Statements,DROP TABLE IF EXISTS,DROP TABLE IF EXISTS,DDL/DML Statements|DROP,DROP TABLE IF EXISTS my_table,DROP TABLE IF EXISTS my_table
+137,Special Functions,"GENERATE_ARRAY(start, end, step)","SEQUENCE(start, end, step)",Special Functions|GENERATE_ARRAY,"SELECT GENERATE_ARRAY(1, 10, 2)","SELECT SEQUENCE(1, 10, 2)"
+138,Special Functions,"GENERATE_DATE_ARRAY(start, end, interval)",Use EXPLODE with SEQUENCE and DATE_ADD,Special Functions|GENERATE_DATE_ARRAY,"SELECT GENERATE_DATE_ARRAY('2023-01-01', '2023-01-10', INTERVAL 1 DAY)","SELECT DATE_ADD('2023-01-01', col) FROM (SELECT EXPLODE(SEQUENCE(0, 9)) AS col)"
+139,Special Functions,"SAFE_DIVIDE(x, y)","try_divide(x,y)",Special Functions|SAFE_DIVIDE,"SELECT SAFE_DIVIDE(10, x)","Select try_divide(10,x)"
+140,Special Functions,"SAFE_MULTIPLY(x, y)","try_multiply(x,y)",Special Functions|SAFE_MULTIPLY,"SELECT SAFE_Multiply(10, x)","SELECT try_multiply(10, x)"
+141,Special Functions,"SAFE_ADD(x, y)","try_add(x,y)",Special Functions|SAFE_ADD,"SAFE_ADD(x, y)","Select try_add(x,y)"
+142,Special Functions,"SAFE_NEGATE(x, y)","try_subtract(x,y)",Special Functions|SAFE_NEGATE,"SELECT SAFE_NEGATE(x, y)","Select try_subtract(x,y)"
+143,Special Functions,"APPROX_TOP_COUNT(expr, number)",Use subquery with COUNT and LIMIT,Special Functions|APPROX_TOP_COUNT,"SELECT APPROX_TOP_COUNT(category, 5)","SELECT category, COUNT(*) FROM table GROUP BY category ORDER BY COUNT(*) DESC LIMIT 5"
+144,Special Functions,PERCENTILE_CONT(percentile) WITHIN GROUP (ORDER BY col),"PERCENTILE(col, percentile)",Special Functions|PERCENTILE_CONT,SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount),"SELECT PERCENTILE(amount, 0.5)"
+145,Special Functions,"ML.PREDICT(MODEL `model`, TABLE)",ML functions through MLlib/MLflow,Special Functions|ML,"SELECT * FROM ML.PREDICT(MODEL `my_model`, TABLE my_table)",Use MLlib for predictions
+146,Special Functions,GEOGRAPHY functions (ST_*),Use third-party libraries or convert to WKT,Special Functions|GEOGRAPHY,"SELECT ST_DISTANCE(geo1, geo2)",Use Sedona or H3 libraries
+147,Special Functions,WITH differential_privacy_clause,Not supported,Special Functions|WITH,SELECT COUNT(*) WITH differential_privacy,Not available in Databricks SQL
+148,JSON Functions,"JSON_EXTRACT_SCALAR(item, '$.name')","get_json_object(item, '$.name')",JSON Functions|JSON_EXTRACT_SCALAR,"SELECT JSON_EXTRACT_SCALAR(item, '$.name') AS product_name, JSON_EXTRACT_SCALAR(item, '$.price') AS price FROM table, UNNEST(JSON_EXTRACT_ARRAY(json_data, '$.orders')) AS order_data, 
+UNNEST(JSON_EXTRACT_ARRAY(order_data, '$.items')) AS item","SELECT get_json_object(item.value, '$.name') AS product_name, get_json_object(item.value, '$.price') AS price FROM table LATERAL VIEW explode( from_json(get_json_object(json_data, '$.orders'), 'array<string>') ) orders AS order_data LATERAL VIEW explode( from_json(get_json_object(order_data, '$.items'), 'array<string>') ) items AS item"
+149,JSON Functions,JSON_EXTRACT_ARRAY,"FROM_JSON(json_string, schema)",JSON Functions|JSON_EXTRACT_ARRAY,"Select JSON_EXTRACT_ARRAY(event_data, '$.products') as products_array","SELECT get_json_object(event_data, '$.products') as products_array"
+150,Special Functions,ARRAY,transform,Special Functions|ARRAY,"Select ARRAY( SELECT CAST(JSON_EXTRACT_SCALAR(product, '$.price') AS FLOAT64) FROM UNNEST(products_array) as product WHERE JSON_EXTRACT_SCALAR(product, '$.price') IS NOT NULL ) as product_prices","SELECT transform( filter( products_array, product -> get_json_object(product, '$.price') IS NOT NULL ), product -> CAST(get_json_object(product, '$.price') AS DOUBLE) ) as product_prices"
+151,Special Functions,Struct,named_struct,Special Functions|Struct,"Select STRUCT(order_amount as avg_amount,min_order_amount as 
+min_amount,max_order_amount as max_amount)","Select named_struct( 'avg_amount', order_amount, 'min_amount',min_order_amount,'max_amount', max_order_amount)"
+152,Date/Time Functions,"TIMESTAMP_TRUNC(ts, HOUR)","DATE_TRUNC('HOUR', ts)",Date/Time Functions|TIMESTAMP_TRUNC,"SELECT TIMESTAMP_TRUNC(TIMESTAMP '2023-05-15 12:34:56', HOUR)","SELECT DATE_TRUNC('HOUR', TIMESTAMP '2023-05-15 12:34:56')"
+153,Date/Time Functions,"DATETIME_DIFF(end_dt, start_dt, MINUTE)","TIMESTAMPDIFF(MINUTE, start_dt, end_dt)",Date/Time Functions|DATETIME_DIFF,"SELECT DATETIME_DIFF('2023-01-01 00:10:00', '2023-01-01 00:00:00', MINUTE)","SELECT TIMESTAMPDIFF(MINUTE, '2023-01-01 00:00:00', '2023-01-01 00:10:00')"
+154,String/Bit Functions,TO_HEX(255),HEX(255),String/Bit Functions|TO_HEX,SELECT TO_HEX(255),SELECT HEX(255)
+155,String/Bit Functions,FROM_HEX('FF'),UNHEX('FF'),String/Bit Functions|FROM_HEX,SELECT FROM_HEX('FF'),SELECT UNHEX('FF')
+156,Hash Functions,FARM_FINGERPRINT(expr),xxhash64(expr),Hash Functions|FARM_FINGERPRINT,SELECT FARM_FINGERPRINT('abc'),SELECT xxhash64('abc')
+157,Special Functions,GENERATE_UUID(),uuid(),Special Functions|GENERATE_UUID,SELECT GENERATE_UUID(),SELECT uuid()
+158,Array Functions,SAFE_OFFSET(3),CASE WHEN 3 < SIZE(array) THEN array[3] ELSE NULL END,Array Functions|SAFE_OFFSET,SELECT arr[SAFE_OFFSET(3)] FROM my_table,SELECT CASE WHEN 3 < SIZE(arr) THEN arr[3] ELSE NULL END FROM my_table
+159,Date/Time Functions,"PARSE_TIMESTAMP('%c', datetime_str)","TO_TIMESTAMP(datetime_str, 'EEE MMM dd HH:mm:ss yyyy')",Date/Time Functions|PARSE_TIMESTAMP,"SELECT PARSE_TIMESTAMP('%c', 'Mon Jul 11 18:30:00 2025')","SELECT TO_TIMESTAMP('Mon Jul 11 18:30:00 2025', 'EEE MMM dd HH:mm:ss yyyy')"
+160,Date/Time Functions,"FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', ts)","DATE_FORMAT(ts, 'yyyy-MM-dd HH:mm:ss')",Date/Time Functions|FORMAT_TIMESTAMP,"SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', CURRENT_TIMESTAMP())","SELECT DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd HH:mm:ss')"
+161,String Functions,"REGEXP_EXTRACT_ALL(str, pattern)","regexp_extract_all(str, pattern)",String Functions|REGEXP_EXTRACT_ALL,"SELECT REGEXP_EXTRACT_ALL('a1b2', r'(\d)')","SELECT regexp_extract_all('a1b2', '(\\d)')"
+162,Aggregate Functions,COUNTIF(condition),COUNT_IF(condition),Aggregate Functions|COUNTIF,SELECT COUNTIF(score > 90) FROM test_scores,SELECT COUNT_IF(score > 90) FROM test_scores
+163,Syntax Differences,TABLESAMPLE SYSTEM (10 PERCENT),TABLESAMPLE(10 PERCENT),Syntax Differences|TABLESAMPLE,SELECT * FROM my_table TABLESAMPLE SYSTEM (10 PERCENT),SELECT * FROM my_table TABLESAMPLE(10 PERCENT)
+164,Special Functions,"STRUCT(col1 AS a, col2 AS b)","named_struct('a', col1, 'b', col2)",Special Functions|STRUCT,"SELECT STRUCT(col1 AS a, col2 AS b) AS my_struct FROM my_table","SELECT named_struct('a', col1, 'b', col2) AS my_struct FROM my_table"
+165,Array Functions,ARRAY_CONCAT_AGG(arr_col),flatten(collect_list(arr_col)),Array Functions|ARRAY_CONCAT_AGG,SELECT ARRAY_CONCAT_AGG(arr_col) FROM table_with_arrays,SELECT flatten(collect_list(arr_col)) FROM table_with_arrays
+166,Aggregate Functions,BIT_AND(flag),bit_and(flag),Aggregate Functions|BIT_AND,SELECT BIT_AND(flag) FROM flags_table,SELECT bit_and(flag) FROM flags_table
+167,Date/Time Functions,"TIMESTAMP_ADD(ts, INTERVAL 90 MINUTE)",ts + INTERVAL 90 MINUTES,Date/Time Functions|TIMESTAMP_ADD,"SELECT TIMESTAMP_ADD(TIMESTAMP '2023-01-01 00:00:00', INTERVAL 90 MINUTE)",SELECT TIMESTAMP '2023-01-01 00:00:00' + INTERVAL 90 MINUTES
+168,Date/Time Functions,"TIMESTAMP_SUB(ts, INTERVAL 2 DAY)",ts - INTERVAL 2 DAYS,Date/Time Functions|TIMESTAMP_SUB,"SELECT TIMESTAMP_SUB(TIMESTAMP '2023-01-03 00:00:00', INTERVAL 2 DAY)",SELECT TIMESTAMP '2023-01-03 00:00:00' - INTERVAL 2 DAYS
+169,Date/Time Functions,"DATETIME_BUCKET(datetime, interval)","DATE_TRUNC(interval, datetime)",Date/Time Functions|DATETIME_BUCKET,"SELECT DATETIME_BUCKET('2023-01-15 12:30:45', INTERVAL 1 HOUR)","SELECT DATE_TRUNC('HOUR', '2023-01-15 12:30:45')"
+170,Date/Time Functions,"DATE_BUCKET(date, interval)","DATE_TRUNC(interval, date)",Date/Time Functions|DATE_BUCKET,"SELECT DATE_BUCKET('2023-01-15', INTERVAL 1 MONTH)","SELECT DATE_TRUNC('MONTH', '2023-01-15')"
+171,Array Functions,UNNEST(arr) AS elem WITH OFFSET pos,"POSEXPLODE(arr) AS (pos, elem)",Array Functions|UNNEST,"SELECT pos, elem FROM my_table, UNNEST(arr) AS elem WITH OFFSET pos","SELECT pos, elem FROM my_table LATERAL VIEW POSEXPLODE(arr) t AS pos, elem"
+172,Special Functions,LOGICAL_AND(expr),BOOL_AND(expr),Special Functions|LOGICAL_AND,SELECT LOGICAL_AND(flag) FROM table,SELECT BOOL_AND(flag) FROM table
+173,Special Functions,LOGICAL_OR(expr),BOOL_OR(expr),Special Functions|LOGICAL_OR,SELECT LOGICAL_OR(flag) FROM table,SELECT BOOL_OR(flag) FROM table
+174,Special Functions,SESSION_USER(),CURRENT_USER(),Special Functions|SESSION_USER,SELECT SESSION_USER(),SELECT CURRENT_USER()
+175,String Functions,"CONTAINS_SUBSTR(str, substr)","CONTAINS(str, substr)",String Functions|CONTAINS_SUBSTR,"SELECT CONTAINS_SUBSTR('hello world', 'world')","SELECT CONTAINS('hello world', 'world')"
+176,String Functions,"STARTS_WITH(str, prefix)","STARTSWITH(str, prefix)",String Functions|STARTS_WITH,"SELECT STARTS_WITH('hello', 'he')","SELECT STARTSWITH('hello', 'he')"
+177,String Functions,"ENDS_WITH(str, suffix)","ENDSWITH(str, suffix)",String Functions|ENDS_WITH,"SELECT ENDS_WITH('hello', 'lo')","SELECT ENDSWITH('hello', 'lo')"
+178,Special Functions,TABLESAMPLE SYSTEM (10 PERCENT),TABLESAMPLE(10 PERCENT),Special Functions|TABLESAMPLE,SELECT * FROM my_table TABLESAMPLE SYSTEM (10 PERCENT),SELECT * FROM my_table TABLESAMPLE(10 PERCENT)
+179,Array Functions,ARRAY_AGG(column),Collect_list(column),Array Functions|ARRAY_AGG,SELECT ARRAY_AGG(x order by y desc) from table_name,Select collect_list(x) FROM ( SELECT x FROM table_name ORDER BY y desc)
+
+180,Geospatial Functions,ST_AZIMUTH(point1 point2),st_azimuth(point1 point2),Geospatial Functions|ST_AZIMUTH,"SELECT ST_AZIMUTH(point1, point2)","SELECT st_azimuth(point1, point2)"
+181,Geospatial Functions,ST_BOUNDARY(geo),st_boundary(geo),Geospatial Functions|ST_BOUNDARY,SELECT ST_BOUNDARY(geo),SELECT st_boundary(geo)
+182,Geospatial Functions,"ST_CLOSESTPOINT(geo1, geo2)","st_closestpoint(geo1, geo2)",Geospatial Functions|ST_CLOSESTPOINT,"SELECT ST_CLOSESTPOINT(geo1, geo2)","SELECT st_closestpoint(geo1, geo2)"
+183,Geospatial Functions,ST_GEOGFROMEWKT(ewkt),st_geomfromewkt(ewkt),Geospatial Functions|ST_GEOGFROMEWKT,SELECT ST_GEOGFROMEWKT(ewkt),SELECT st_geomfromewkt(ewkt)
+184,Geospatial Functions,ST_GEOGFROMTEXT(wkt),st_geomfromwkt(wkt),Geospatial Functions|ST_GEOGFROMTEXT,SELECT ST_GEOGFROMTEXT(wkt),SELECT st_geomfromwkt(wkt)
+185,Geospatial Functions,ST_GEOGPOINT(lng lat),st_point(lng lat),Geospatial Functions|ST_GEOGPOINT,"SELECT ST_GEOGPOINT(lng, lat)","SELECT st_point(lng, lat)"
+186,Geospatial Functions,ST_DISTANCE(geo1 geo2),st_distance(geo1 geo2),Geospatial Functions|ST_DISTANCE,"SELECT ST_DISTANCE(geo1, geo2)","SELECT st_distance(geo1, geo2)"
+187,Geospatial Functions,ST_AREA(geo),st_area(geo),Geospatial Functions|ST_AREA,SELECT ST_AREA(geo),SELECT st_area(geo)
+188,Geospatial Functions,ST_CONTAINS(geo1 geo2),st_contains(geo1 geo2),Geospatial Functions|ST_CONTAINS,"SELECT ST_CONTAINS(geo1, geo2)","SELECT st_contains(geo1, geo2)"
+189,Geospatial Functions,ST_INTERSECTS(geo1 geo2),st_intersects(geo1 geo2),Geospatial Functions|ST_INTERSECTS,"SELECT ST_INTERSECTS(geo1, geo2)","SELECT st_intersects(geo1, geo2)"
+190,Geospatial Functions,ST_ASTEXT(geo),st_astext(geo),Geospatial Functions|ST_ASTEXT,SELECT ST_ASTEXT(geo),SELECT st_astext(geo)
+191,Geospatial Functions,ST_ASBINARY(geo),st_asbinary(geo),Geospatial Functions|ST_ASBINARY,SELECT ST_ASBINARY(geo),SELECT st_asbinary(geo)
+192,Geospatial Functions,ST_CENTROID(geo),st_centroid(geo),Geospatial Functions|ST_CENTROID,SELECT ST_CENTROID(geo),SELECT st_centroid(geo)
+193,Geospatial Functions,ST_UNION(geo1 geo2),st_union(geo1 geo2),Geospatial Functions|ST_UNION,"SELECT ST_UNION(geo1, geo2)","SELECT st_union(geo1, geo2)"
+194,Geospatial Functions,ST_BUFFER(geo distance),st_buffer(geo distance),Geospatial Functions|ST_BUFFER,"SELECT ST_BUFFER(geo, distance)","SELECT st_buffer(geo, distance)"
+195,Geospatial Functions,ST_WITHIN(geo1 geo2),st_within(geo1 geo2),Geospatial Functions|ST_WITHIN,"SELECT ST_WITHIN(geo1, geo2)","SELECT st_within(geo1, geo2)"
+196,Approximate Functions,APPROX_COUNT_DISTINCT(col),APPROX_COUNT_DISTINCT(col),Approximate Functions|APPROX_COUNT_DISTINCT,SELECT APPROX_COUNT_DISTINCT(user_id),SELECT APPROX_COUNT_DISTINCT(user_id)
+197,Approximate Functions,"APPROX_TOP_COUNT(col, n)","APPROX_TOP_K(col, n)",Approximate Functions|APPROX_TOP_COUNT,"SELECT APPROX_TOP_COUNT(city, 10)","SELECT APPROX_TOP_K(city, 10)"
+198,Bitwise Functions,BIT_AND(col),BIT_AND(col),Bitwise Functions|BIT_AND,SELECT BIT_AND(flags),SELECT BIT_AND(flags)
+199,Bitwise Functions,BIT_OR(col),BIT_OR(col),Bitwise Functions|BIT_OR,SELECT BIT_OR(flags),SELECT BIT_OR(flags)
+200,Bitwise Functions,BIT_XOR(col),BIT_XOR(col),Bitwise Functions|BIT_XOR,SELECT BIT_XOR(flags),SELECT BIT_XOR(flags)
+201,Collation,"STRING COLLATE 'und:ci'",STRING COLLATE UTF8_LCASE,Collation|COLLATE,"CREATE TABLE t (name STRING COLLATE 'und:ci')",CREATE TABLE t (name STRING COLLATE UTF8_LCASE)
+202,Collation,"STRING COLLATE 'und:cs'",STRING COLLATE UTF8_BINARY,Collation|COLLATE,"CREATE TABLE t (name STRING COLLATE 'und:cs')",CREATE TABLE t (name STRING COLLATE UTF8_BINARY)
+203,Transaction,BEGIN TRANSACTION,BEGIN TRANSACTION,Transaction|BEGIN,BEGIN TRANSACTION,BEGIN TRANSACTION
+204,Transaction,COMMIT TRANSACTION,COMMIT TRANSACTION,Transaction|COMMIT,COMMIT TRANSACTION,COMMIT TRANSACTION
+205,Transaction,ROLLBACK TRANSACTION,ROLLBACK TRANSACTION,Transaction|ROLLBACK,ROLLBACK TRANSACTION,ROLLBACK TRANSACTION
+206,Window Functions,"COUNT(DISTINCT col) OVER (PARTITION BY p1, p2, ...)","-- Rewrite using pre-aggregation CTE and join\nlookup AS (\n  SELECT\n    p1,\n    p2,\n    p3,\n    COUNT(DISTINCT col) AS metric\n  FROM table\n  GROUP BY p1, p2, p3\n)\nSELECT\n  t.*,\n  l.metric\nFROM table t\nJOIN lookup l\n  ON t.p1 = l.p1\n  AND t.p2 = l.p2\n  AND t.p3 = l.p3","Window Functions|COUNT DISTINCT|PARTITION BY|pre-aggregate","SELECT COUNT(DISTINCT col) OVER (PARTITION BY p1, p2, p3) AS metric FROM table","WITH lookup AS (\n  SELECT p1,p2,p3, COUNT(DISTINCT col) AS metric FROM table GROUP BY p1,p2,p3\n) SELECT t.*, l.metric FROM table t JOIN lookup l ON t.p1=l.p1 AND t.p2=l.p2 AND t.p3=l.p3"

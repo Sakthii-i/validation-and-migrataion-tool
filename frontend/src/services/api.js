@@ -70,4 +70,34 @@ export const schemaAPI = {
     api.post('/schema/view', { engine, table_path: tablePath }),
 };
 
+// BigQuery -> Databricks migration converter
+export const migrationAPI = {
+  getConfig: () => api.get('/migration/config'),
+  getCacheStats: () => api.get('/migration/cache/stats'),
+  clearCache: () => api.post('/migration/cache/clear'),
+  getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
+  translateSql: (payload, signal) => api.post('/migration/translate', payload, { signal }),
+  translateCsv: (file, options = {}, signal) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('provider', options.provider || 'OpenAI');
+    formData.append('model', options.model || '');
+    formData.append('mode', options.mode || 'Auto (deterministic -> LLM migration -> validation)');
+    formData.append('api_key', options.apiKey || '');
+    formData.append('run_in_databricks', options.runInDatabricks ? 'true' : 'false');
+    formData.append('databricks_host', options.databricksConfig?.host || '');
+    formData.append('databricks_token', options.databricksConfig?.token || '');
+    formData.append('databricks_warehouse_id', options.databricksConfig?.warehouse_id || '');
+    formData.append('databricks_catalog', options.databricksConfig?.catalog || '');
+    formData.append('databricks_schema', options.databricksConfig?.schema || '');
+    formData.append('databricks_timeout_seconds', String(options.databricksConfig?.timeout_seconds ?? 90));
+    formData.append('databricks_max_rows', String(options.databricksConfig?.max_rows ?? 200));
+
+    return api.post('/migration/translate/csv', formData, {
+      signal,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
 export default api;

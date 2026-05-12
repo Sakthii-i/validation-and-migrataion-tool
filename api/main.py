@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .validation_routes import router as validation_router
 from .react_routes import router as react_router
+from .migration_routes import router as migration_router
 
 # Then, after creating the app instance, include the router:
 
@@ -47,6 +48,7 @@ app.add_middleware(
 
 app.include_router(validation_router, prefix="")
 app.include_router(react_router)
+app.include_router(migration_router)
 
 @app.post("/sessions", response_model=CreateSessionResponse, dependencies=[Depends(require_api_key)])
 def create_session_endpoint(req: CreateSessionRequest):

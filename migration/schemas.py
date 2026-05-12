@@ -1,0 +1,82 @@
+from typing import Any, Dict, List, Optional
+
+
+from pydantic import BaseModel, Field
+
+
+class DatabricksConnection(BaseModel):
+    host: str = Field(..., min_length=1)
+    token: str = Field(..., min_length=1)
+    warehouse_id: str = Field(..., min_length=1)
+    catalog: Optional[str] = None
+    schema: Optional[str] = None
+    timeout_seconds: int = 90
+    max_rows: int = 200
+
+
+class TranslateRequest(BaseModel):
+    bq_sql: str = Field(..., min_length=1)
+    provider: str = "OpenAI"
+    model: str = "gpt-5-mini"
+    mode: str = "Auto (deterministic -> LLM migration -> validation)"
+    api_key: Optional[str] = None
+    run_in_databricks: bool = False
+    databricks: Optional[DatabricksConnection] = None
+
+
+class TranslateResponse(BaseModel):
+    translated_sql: str
+    explanation: str
+    stats: Dict[str, Any]
+    final_error: Optional[str]
+    validation: Dict[str, Any]
+    suggestions: List[str]
+    execution: Optional[Dict[str, Any]] = None
+
+
+class DatabricksExecuteRequest(BaseModel):
+    sql: str = Field(..., min_length=1)
+    databricks: DatabricksConnection
+
+
+class DatabricksExecuteResponse(BaseModel):
+    execution: Dict[str, Any]
+
+
+class NormalizeRequest(BaseModel):
+    sql: str
+
+
+class NormalizeResponse(BaseModel):
+    normalized_sql: str
+
+
+class CacheClearResponse(BaseModel):
+    cleared_persistent_entries: int
+    expression_cache_cleared: bool
+
+
+class ConfigResponse(BaseModel):
+    providers: List[str]
+    provider_model_options: Dict[str, List[str]]
+    modes: List[str]
+
+
+class CsvQueryResult(BaseModel):
+    row_index: int
+    query_index: int
+    original_sql: str
+    translated_sql: str
+    explanation: str
+    stats: Dict[str, Any]
+    final_error: Optional[str]
+    validation: Dict[str, Any]
+    suggestions: List[str]
+    execution: Optional[Dict[str, Any]] = None
+
+
+class CsvTranslateResponse(BaseModel):
+    total_queries: int
+    results: List[CsvQueryResult]
+    headers: List[str] = []
+    translated_rows: List[Dict[str, str]] = []
