@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clipboard, Database, Download, GitBranch, Loader2, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
 import { migrationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
+import QueryComplexityMetrics from './QueryComplexityMetrics';
 
 const API_KEY_STORE = 'validation_tool_converter_api_keys';
+const QUERY_SESSION_STORE = 'validation_tool_query_session_id';
 const DEFAULT_MODE = 'Auto (deterministic -> LLM migration -> validation)';
 
 function loadJson(key, fallback) {
@@ -12,6 +14,18 @@ function loadJson(key, fallback) {
     return raw ? JSON.parse(raw) : fallback;
   } catch {
     return fallback;
+  }
+}
+
+function getOrCreateQuerySessionId() {
+  try {
+    const existing = window.localStorage.getItem(QUERY_SESSION_STORE);
+    if (existing) return existing;
+    const generated = window.crypto?.randomUUID?.() || `qs_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    window.localStorage.setItem(QUERY_SESSION_STORE, generated);
+    return generated;
+  } catch {
+    return `qs_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
 }
 
@@ -50,6 +64,9 @@ export default function QueryConverterSection() {
   const [gitError, setGitError] = useState('');
   const fileInputRef = useRef(null);
   const abortRef = useRef(null);
+
+  const [complexity, setComplexity] = useState(null);
+  const [querySessionId] = useState(() => getOrCreateQuerySessionId());
 
   useEffect(() => {
     Promise.all([migrationAPI.getConfig(), migrationAPI.getCacheStats()])
@@ -115,6 +132,7 @@ export default function QueryConverterSection() {
     setExplanation('');
     setCacheHit(false);
     setCopyState('idle');
+    setComplexity(null);
   };
 
   const isSnowflake = sourceEngine === 'Snowflake';
@@ -132,6 +150,7 @@ export default function QueryConverterSection() {
     api_key: selectedApiKey,
     run_in_databricks: false,
     databricks: null,
+    session_id: querySessionId,
   });
 
   const handleTranslateSql = async () => {
@@ -161,6 +180,8 @@ export default function QueryConverterSection() {
       setExecution(data.execution || null);
       setExplanation(data.explanation || '');
       setCacheHit(Number(data.stats?.cache_hits || 0) > 0);
+      const queryComplexity = data.stats?.complexity || null;
+      setComplexity(queryComplexity);
       await refreshCacheStats();
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
@@ -196,8 +217,10 @@ export default function QueryConverterSection() {
         sourceEngine: sourceEngine.toLowerCase(),
         runInDatabricks: false,
         databricksConfig: null,
+        sessionId: querySessionId,
       }, controller.signal);
-      setCsvResults(res.data.results || []);
+      const results = res.data.results || [];
+      setCsvResults(results);
       await refreshCacheStats();
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
@@ -488,6 +511,7 @@ export default function QueryConverterSection() {
             </div>
 
             <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
+            <QueryComplexityMetrics complexity={complexity} sourceLabel={sourceLabel} />
           </div>
         ) : inputMode === 'csv' ? (
           <div className="space-y-4">
@@ -524,6 +548,7 @@ export default function QueryConverterSection() {
                       <tr>
                         <th>Row</th>
                         <th>Status</th>
+                        <th>Complexity</th>
                         <th>Original SQL</th>
                         <th>Translated SQL</th>
                       </tr>
@@ -533,6 +558,15 @@ export default function QueryConverterSection() {
                         <tr key={`${row.row_index}-${row.query_index}-${index}`}>
                           <td>{row.row_index + 1}</td>
                           <td>{row.validation?.is_valid ? <span className="badge badge-pass">Valid</span> : <span className="badge badge-fail">Issue</span>}</td>
+                          <td>
+                            {row.stats?.complexity ? (
+                              <span className="badge badge-info">
+                                {row.stats.complexity.complexity_level} ({row.stats.complexity.complexity_score})
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
+                          </td>
                           <td><pre className="max-h-32 max-w-md overflow-auto whitespace-pre-wrap font-mono text-xs">{row.original_sql}</pre></td>
                           <td><pre className="max-h-32 max-w-md overflow-auto whitespace-pre-wrap font-mono text-xs">{row.translated_sql}</pre></td>
                         </tr>
@@ -612,6 +646,7 @@ export default function QueryConverterSection() {
             </div>
 
             <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
+            <QueryComplexityMetrics complexity={complexity} sourceLabel={sourceLabel} />
           </div>
         )}
       </div>

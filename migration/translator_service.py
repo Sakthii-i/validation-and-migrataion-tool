@@ -28,6 +28,7 @@ from .ast_transformer import BigQueryToDatabricksTransformer, ExpressionOptimize
 from .rule_engine import RuleEngine
 from .sql_processor import ExpressionCache, QueryChunker, SQLPreprocessor
 from .translation_cache import TranslationCache
+from .complexity_analyzer import QueryComplexityAnalyzer
 from .validator import LLMFixerPrompt, SQLValidator
 
 BASE_DIR = os.path.dirname(__file__)
@@ -140,6 +141,21 @@ class TranslatorService:
     def __init__(self):
         self._lock = threading.Lock()
         self._components: Optional[Dict[str, Any]] = None
+        # In-memory aggregate statistics for the current process.
+        # These are intentionally simple and process-local; if we need
+        # per-user or per-session isolation later, this can be extended.
+        self._session_stats: Dict[str, Any] = {
+            "total_queries_processed": 0,
+            "successful_migrations": 0,
+            "failed_migrations": 0,
+            "simple_queries": 0,
+            "medium_queries": 0,
+            "complex_queries": 0,
+            "low_risk_migrations": 0,
+            "medium_risk_migrations": 0,
+            "high_risk_migrations": 0,
+            "average_complexity_score": 0.0,
+        }
 
     def _init_components(self) -> Dict[str, Any]:
         rules_list, _, edge_cases = load_conversion_rules()
@@ -161,6 +177,43 @@ class TranslatorService:
                 if self._components is None:
                     self._components = self._init_components()
         return self._components
+
+    def _update_session_stats(self, complexity: Dict[str, Any], is_success: bool) -> Dict[str, Any]:
+        """
+        Update process-wide aggregate statistics from a single query's
+        complexity and outcome. This is a lightweight approximation of
+        Databricks Labs DQX-style rollups for the current runtime.
+        """
+        stats = self._session_stats
+
+        stats["total_queries_processed"] += 1
+        if is_success:
+            stats["successful_migrations"] += 1
+        else:
+            stats["failed_migrations"] += 1
+
+        level = (complexity.get("complexity_level") or "").upper()
+        if level == "SIMPLE":
+            stats["simple_queries"] += 1
+        elif level == "MEDIUM":
+            stats["medium_queries"] += 1
+        elif level == "COMPLEX":
+            stats["complex_queries"] += 1
+
+        risk = (complexity.get("estimated_conversion_risk") or "").lower()
+        if risk == "low":
+            stats["low_risk_migrations"] += 1
+        elif risk == "medium":
+            stats["medium_risk_migrations"] += 1
+        elif risk == "high":
+            stats["high_risk_migrations"] += 1
+
+        score = int(complexity.get("complexity_score") or 0)
+        n = stats["total_queries_processed"]
+        prev_avg = float(stats.get("average_complexity_score") or 0.0)
+        stats["average_complexity_score"] = prev_avg + (score - prev_avg) / float(max(n, 1))
+
+        return stats.copy()
 
     @staticmethod
     def _resolve_api_key(explicit_key: Optional[str], env_key: str) -> str:
@@ -395,7 +448,13 @@ class TranslatorService:
         components = self.components
         client = self.get_llm_client(provider, api_key) if use_llm else None
 
-        stats: Dict[str, Any] = {"steps": [], "llm_calls": 0, "cache_hits": 0, "chunks": 0, "errors": []}
+        stats: Dict[str, Any] = {
+            "steps": [],
+            "llm_calls": 0,
+            "cache_hits": 0,
+            "chunks": 0,
+            "errors": [],
+        }
 
         def _repair_common_llm_mistakes(sql_text: str) -> str:
             # Fix hallucinated DATE_TRUNC('date', 'WEEK') style output.
@@ -621,8 +680,40 @@ class TranslatorService:
         else:
             stats["steps"].append("Bypassed cache due to validation/LLM errors")
 
-        explanation = self._build_explanation(stats)
+        # ── Complexity & session rollups (DQX-style) ──
+        analyzer = QueryComplexityAnalyzer()
+        source_sql = bq_sql
+        try:
+            # If we later add true Snowflake source text, we can branch
+            # on source_engine here. For now, we analyze the provided
+            # input SQL, which is BigQuery or Snowflake depending on
+            # upstream usage.
+            complexity = analyzer.analyze(source_sql)
+        except Exception as exc:
+            complexity = {
+                "complexity_level": "SIMPLE",
+                "complexity_score": 0,
+                "indicators": [],
+                "tables_referenced": 0,
+                "joins_count": 0,
+                "subqueries_count": 0,
+                "aggregations": False,
+                "window_functions": False,
+                "cte_count": 0,
+                "set_operations": False,
+                "estimated_conversion_risk": "low",
+                "conversion_risk_factors": [f"Complexity analysis failed: {exc}"],
+                "vendor_specific_functions": [],
+            }
+
         final_error = "\n".join(stats["errors"]) if stats["errors"] else None
+        is_success = not final_error
+        session_stats = self._update_session_stats(complexity, is_success=is_success)
+
+        stats["complexity"] = complexity
+        stats["session"] = session_stats
+
+        explanation = self._build_explanation(stats)
         return final_sql, explanation, stats, final_error
 
     def _llm_fix_with_prompt(

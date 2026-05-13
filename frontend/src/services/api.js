@@ -74,6 +74,12 @@ export const schemaAPI = {
 export const migrationAPI = {
   getConfig: () => api.get('/migration/config'),
   getCacheStats: () => api.get('/migration/cache/stats'),
+  getSessionStats: (sessionId = null) => {
+    if (sessionId) {
+      return api.get('/migration/session-stats', { params: { session_id: sessionId } });
+    }
+    return api.get('/migration/session-stats');
+  },
   clearCache: () => api.post('/migration/cache/clear'),
   getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
   getGitFiles: (payload, signal) => api.post('/migration/git/files', payload, { signal }),
@@ -96,6 +102,7 @@ export const migrationAPI = {
     formData.append('databricks_schema', options.databricksConfig?.schema || '');
     formData.append('databricks_timeout_seconds', String(options.databricksConfig?.timeout_seconds ?? 90));
     formData.append('databricks_max_rows', String(options.databricksConfig?.max_rows ?? 200));
+    formData.append('session_id', options.sessionId || options.session_id || '');
 
     return api.post('/migration/translate/csv', formData, {
       signal,

@@ -23,6 +23,7 @@ class TranslateRequest(BaseModel):
     api_key: Optional[str] = None
     run_in_databricks: bool = False
     databricks: Optional[DatabricksConnection] = None
+    session_id: Optional[str] = None
 
 
 class TranslateResponse(BaseModel):
@@ -52,6 +53,11 @@ class StoredExecuteRequest(BaseModel):
     model: str = "gpt-5-mini"
     api_key: Optional[str] = None
     session_id: Optional[str] = None
+
+
+class QueryStatsResponse(BaseModel):
+    session_id: Optional[str] = None
+    stats: Dict[str, int]
 
 
 class NormalizeRequest(BaseModel):

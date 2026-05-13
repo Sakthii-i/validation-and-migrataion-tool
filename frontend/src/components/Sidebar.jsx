@@ -15,6 +15,7 @@ const navItems = [
 
 const toolItems = [
   { to: '/bq-schema-viewer', label: 'Schema Viewer', icon: Table2 },
+  { to: '/query-dashboard', label: 'Query Dashboard', icon: BarChart3 },
   { to: '/query-converter', label: 'Query Converter', icon: RefreshCw },
 ];
 

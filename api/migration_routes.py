@@ -24,15 +24,19 @@ from validation_tool.migration.schemas import (
     NormalizeRequest,
     NormalizeResponse,
     StoredExecuteRequest,
+    QueryStatsResponse,
     TranslateRequest,
     TranslateResponse,
 )
+from validation_tool.migration.complexity_analyzer import QueryComplexityAnalyzer
 from validation_tool.migration.sql_processor import SQLPreprocessor
 from validation_tool.migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
 from validation_tool.api.auth import load_locked_credentials
+from validation_tool.backend.session_store import get_query_stats, update_query_stats
 
 router = APIRouter(prefix="/api/migration")
 service = TranslatorService()
+complexity_analyzer = QueryComplexityAnalyzer()
 SQL_FILE_SUFFIXES = {".sql", ".bql", ".ddl", ".dml", ".txt"}
 
 
@@ -247,6 +251,11 @@ def cache_stats() -> dict:
     }
 
 
+@router.get("/session-stats", response_model=QueryStatsResponse)
+def session_stats(session_id: str | None = None) -> QueryStatsResponse:
+    return QueryStatsResponse(session_id=session_id, stats=get_query_stats(session_id or ""))
+
+
 @router.post("/cache/clear", response_model=CacheClearResponse)
 def clear_cache() -> CacheClearResponse:
     components = service.components
@@ -258,9 +267,11 @@ def clear_cache() -> CacheClearResponse:
 @router.post("/translate", response_model=TranslateResponse)
 def translate(payload: TranslateRequest) -> TranslateResponse:
     if not payload.bq_sql.strip():
-        raise HTTPException(status_code=400, detail="Please enter a BigQuery SQL query.")
+        source_label = "Snowflake" if payload.source_engine.lower() == "snowflake" else "BigQuery"
+        raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
     use_llm = payload.mode == "Auto (deterministic -> LLM migration -> validation)"
+    complexity = complexity_analyzer.analyze(payload.bq_sql)
     translated_sql, explanation, stats, final_error = service.run_pipeline(
         bq_sql=payload.bq_sql,
         model=payload.model,
@@ -270,6 +281,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         force_llm=False,
         use_llm=use_llm,
     )
+    stats["complexity"] = complexity
 
     validator = service.components["validator"]
     validation = validator.validate(translated_sql)
@@ -283,6 +295,13 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             execution = service.execute_databricks_sql(translated_sql, payload.databricks.model_dump())
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
+
+    update_query_stats(
+        payload.session_id or "",
+        migrated=bool(translated_sql and not final_error),
+        validated=False,
+        complexity_level=complexity.get("complexity_level"),
+    )
 
     return TranslateResponse(
         translated_sql=translated_sql,
@@ -414,6 +433,7 @@ async def translate_csv(
     databricks_schema: str = Form(""),
     databricks_timeout_seconds: int = Form(90),
     databricks_max_rows: int = Form(200),
+    session_id: str = Form(""),
 ):
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a .csv file.")
@@ -469,6 +489,7 @@ async def translate_csv(
         translated_parts: list[str] = []
         for query_index, bq_sql in enumerate(_split_sql_queries(cell_value)):
             try:
+                complexity = complexity_analyzer.analyze(bq_sql)
                 translated_sql, explanation, stats, final_error = service.run_pipeline(
                     bq_sql=bq_sql,
                     model=model,
@@ -478,6 +499,7 @@ async def translate_csv(
                     force_llm=False,
                     use_llm=use_llm,
                 )
+                stats["complexity"] = complexity
                 validation = validator.validate(translated_sql)
                 suggestions = validator.suggest_fixes(validation) if not validation.is_valid else []
                 execution = None
@@ -486,6 +508,13 @@ async def translate_csv(
                         execution = service.execute_databricks_sql(translated_sql, databricks_cfg)
                     except Exception as exc:
                         execution = {"status": "FAILED", "error": str(exc)}
+
+                update_query_stats(
+                    session_id.strip(),
+                    migrated=bool(translated_sql and not final_error),
+                    validated=False,
+                    complexity_level=complexity.get("complexity_level"),
+                )
 
                 translated_parts.append(translated_sql)
                 results.append(CsvQueryResult(
