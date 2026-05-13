@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import csv
 import io
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -12,16 +17,196 @@ from validation_tool.migration.schemas import (
     CsvTranslateResponse,
     DatabricksExecuteRequest,
     DatabricksExecuteResponse,
+    GitFileRequest,
+    GitFileResponse,
+    GitFilesRequest,
+    GitFilesResponse,
     NormalizeRequest,
     NormalizeResponse,
+    StoredExecuteRequest,
     TranslateRequest,
     TranslateResponse,
 )
 from validation_tool.migration.sql_processor import SQLPreprocessor
 from validation_tool.migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
+from validation_tool.api.auth import load_locked_credentials
 
 router = APIRouter(prefix="/api/migration")
 service = TranslatorService()
+SQL_FILE_SUFFIXES = {".sql", ".bql", ".ddl", ".dml", ".txt"}
+
+
+def _backend_credential_password() -> str:
+    import os
+
+    return (os.getenv("CREDENTIAL_PASSWORD") or "").strip()
+
+
+def _stored_databricks_config() -> dict:
+    password = _backend_credential_password()
+    if not password:
+        raise HTTPException(status_code=500, detail="Server is missing CREDENTIAL_PASSWORD for stored Databricks credentials.")
+
+    locked = load_locked_credentials(password)
+    databricks = locked["databricks"]
+    return {
+        "host": databricks["server_hostname"],
+        "token": databricks["access_token"],
+        "warehouse_id": databricks["http_path"],
+        "catalog": None,
+        "schema": None,
+        "timeout_seconds": 90,
+        "max_rows": 5,
+    }
+
+
+def _is_missing_object_error(message: str) -> bool:
+    text = (message or "").lower()
+    patterns = [
+        "table or view not found",
+        "table not found",
+        "schema not found",
+        "catalog not found",
+        "object not found",
+        "does not exist",
+        "not found",
+        "unresolved relation",
+        "no such table",
+    ]
+    return any(pattern in text for pattern in patterns)
+
+
+def _sample_query(sql: str) -> str:
+    cleaned = (sql or "").strip().rstrip(";")
+    return f"SELECT * FROM ({cleaned}) AS source_query_sample LIMIT 5"
+
+
+def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
+    if (source_engine or "").strip().lower() != "snowflake" or not (source_sql or "").strip():
+        return None
+
+    cursor = None
+    try:
+        from validation_tool.api.react_routes import _get_session
+        from validation_tool.validation_engine import normalize_result
+
+        session = _get_session(session_id)
+        conn = session["source_conn"]
+
+        cursor = conn.cursor()
+        cursor.execute(_sample_query(source_sql))
+        statement_id = getattr(cursor, "sfqid", None)
+        columns = [col[0] for col in cursor.description] if cursor.description else []
+        rows_raw = cursor.fetchall()
+        rows = [normalize_result(dict(zip(columns, row))) for row in rows_raw[:5]]
+        columns = list(rows[0].keys()) if rows else []
+        return {
+            "status": "SUCCEEDED",
+            "statement_id": statement_id,
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": True,
+        }
+    except Exception as exc:
+        return {
+            "status": "FAILED",
+            "error": str(exc),
+            "columns": [],
+            "rows": [],
+            "row_count": 0,
+        }
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+
+def _repair_databricks_sql(sql: str, error: str, provider: str, model: str, api_key: str | None) -> tuple[str | None, str | None]:
+    client = service.get_llm_client(provider, api_key)
+    if client is None:
+        return None, f"Databricks failed and {provider} API key is not available for repair."
+
+    prompt = (
+        "You are a Databricks SQL expert. Fix the SQL so it runs in Databricks SQL.\n"
+        "Return only SQL, no markdown, no explanation.\n\n"
+        f"Databricks error:\n{error}\n\n"
+        f"SQL:\n{sql}"
+    )
+    fixed_sql, llm_error = service._llm_fix_with_prompt(prompt=prompt, client=client, model=model, provider=provider)
+    if llm_error:
+        return None, llm_error
+    return fixed_sql.strip(), None
+
+
+def _run_git(args: list[str], cwd: str | None = None) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        return result.stdout
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="Git is not installed on the backend host.") from exc
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise HTTPException(status_code=400, detail=f"Git command failed: {message}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Git command timed out.") from exc
+
+
+def _clone_repo(repo_url: str, ref: str | None) -> tuple[str, str]:
+    repo = (repo_url or "").strip()
+    if not repo:
+        raise HTTPException(status_code=400, detail="Git repository URL is required.")
+
+    checkout_ref = (ref or "").strip()
+    tmp_dir = tempfile.mkdtemp(prefix="migration_git_")
+    args = ["clone", "--depth", "1", "--filter=blob:none", "--no-checkout"]
+    if checkout_ref:
+        args.extend(["--branch", checkout_ref])
+    args.extend([repo, tmp_dir])
+
+    try:
+        _run_git(args)
+        resolved_ref = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=tmp_dir).strip()
+        if resolved_ref == "HEAD":
+            resolved_ref = _run_git(["rev-parse", "--short", "HEAD"], cwd=tmp_dir).strip()
+        return tmp_dir, resolved_ref
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
+def _safe_git_path(path: str) -> str:
+    cleaned = (path or "").replace("\\", "/").strip().lstrip("/")
+    if not cleaned or cleaned.startswith("../") or "/../" in cleaned:
+        raise HTTPException(status_code=400, detail="Invalid Git file path.")
+    return cleaned
+
+
+def _list_repo_files(repo_url: str, ref: str | None) -> tuple[list[str], str]:
+    repo_dir, resolved_ref = _clone_repo(repo_url, ref)
+    try:
+        raw = _run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=repo_dir)
+        files = [line.strip() for line in raw.splitlines() if line.strip()]
+        sql_files = [file for file in files if Path(file).suffix.lower() in SQL_FILE_SUFFIXES]
+        return sorted(sql_files or files), resolved_ref
+    finally:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+
+
+def _read_repo_file(repo_url: str, ref: str | None, path: str) -> tuple[str, str]:
+    git_path = _safe_git_path(path)
+    repo_dir, resolved_ref = _clone_repo(repo_url, ref)
+    try:
+        content = _run_git(["show", f"HEAD:{git_path}"], cwd=repo_dir)
+        return content, resolved_ref
+    finally:
+        shutil.rmtree(repo_dir, ignore_errors=True)
 
 
 @router.get("/config", response_model=ConfigResponse)
@@ -39,6 +224,18 @@ def config() -> ConfigResponse:
 @router.post("/preview/normalized", response_model=NormalizeResponse)
 def normalized_preview(payload: NormalizeRequest) -> NormalizeResponse:
     return NormalizeResponse(normalized_sql=SQLPreprocessor.clean_sql(payload.sql))
+
+
+@router.post("/git/files", response_model=GitFilesResponse)
+def git_files(payload: GitFilesRequest) -> GitFilesResponse:
+    files, resolved_ref = _list_repo_files(payload.repo_url, payload.ref)
+    return GitFilesResponse(files=files, ref=resolved_ref)
+
+
+@router.post("/git/file", response_model=GitFileResponse)
+def git_file(payload: GitFileRequest) -> GitFileResponse:
+    content, resolved_ref = _read_repo_file(payload.repo_url, payload.ref, payload.path)
+    return GitFileResponse(path=payload.path, content=content, ref=resolved_ref)
 
 
 @router.get("/cache/stats")
@@ -69,6 +266,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         model=payload.model,
         provider=payload.provider,
         api_key=payload.api_key,
+        source_engine=payload.source_engine,
         force_llm=False,
         use_llm=use_llm,
     )
@@ -109,6 +307,51 @@ def execute_databricks(payload: DatabricksExecuteRequest) -> DatabricksExecuteRe
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
     return DatabricksExecuteResponse(execution=execution)
+
+
+@router.post("/databricks/execute-stored", response_model=DatabricksExecuteResponse)
+def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecuteResponse:
+    if not payload.sql.strip():
+        raise HTTPException(status_code=400, detail="SQL is required.")
+
+    source_execution = _rows_from_source_session(payload.source_engine, payload.source_sql or "", payload.session_id)
+    dbx_config = _stored_databricks_config()
+
+    try:
+        databricks_execution = service.execute_databricks_sql(payload.sql, dbx_config)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
+
+    final_execution = {
+        "source": source_execution,
+        "databricks": databricks_execution,
+    }
+
+    dbx_error = databricks_execution.get("error") if isinstance(databricks_execution, dict) else None
+    if dbx_error and not _is_missing_object_error(dbx_error):
+        repaired_sql, repair_error = _repair_databricks_sql(
+            payload.sql,
+            dbx_error,
+            payload.provider,
+            payload.model,
+            payload.api_key,
+        )
+        if repaired_sql:
+            repaired_execution = service.execute_databricks_sql(repaired_sql, dbx_config)
+            final_execution["databricks"] = repaired_execution
+            final_execution["repaired_sql"] = repaired_sql
+            final_execution["repair_message"] = "Databricks returned an error, so the SQL was repaired with LLM and run again."
+        elif repair_error:
+            final_execution["repair_message"] = repair_error
+    elif dbx_error:
+        final_execution["repair_message"] = "Databricks object/catalog/schema/table error returned. LLM repair was skipped."
+
+    if source_execution is None:
+        final_execution.pop("source")
+
+    return DatabricksExecuteResponse(execution=final_execution)
 
 
 def _split_sql_queries(text: str) -> list[str]:
@@ -159,6 +402,7 @@ def _split_sql_queries(text: str) -> list[str]:
 async def translate_csv(
     file: UploadFile = File(...),
     provider: str = Form("OpenAI"),
+    source_engine: str = Form("bigquery"),
     model: str = Form(""),
     mode: str = Form("Auto (deterministic -> LLM migration -> validation)"),
     api_key: str = Form(""),
@@ -230,6 +474,7 @@ async def translate_csv(
                     model=model,
                     provider=provider,
                     api_key=api_key or None,
+                    source_engine=source_engine,
                     force_llm=False,
                     use_llm=use_llm,
                 )

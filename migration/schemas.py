@@ -16,6 +16,7 @@ class DatabricksConnection(BaseModel):
 
 class TranslateRequest(BaseModel):
     bq_sql: str = Field(..., min_length=1)
+    source_engine: str = "bigquery"
     provider: str = "OpenAI"
     model: str = "gpt-5-mini"
     mode: str = "Auto (deterministic -> LLM migration -> validation)"
@@ -43,12 +44,44 @@ class DatabricksExecuteResponse(BaseModel):
     execution: Dict[str, Any]
 
 
+class StoredExecuteRequest(BaseModel):
+    sql: str = Field(..., min_length=1)
+    source_sql: Optional[str] = None
+    source_engine: str = "bigquery"
+    provider: str = "OpenAI"
+    model: str = "gpt-5-mini"
+    api_key: Optional[str] = None
+    session_id: Optional[str] = None
+
+
 class NormalizeRequest(BaseModel):
     sql: str
 
 
 class NormalizeResponse(BaseModel):
     normalized_sql: str
+
+
+class GitFilesRequest(BaseModel):
+    repo_url: str = Field(..., min_length=1)
+    ref: Optional[str] = None
+
+
+class GitFilesResponse(BaseModel):
+    files: List[str]
+    ref: str
+
+
+class GitFileRequest(BaseModel):
+    repo_url: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    ref: Optional[str] = None
+
+
+class GitFileResponse(BaseModel):
+    path: str
+    content: str
+    ref: str
 
 
 class CacheClearResponse(BaseModel):

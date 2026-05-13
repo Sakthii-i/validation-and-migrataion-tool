@@ -22,6 +22,7 @@ const toPayloadSettings = (settings) => {
 // CREDENTIALS SECTION
 // ═══════════════════════════════════════
 function CredentialsSection() {
+  return null;
   const {
     sourceEngine, setSourceEngine, sourceCreds, setSourceCreds,
     targetCreds, setTargetCreds, 
@@ -131,6 +132,52 @@ function CredentialsSection() {
 // ═══════════════════════════════════════
 // VALIDATION SETTINGS
 // ═══════════════════════════════════════
+function BigQueryCredentialsSection() {
+  const {
+    sourceEngine, sourceCreds, setSourceCreds,
+    connect, connectionStatus, isConnected, error,
+  } = useConnection();
+
+  if (sourceEngine !== 'BigQuery') return null;
+
+  const updateSource = (field, value) => setSourceCreds(prev => ({ ...prev, [field]: value }));
+
+  return (
+    <CollapsibleSection title="BigQuery Credentials" icon={<Database size={16} />}>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="form-group">
+          <label className="form-label">GCP Project ID</label>
+          <input className="form-input" value={sourceCreds.project_id} onChange={e => updateSource('project_id', e.target.value)} placeholder="my-gcp-project" />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Dataset Location</label>
+          <input className="form-input" value={sourceCreds.dataset_location} onChange={e => updateSource('dataset_location', e.target.value)} placeholder="US" />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Service Account Key Path</label>
+          <input className="form-input" value={sourceCreds.bq_key_path} onChange={e => updateSource('bq_key_path', e.target.value)} placeholder="/path/to/key.json" />
+        </div>
+      </div>
+
+      {error && <div className="alert alert-error mt-4">{error}</div>}
+
+      <button
+        className="btn btn-primary btn-full btn-lg mt-5"
+        onClick={connect}
+        disabled={connectionStatus === 'connecting'}
+      >
+        {connectionStatus === 'connecting' ? (
+          <><Loader2 size={18} className="animate-spin" /> Loading BigQuery Credentials...</>
+        ) : isConnected ? (
+          <><CheckCircle2 size={18} /> BigQuery Credentials Loaded</>
+        ) : (
+          <><Database size={18} /> Use BigQuery Credentials</>
+        )}
+      </button>
+    </CollapsibleSection>
+  );
+}
+
 function ValidationSettings({ settings, setSettings }) {
   const hashSelected = settings.validationType === 'deep' && settings.hash;
 
@@ -1868,7 +1915,7 @@ export default function NewValidationPage() {
         <h1 className="page-title">Run Validation</h1>
       </div>
       <div className="page-content space-y-6">
-        <CredentialsSection />
+        <BigQueryCredentialsSection />
         {activeTab !== 'csv' && activeTab !== 'config' && (
           <ValidationSettings settings={settings} setSettings={setSettings} />
         )}

@@ -76,10 +76,14 @@ export const migrationAPI = {
   getCacheStats: () => api.get('/migration/cache/stats'),
   clearCache: () => api.post('/migration/cache/clear'),
   getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
+  getGitFiles: (payload, signal) => api.post('/migration/git/files', payload, { signal }),
+  getGitFile: (payload, signal) => api.post('/migration/git/file', payload, { signal }),
   translateSql: (payload, signal) => api.post('/migration/translate', payload, { signal }),
+  runStoredDatabricks: (payload, signal) => api.post('/migration/databricks/execute-stored', payload, { signal }),
   translateCsv: (file, options = {}, signal) => {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('source_engine', options.sourceEngine || options.source_engine || 'bigquery');
     formData.append('provider', options.provider || 'OpenAI');
     formData.append('model', options.model || '');
     formData.append('mode', options.mode || 'Auto (deterministic -> LLM migration -> validation)');

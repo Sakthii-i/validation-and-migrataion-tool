@@ -168,10 +168,11 @@ class TranslatorService:
         return api_key
 
     @staticmethod
-    def _transpile_bigquery_to_databricks(sql_text: str) -> Tuple[str, Optional[str]]:
-        """Deterministic sqlglot transpile: BigQuery AST -> Databricks SQL."""
+    def _transpile_to_databricks(sql_text: str, source_dialect: str = "bigquery") -> Tuple[str, Optional[str]]:
+        """Deterministic sqlglot transpile: source SQL AST -> Databricks SQL."""
+        dialect = "snowflake" if (source_dialect or "").strip().lower() == "snowflake" else "bigquery"
         try:
-            trees = [t for t in sqlglot.parse(sql_text, read="bigquery") if t is not None]
+            trees = [t for t in sqlglot.parse(sql_text, read=dialect) if t is not None]
             if not trees:
                 raise sqlglot.errors.ParseError("Empty parse result")
             transpiled = ";\n".join(tree.sql(dialect="databricks", pretty=True) for tree in trees)
@@ -187,7 +188,7 @@ class TranslatorService:
                 )
             return transpiled, None
         except Exception as exc:
-            return sql_text, f"sqlglot BigQuery parse/transpile failed: {exc}"
+            return sql_text, f"sqlglot {dialect} parse/transpile failed: {exc}"
 
     @staticmethod
     def _validate_databricks_parse(sql_text: str) -> Optional[str]:
@@ -386,6 +387,7 @@ class TranslatorService:
         model: str,
         provider: str = "OpenAI",
         api_key: Optional[str] = None,
+        source_engine: str = "bigquery",
         force_llm: bool = False,
         use_llm: bool = True,
         progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -471,7 +473,7 @@ class TranslatorService:
                 translated_map[chunk_id] = cached_expr
                 continue
 
-            t, transpile_err = self._transpile_bigquery_to_databricks(chunk.sql)
+            t, transpile_err = self._transpile_to_databricks(chunk.sql, source_engine)
             if transpile_err:
                 # Keep deterministic behavior robust for noisy/Jinja-heavy inputs:
                 # if direct sqlglot transpile fails, fall back to legacy AST/regex path.
@@ -530,7 +532,8 @@ class TranslatorService:
             components["expr_cache"].set(cache_key, t)
             translated_map[chunk_id] = t
 
-        stats["steps"].append(f"Translated {len(order)} chunk(s) via sqlglot (read=bigquery, write=databricks); {stats['llm_calls']} LLM call(s)")
+        source_dialect = "snowflake" if (source_engine or "").strip().lower() == "snowflake" else "bigquery"
+        stats["steps"].append(f"Translated {len(order)} chunk(s) via sqlglot (read={source_dialect}, write=databricks); {stats['llm_calls']} LLM call(s)")
 
         assembled = components["chunker"].reassemble(chunks, translated_map)
 

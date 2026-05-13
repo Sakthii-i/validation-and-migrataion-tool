@@ -213,10 +213,18 @@ def establish_connection(req: ConnectRequest):
             )
 
             if engine == "BigQuery":
+                project_id = (
+                    req.source.get("project_id")
+                    or os.getenv("BQ_PROJECT_ID")
+                    or os.getenv("GOOGLE_CLOUD_PROJECT")
+                    or ""
+                )
+                key_path = req.source.get("bq_key_path") or os.getenv("BQ_KEY_PATH") or ""
+                dataset_location = req.source.get("dataset_location") or os.getenv("BQ_DATASET_LOCATION") or "US"
                 source_conn = connect_bigquery(
-                    req.source.get("project_id", ""),
-                    req.source.get("bq_key_path", ""),
-                    req.source.get("dataset_location", "US"),
+                    project_id,
+                    key_path,
+                    dataset_location,
                 )
             elif engine == "Snowflake":
                 sf_creds = creds["snowflake"]

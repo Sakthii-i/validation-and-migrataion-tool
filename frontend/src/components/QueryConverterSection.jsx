@@ -1,20 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Clipboard, Database, Download, Loader2, Settings2, Upload, Wand2, X } from 'lucide-react';
+import { Clipboard, Database, Download, GitBranch, Loader2, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
 import { migrationAPI } from '../services/api';
+import { useConnection } from '../context/ConnectionContext';
 
 const API_KEY_STORE = 'validation_tool_converter_api_keys';
-const DATABRICKS_CONFIG_STORE = 'validation_tool_converter_databricks_config';
 const DEFAULT_MODE = 'Auto (deterministic -> LLM migration -> validation)';
-
-const defaultDatabricksConfig = {
-  host: '',
-  token: '',
-  warehouse_id: '',
-  catalog: '',
-  schema: '',
-  timeout_seconds: 90,
-  max_rows: 200,
-};
 
 function loadJson(key, fallback) {
   try {
@@ -26,14 +16,15 @@ function loadJson(key, fallback) {
 }
 
 export default function QueryConverterSection() {
+  const { isConnected, sourceEngine, sessionId } = useConnection();
   const [config, setConfig] = useState({ providers: ['OpenAI'], provider_model_options: {}, modes: [DEFAULT_MODE] });
   const [provider, setProvider] = useState('OpenAI');
   const [model, setModel] = useState('');
   const [mode, setMode] = useState(DEFAULT_MODE);
   const [apiKeys, setApiKeys] = useState(() => loadJson(API_KEY_STORE, { OpenAI: '', Gemini: '', Claude: '' }));
-  const [runInDatabricks, setRunInDatabricks] = useState(false);
-  const [databricksConfig, setDatabricksConfig] = useState(() => loadJson(DATABRICKS_CONFIG_STORE, defaultDatabricksConfig));
   const [inputMode, setInputMode] = useState('manual');
+  const [cacheStats, setCacheStats] = useState({ persistent: {}, expression: {} });
+  const [cacheLoading, setCacheLoading] = useState(false);
 
   const [bqSql, setBqSql] = useState('');
   const [translatedSql, setTranslatedSql] = useState('');
@@ -42,20 +33,30 @@ export default function QueryConverterSection() {
   const [finalError, setFinalError] = useState('');
   const [execution, setExecution] = useState(null);
   const [explanation, setExplanation] = useState('');
+  const [cacheHit, setCacheHit] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [runningDatabricks, setRunningDatabricks] = useState(false);
   const [copyState, setCopyState] = useState('idle');
 
   const [csvFile, setCsvFile] = useState(null);
   const [csvResults, setCsvResults] = useState([]);
   const [csvError, setCsvError] = useState('');
+  const [gitRepoUrl, setGitRepoUrl] = useState('');
+  const [gitRef, setGitRef] = useState('');
+  const [gitResolvedRef, setGitResolvedRef] = useState('');
+  const [gitFiles, setGitFiles] = useState([]);
+  const [gitSelectedFile, setGitSelectedFile] = useState('');
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitError, setGitError] = useState('');
   const fileInputRef = useRef(null);
   const abortRef = useRef(null);
 
   useEffect(() => {
-    migrationAPI.getConfig()
-      .then((res) => {
-        const data = res.data;
+    Promise.all([migrationAPI.getConfig(), migrationAPI.getCacheStats()])
+      .then(([configRes, cacheRes]) => {
+        const data = configRes.data;
         setConfig(data);
+        setCacheStats(cacheRes.data || { persistent: {}, expression: {} });
         const firstProvider = data.providers?.[0] || 'OpenAI';
         setProvider(firstProvider);
         setModel(data.provider_model_options?.[firstProvider]?.[0] || '');
@@ -70,10 +71,6 @@ export default function QueryConverterSection() {
     window.localStorage.setItem(API_KEY_STORE, JSON.stringify(apiKeys));
   }, [apiKeys]);
 
-  useEffect(() => {
-    window.localStorage.setItem(DATABRICKS_CONFIG_STORE, JSON.stringify(databricksConfig));
-  }, [databricksConfig]);
-
   const models = useMemo(() => config.provider_model_options?.[provider] || [], [config, provider]);
 
   useEffect(() => {
@@ -86,10 +83,27 @@ export default function QueryConverterSection() {
     return () => abortRef.current?.abort();
   }, []);
 
+  useEffect(() => {
+    clearOutput();
+    setCsvResults([]);
+    setCsvError('');
+  }, [sourceEngine]);
+
   const selectedApiKey = apiKeys[provider] || '';
 
-  const updateDatabricksConfig = (field, value) => {
-    setDatabricksConfig((prev) => ({ ...prev, [field]: value }));
+  const refreshCacheStats = async () => {
+    const res = await migrationAPI.getCacheStats();
+    setCacheStats(res.data || { persistent: {}, expression: {} });
+  };
+
+  const handleClearCache = async () => {
+    setCacheLoading(true);
+    try {
+      await migrationAPI.clearCache();
+      await refreshCacheStats();
+    } finally {
+      setCacheLoading(false);
+    }
   };
 
   const clearOutput = () => {
@@ -99,45 +113,35 @@ export default function QueryConverterSection() {
     setFinalError('');
     setExecution(null);
     setExplanation('');
+    setCacheHit(false);
     setCopyState('idle');
   };
 
-  const validateDatabricksFields = () => {
-    if (!runInDatabricks) return '';
-    if (!databricksConfig.host.trim() || !databricksConfig.token.trim() || !databricksConfig.warehouse_id.trim()) {
-      return 'Databricks host, token, and warehouse ID are required only when Run in Databricks is enabled.';
-    }
-    return '';
-  };
+  const isSnowflake = sourceEngine === 'Snowflake';
+  const sourceLabel = isSnowflake ? 'Snowflake' : 'BigQuery';
+  const titleText = `${sourceLabel} to Databricks Query Converter`;
+  const inputLabel = `Input SQL (${sourceLabel})`;
+  const inputPlaceholder = `Paste your ${sourceLabel} SQL here...`;
+  const hasRequiredSnowflakeConnection = !isSnowflake || isConnected;
 
   const buildPayload = () => ({
+    source_engine: sourceEngine.toLowerCase(),
     provider,
     model,
     mode,
     api_key: selectedApiKey,
-    run_in_databricks: runInDatabricks,
-    databricks: runInDatabricks
-      ? {
-          host: databricksConfig.host.trim(),
-          token: databricksConfig.token.trim(),
-          warehouse_id: databricksConfig.warehouse_id.trim(),
-          catalog: databricksConfig.catalog.trim() || null,
-          schema: databricksConfig.schema.trim() || null,
-          timeout_seconds: Number(databricksConfig.timeout_seconds) || 90,
-          max_rows: Number(databricksConfig.max_rows) || 200,
-        }
-      : null,
+    run_in_databricks: false,
+    databricks: null,
   });
 
   const handleTranslateSql = async () => {
     if (!bqSql.trim()) {
-      setTranslatedSql('Please enter a BigQuery SQL query.');
+      setTranslatedSql(`Please enter a ${sourceLabel} SQL query.`);
       return;
     }
 
-    const databricksError = validateDatabricksFields();
-    if (databricksError) {
-      setTranslatedSql(databricksError);
+    if (!hasRequiredSnowflakeConnection) {
+      setTranslatedSql('Please establish a Snowflake connection first. Stored Snowflake credentials from the backend will be used.');
       return;
     }
 
@@ -156,6 +160,8 @@ export default function QueryConverterSection() {
       setFinalError(data.final_error || '');
       setExecution(data.execution || null);
       setExplanation(data.explanation || '');
+      setCacheHit(Number(data.stats?.cache_hits || 0) > 0);
+      await refreshCacheStats();
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
         setTranslatedSql('Translation cancelled.');
@@ -171,9 +177,8 @@ export default function QueryConverterSection() {
   const handleCsvTranslate = async () => {
     if (!csvFile) return;
 
-    const databricksError = validateDatabricksFields();
-    if (databricksError) {
-      setCsvError(databricksError);
+    if (!hasRequiredSnowflakeConnection) {
+      setCsvError('Please establish a Snowflake connection first. Stored Snowflake credentials from the backend will be used.');
       return;
     }
 
@@ -188,10 +193,12 @@ export default function QueryConverterSection() {
       const res = await migrationAPI.translateCsv(csvFile, {
         ...buildPayload(),
         apiKey: selectedApiKey,
-        runInDatabricks,
-        databricksConfig,
+        sourceEngine: sourceEngine.toLowerCase(),
+        runInDatabricks: false,
+        databricksConfig: null,
       }, controller.signal);
       setCsvResults(res.data.results || []);
+      await refreshCacheStats();
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
         setCsvError('CSV translation cancelled.');
@@ -201,6 +208,117 @@ export default function QueryConverterSection() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
+    }
+  };
+
+  const handleFetchGitFiles = async () => {
+    if (!gitRepoUrl.trim()) {
+      setGitError('Git repository URL is required.');
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setGitLoading(true);
+    setGitError('');
+    setGitFiles([]);
+    setGitSelectedFile('');
+    setGitResolvedRef('');
+    try {
+      const res = await migrationAPI.getGitFiles({
+        repo_url: gitRepoUrl.trim(),
+        ref: gitRef.trim() || null,
+      }, controller.signal);
+      const files = res.data.files || [];
+      setGitFiles(files);
+      setGitSelectedFile(files[0] || '');
+      setGitResolvedRef(res.data.ref || '');
+      if (!files.length) {
+        setGitError('No files found in the repository.');
+      }
+    } catch (err) {
+      if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+        setGitError(`Git fetch error: ${err.response?.data?.detail || err.message}`);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setGitLoading(false);
+    }
+  };
+
+  const handleLoadGitFile = async () => {
+    if (!gitRepoUrl.trim() || !gitSelectedFile) return;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setGitLoading(true);
+    setGitError('');
+    try {
+      const res = await migrationAPI.getGitFile({
+        repo_url: gitRepoUrl.trim(),
+        ref: gitRef.trim() || null,
+        path: gitSelectedFile,
+      }, controller.signal);
+      setBqSql(res.data.content || '');
+      setGitResolvedRef(res.data.ref || gitResolvedRef);
+      clearOutput();
+    } catch (err) {
+      if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+        setGitError(`Git file load error: ${err.response?.data?.detail || err.message}`);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setGitLoading(false);
+    }
+  };
+
+  const handleRunDatabricks = async () => {
+    if (!translatedSql.trim()) return;
+    if (isSnowflake && !isConnected) {
+      setExecution({
+        databricks: {
+          status: 'BLOCKED',
+          error: 'Please establish a Snowflake connection from the sidebar before running source and Databricks outputs.',
+          rows: [],
+          columns: [],
+        },
+      });
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setRunningDatabricks(true);
+    setExecution(null);
+    try {
+      const res = await migrationAPI.runStoredDatabricks({
+        sql: translatedSql,
+        source_sql: bqSql,
+        source_engine: sourceEngine.toLowerCase(),
+        provider,
+        model,
+        api_key: selectedApiKey,
+        session_id: sessionId,
+      }, controller.signal);
+      setExecution(res.data.execution || null);
+      if (res.data.execution?.repaired_sql) {
+        setTranslatedSql(res.data.execution.repaired_sql);
+      }
+    } catch (err) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
+        setExecution({ status: 'CANCELED', error: 'Databricks run cancelled.' });
+      } else {
+        setExecution({ status: 'FAILED', error: err.response?.data?.detail || err.message });
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setRunningDatabricks(false);
     }
   };
 
@@ -243,8 +361,8 @@ export default function QueryConverterSection() {
     <div className="space-y-5">
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-lg font-bold text-gray-900">BigQuery to Databricks Query Converter</h2>
-          <p className="text-sm text-gray-500">Convert SQL without establishing app database connections. API keys and Databricks execution settings are optional.</p>
+          <h2 className="text-lg font-bold text-gray-900">{titleText}</h2>
+          <p className="text-sm text-gray-500">Convert SQL first, then run the converted SQL in Databricks only when needed.</p>
         </div>
         <div className="inline-flex w-fit rounded-lg border border-gray-200 bg-gray-50 p-1">
           <button className={`btn btn-sm ${inputMode === 'manual' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setInputMode('manual')} type="button">
@@ -252,6 +370,9 @@ export default function QueryConverterSection() {
           </button>
           <button className={`btn btn-sm ${inputMode === 'csv' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setInputMode('csv')} type="button">
             <Upload size={14} /> CSV Upload
+          </button>
+          <button className={`btn btn-sm ${inputMode === 'git' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setInputMode('git')} type="button">
+            <GitBranch size={14} /> Git Repo
           </button>
         </div>
       </div>
@@ -263,6 +384,12 @@ export default function QueryConverterSection() {
           </div>
 
           <div className="space-y-4">
+            {isSnowflake && !hasRequiredSnowflakeConnection && (
+              <div className="alert alert-warning">
+                Please establish a Snowflake connection from the sidebar before converting.
+              </div>
+            )}
+
             <div className="form-group">
               <label className="form-label">LLM Provider</label>
               <select className="form-select" value={provider} onChange={(e) => setProvider(e.target.value)}>
@@ -300,20 +427,22 @@ export default function QueryConverterSection() {
             </fieldset>
 
             <div className="border-t border-gray-200 pt-4">
-              <label className="mb-3 flex items-center gap-2 text-sm font-medium text-gray-800">
-                <input className="form-checkbox" type="checkbox" checked={runInDatabricks} onChange={(e) => setRunInDatabricks(e.target.checked)} />
-                <Database size={15} /> Run translated SQL in Databricks
-              </label>
-
-              <div className="space-y-3">
-                <Input label="Workspace Host" value={databricksConfig.host} onChange={(value) => updateDatabricksConfig('host', value)} placeholder="adb-123.azuredatabricks.net" />
-                <Input label="Access Token" type="password" value={databricksConfig.token} onChange={(value) => updateDatabricksConfig('token', value)} />
-                <Input label="SQL Warehouse ID" value={databricksConfig.warehouse_id} onChange={(value) => updateDatabricksConfig('warehouse_id', value)} />
-                <div className="grid grid-cols-2 gap-2">
-                  <Input label="Catalog" value={databricksConfig.catalog} onChange={(value) => updateDatabricksConfig('catalog', value)} />
-                  <Input label="Schema" value={databricksConfig.schema} onChange={(value) => updateDatabricksConfig('schema', value)} />
-                </div>
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="font-semibold text-gray-900">Cache Stats</div>
+                <button className="btn btn-sm btn-outline" type="button" onClick={refreshCacheStats} disabled={cacheLoading}>
+                  <RefreshCw size={14} className={cacheLoading ? 'animate-spin' : ''} />
+                  Refresh
+                </button>
               </div>
+              <div className="grid grid-cols-1 gap-2">
+                <CacheMetric title="Persistent cache entries" value={cacheStats?.persistent?.total_entries ?? 0} />
+                <CacheMetric title="Expression cache size" value={cacheStats?.expression?.size ?? 0} />
+                <CacheMetric title="Expression cache hit rate" value={cacheStats?.expression?.hit_rate ?? '0.0%'} />
+              </div>
+              <button className="btn btn-outline btn-full mt-3" type="button" onClick={handleClearCache} disabled={cacheLoading}>
+                {cacheLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                Clear All Cache
+              </button>
             </div>
           </div>
         </div>
@@ -322,7 +451,7 @@ export default function QueryConverterSection() {
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="form-group">
-                <label className="form-label">Input SQL (BigQuery)</label>
+                <label className="form-label">{inputLabel}</label>
                 <textarea
                   className="form-textarea min-h-[360px]"
                   value={bqSql}
@@ -330,7 +459,7 @@ export default function QueryConverterSection() {
                     setBqSql(e.target.value);
                     clearOutput();
                   }}
-                  placeholder="Paste your BigQuery SQL here..."
+                  placeholder={inputPlaceholder}
                 />
               </div>
               <div className="form-group">
@@ -342,7 +471,7 @@ export default function QueryConverterSection() {
             <div className="flex flex-wrap gap-2">
               <button className="btn btn-primary" type="button" onClick={handleTranslateSql} disabled={loading}>
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
-                {runInDatabricks ? 'Convert and Run' : 'Convert SQL'}
+                Convert SQL
               </button>
               {loading && (
                 <button className="btn btn-outline" type="button" onClick={handleCancel}>
@@ -352,11 +481,15 @@ export default function QueryConverterSection() {
               <button className="btn btn-outline" type="button" onClick={handleCopy} disabled={!translatedSql}>
                 <Clipboard size={16} /> {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy Failed' : 'Copy SQL'}
               </button>
+              <button className="btn btn-success" type="button" onClick={handleRunDatabricks} disabled={!translatedSql || runningDatabricks}>
+                {runningDatabricks ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+                Run in Databricks
+              </button>
             </div>
 
-            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} />
+            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
           </div>
-        ) : (
+        ) : inputMode === 'csv' ? (
           <div className="space-y-4">
             <div
               className="flex min-h-[220px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 p-8 text-center hover:border-primary-500 hover:bg-primary-50/40"
@@ -410,6 +543,76 @@ export default function QueryConverterSection() {
               </div>
             )}
           </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-gray-200 bg-white p-4">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr,220px]">
+                <Input label="Git Repository URL" value={gitRepoUrl} onChange={setGitRepoUrl} placeholder="https://github.com/org/repo.git" />
+                <Input label="Branch / Tag / Commit" value={gitRef} onChange={setGitRef} placeholder="main" />
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="btn btn-primary" type="button" onClick={handleFetchGitFiles} disabled={gitLoading || !gitRepoUrl.trim()}>
+                  {gitLoading ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
+                  Fetch Files
+                </button>
+                {gitResolvedRef && <span className="badge badge-info">Ref: {gitResolvedRef}</span>}
+              </div>
+
+              {gitFiles.length > 0 && (
+                <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[1fr,auto] lg:items-end">
+                  <div className="form-group">
+                    <label className="form-label">Select File</label>
+                    <select className="form-select" value={gitSelectedFile} onChange={(e) => setGitSelectedFile(e.target.value)}>
+                      {gitFiles.map((file) => <option key={file} value={file}>{file}</option>)}
+                    </select>
+                  </div>
+                  <button className="btn btn-outline" type="button" onClick={handleLoadGitFile} disabled={gitLoading || !gitSelectedFile}>
+                    {gitLoading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+                    Load File
+                  </button>
+                </div>
+              )}
+
+              {gitError && <div className="alert alert-error mt-3">{gitError}</div>}
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="form-group">
+                <label className="form-label">{inputLabel}</label>
+                <textarea
+                  className="form-textarea min-h-[320px]"
+                  value={bqSql}
+                  onChange={(e) => {
+                    setBqSql(e.target.value);
+                    clearOutput();
+                  }}
+                  placeholder="Load a file from Git or paste SQL here..."
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Output SQL (Databricks)</label>
+                <textarea className="form-textarea min-h-[320px]" value={translatedSql} readOnly placeholder="Converted Databricks SQL appears here..." />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button className="btn btn-primary" type="button" onClick={handleTranslateSql} disabled={loading || !bqSql.trim()}>
+                {loading ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
+                Convert SQL
+              </button>
+              {loading && <button className="btn btn-outline" type="button" onClick={handleCancel}><X size={16} /> Cancel</button>}
+              <button className="btn btn-outline" type="button" onClick={handleCopy} disabled={!translatedSql}>
+                <Clipboard size={16} /> {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy Failed' : 'Copy SQL'}
+              </button>
+              <button className="btn btn-success" type="button" onClick={handleRunDatabricks} disabled={!translatedSql || runningDatabricks}>
+                {runningDatabricks ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+                Run in Databricks
+              </button>
+            </div>
+
+            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
+          </div>
         )}
       </div>
     </div>
@@ -425,11 +628,21 @@ function Input({ label, value, onChange, type = 'text', placeholder = '' }) {
   );
 }
 
-function ResultDetails({ validation, suggestions, finalError, execution, explanation }) {
-  if (!validation && !finalError && !execution && !explanation) return null;
+function CacheMetric({ title, value }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+      <div className="text-xs font-medium text-gray-500">{title}</div>
+      <div className="text-lg font-bold text-gray-900">{value}</div>
+    </div>
+  );
+}
+
+function ResultDetails({ validation, suggestions, finalError, execution, explanation, cacheHit }) {
+  if (!validation && !finalError && !execution && !explanation && !cacheHit) return null;
 
   return (
     <div className="space-y-3">
+      {cacheHit && <div className="alert alert-info">This translation was taken from cache.</div>}
       {validation && (
         validation.is_valid
           ? <div className="alert alert-success">SQL validated for Databricks dialect.</div>
@@ -446,23 +659,70 @@ function ResultDetails({ validation, suggestions, finalError, execution, explana
           </div>
         </div>
       )}
-      {execution && (
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <div className="mb-3 font-semibold text-gray-900">Databricks Execution</div>
-          <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-3">
-            <div><span className="text-gray-500">Status:</span> <span className="font-semibold">{execution.status || 'Unknown'}</span></div>
-            <div><span className="text-gray-500">Rows:</span> <span className="font-semibold">{execution.row_count ?? 'N/A'}</span></div>
-            <div><span className="text-gray-500">Statement:</span> <span className="font-mono text-xs">{execution.statement_id || 'N/A'}</span></div>
-          </div>
-          {execution.error && <div className="alert alert-error mt-3">{execution.error}</div>}
-        </div>
-      )}
+      {execution && <ExecutionResults execution={execution} />}
       {explanation && (
         <details className="rounded-lg border border-gray-200 bg-white p-4">
           <summary className="cursor-pointer font-semibold text-gray-900">Translation Pipeline</summary>
           <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-gray-700">{explanation}</pre>
         </details>
       )}
+    </div>
+  );
+}
+
+function ExecutionResults({ execution }) {
+  const databricks = execution.databricks || execution;
+  const source = execution.source;
+
+  return (
+    <div className="space-y-3">
+      {execution.repair_message && <div className="alert alert-info">{execution.repair_message}</div>}
+      {source ? (
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          <ResultTable title="Snowflake Output" result={source} />
+          <ResultTable title="Databricks Output" result={databricks} />
+        </div>
+      ) : (
+        <ResultTable title="Databricks Output" result={databricks} />
+      )}
+    </div>
+  );
+}
+
+function ResultTable({ title, result }) {
+  const rows = Array.isArray(result?.rows) ? result.rows.slice(0, 5) : [];
+  const columns = Array.isArray(result?.columns) ? result.columns : (rows[0] ? Object.keys(rows[0]) : []);
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="font-semibold text-gray-900">{title}</div>
+        <div className="flex flex-col items-start gap-1 text-xs text-gray-500 sm:items-end">
+          <div>Status: <span className="font-semibold">{result?.status || 'Unknown'}</span></div>
+          {result?.statement_id && (
+            <div>Statement ID: <span className="font-mono font-semibold text-gray-700">{result.statement_id}</span></div>
+          )}
+        </div>
+      </div>
+      {result?.error && <div className="alert alert-error mb-3">{result.error}</div>}
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {columns.map((column) => <td key={column}>{row[column] === null || row[column] === undefined ? '<null>' : String(row[column])}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : !result?.error ? (
+        <div className="text-sm text-gray-500">No rows returned.</div>
+      ) : null}
     </div>
   );
 }

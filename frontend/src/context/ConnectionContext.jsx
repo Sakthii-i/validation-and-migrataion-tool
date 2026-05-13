@@ -30,12 +30,16 @@ export function ConnectionProvider({ children }) {
     try {
       const payload = {
         source_engine: sourceEngine,
-        use_stored_credentials: sourceEngine === 'Snowflake' ? true : useStoredCreds,
+        use_stored_credentials: true,
         file_password: '',
         source: sourceEngine === 'BigQuery'
-          ? { project_id: sourceCreds.project_id, dataset_location: sourceCreds.dataset_location, bq_key_path: sourceCreds.bq_key_path }
-          : { account: sourceCreds.sf_account, user: sourceCreds.sf_user, password: sourceCreds.sf_password, warehouse: sourceCreds.sf_warehouse, role: sourceCreds.sf_role },
-        target: { server_hostname: targetCreds.server_hostname, http_path: targetCreds.http_path, access_token: targetCreds.access_token },
+          ? {
+              project_id: sourceCreds.project_id,
+              dataset_location: sourceCreds.dataset_location,
+              bq_key_path: sourceCreds.bq_key_path,
+            }
+          : {},
+        target: {},
       };
       const res = await connectionAPI.connect(payload);
       setSessionId(res.data.session_id);
@@ -52,6 +56,7 @@ export function ConnectionProvider({ children }) {
   const disconnect = () => {
     setConnectionStatus('disconnected');
     setSessionId(null);
+    setError(null);
   };
 
   const isConnected = connectionStatus === 'connected';

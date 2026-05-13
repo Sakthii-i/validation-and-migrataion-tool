@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConnection } from '../context/ConnectionContext';
 import {
-  LayoutDashboard, Plus, Database, BarChart3, Table2, Shield, LogOut, Plug, PlugZap, ChevronDown, RefreshCw
+  LayoutDashboard, Plus, Database, BarChart3, Table2, Shield, LogOut, Plug, PlugZap, ChevronDown, RefreshCw, Loader2
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -20,7 +20,7 @@ const toolItems = [
 
 export default function Sidebar() {
   const { user, isAdmin, logout } = useAuth();
-  const { connectionStatus, sourceEngine } = useConnection();
+  const { connectionStatus, sourceEngine, setSourceEngine, connect, disconnect, isConnected, error } = useConnection();
   const [toolsOpen, setToolsOpen] = useState(true);
 
   const statusColor = connectionStatus === 'connected'
@@ -83,6 +83,48 @@ export default function Sidebar() {
           </>
         )}
       </nav>
+
+      {/* Shared Connection Control */}
+      <div className="border-t border-white/10 px-4 py-3">
+        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-widest text-white/45">
+          Source Engine
+        </label>
+        <select
+          className="mb-2 w-full rounded-md border border-white/15 bg-white/10 px-2 py-1.5 text-xs font-medium text-white outline-none"
+          value={sourceEngine}
+          onChange={(e) => {
+            setSourceEngine(e.target.value);
+            disconnect();
+          }}
+          disabled={connectionStatus === 'connecting'}
+        >
+          <option className="text-gray-900">BigQuery</option>
+          <option className="text-gray-900">Snowflake</option>
+        </select>
+        {sourceEngine === 'Snowflake' ? (
+          <button
+            type="button"
+            className={`flex w-full items-center justify-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold transition ${
+              isConnected ? 'bg-red-500/20 text-red-100 hover:bg-red-500/30' : 'bg-white/15 text-white hover:bg-white/20'
+            } disabled:cursor-not-allowed disabled:opacity-60`}
+            onClick={isConnected ? disconnect : connect}
+            disabled={connectionStatus === 'connecting'}
+          >
+            {connectionStatus === 'connecting' ? (
+              <><Loader2 size={13} className="animate-spin" /> Connecting</>
+            ) : isConnected ? (
+              <><PlugZap size={13} /> Disconnect</>
+            ) : (
+              <><Plug size={13} /> Establish Connection</>
+            )}
+          </button>
+        ) : (
+          <div className="rounded-md bg-white/10 px-2 py-1.5 text-[10px] leading-snug text-white/70">
+            BigQuery credentials are entered in Run Validation.
+          </div>
+        )}
+        {error && <div className="mt-2 text-[10px] leading-snug text-red-200">{error}</div>}
+      </div>
 
       {/* Connection Status */}
       <div className="px-5 py-3 border-t border-white/10">
