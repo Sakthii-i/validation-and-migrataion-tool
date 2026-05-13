@@ -486,15 +486,12 @@ class TranslatorService:
             return len(n) < max(1200, int(len(o) * 0.35))
 
         cache_version = ":v2026_04_27_full_coverage"
-        provider_key = provider.lower().strip() if provider else "openai"
-        model_key = re.sub(r"\s+", "-", (model or "").lower())
-        cache_suffix = (f":llm:{provider_key}:{model_key}" if use_llm else ":det") + cache_version
-        if not force_llm:
-            cached = components["cache"].get(bq_sql + cache_suffix)
-            if cached:
-                stats["cache_hits"] = 1
-                stats["steps"].append("Cache hit; skipped all translation steps")
-                return cached["translated"], "Served from cache.", stats, None
+        cache_suffix = ":shared" + cache_version
+        cached = components["cache"].get(bq_sql + cache_suffix)
+        if cached:
+            stats["cache_hits"] = 1
+            stats["steps"].append("Cache hit; skipped all translation steps")
+            return cached["translated"], "Served from cache.", stats, None
 
         sql_no_comments, comment_map = SQLPreprocessor.extract_comments(bq_sql)
         stats["steps"].append(f"Extracted {len(comment_map)} comment(s)")

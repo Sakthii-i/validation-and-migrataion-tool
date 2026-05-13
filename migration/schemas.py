@@ -71,6 +71,17 @@ class NormalizeResponse(BaseModel):
 class GitFilesRequest(BaseModel):
     repo_url: str = Field(..., min_length=1)
     ref: Optional[str] = None
+    token: Optional[str] = None
+
+
+class GitBranchesRequest(BaseModel):
+    repo_url: str = Field(..., min_length=1)
+    token: Optional[str] = None
+
+
+class GitBranchesResponse(BaseModel):
+    branches: List[str]
+    default_branch: str
 
 
 class GitFilesResponse(BaseModel):
@@ -82,12 +93,32 @@ class GitFileRequest(BaseModel):
     repo_url: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
     ref: Optional[str] = None
+    token: Optional[str] = None
 
 
 class GitFileResponse(BaseModel):
     path: str
     content: str
     ref: str
+
+
+class GitUploadRequest(BaseModel):
+    repo_url: str = Field(..., min_length=1)
+    token: Optional[str] = None
+    content: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    mode: str = "existing"
+    branch: Optional[str] = None
+    base_branch: Optional[str] = None
+    new_branch: Optional[str] = None
+    message: Optional[str] = None
+
+
+class GitUploadResponse(BaseModel):
+    branch: str
+    path: str
+    commit_sha: Optional[str] = None
+    html_url: Optional[str] = None
 
 
 class CacheClearResponse(BaseModel):

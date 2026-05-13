@@ -82,8 +82,10 @@ export const migrationAPI = {
   },
   clearCache: () => api.post('/migration/cache/clear'),
   getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
+  getGitBranches: (payload, signal) => api.post('/migration/git/branches', payload, { signal }),
   getGitFiles: (payload, signal) => api.post('/migration/git/files', payload, { signal }),
   getGitFile: (payload, signal) => api.post('/migration/git/file', payload, { signal }),
+  uploadGitFile: (payload, signal) => api.post('/migration/git/upload', payload, { signal }),
   translateSql: (payload, signal) => api.post('/migration/translate', payload, { signal }),
   runStoredDatabricks: (payload, signal) => api.post('/migration/databricks/execute-stored', payload, { signal }),
   translateCsv: (file, options = {}, signal) => {
