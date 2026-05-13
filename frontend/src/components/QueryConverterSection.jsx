@@ -42,12 +42,25 @@ export default function QueryConverterSection() {
   const [csvResults, setCsvResults] = useState([]);
   const [csvError, setCsvError] = useState('');
   const [gitRepoUrl, setGitRepoUrl] = useState('');
-  const [gitRef, setGitRef] = useState('');
+  const [gitToken, setGitToken] = useState('');
+  const [gitBranches, setGitBranches] = useState([]);
+  const [gitBranch, setGitBranch] = useState('');
   const [gitResolvedRef, setGitResolvedRef] = useState('');
   const [gitFiles, setGitFiles] = useState([]);
   const [gitSelectedFile, setGitSelectedFile] = useState('');
   const [gitLoading, setGitLoading] = useState(false);
   const [gitError, setGitError] = useState('');
+  const [showGitUpload, setShowGitUpload] = useState(false);
+  const [gitUploadMode, setGitUploadMode] = useState('existing');
+  const [gitCreateFolder, setGitCreateFolder] = useState(false);
+  const [gitFolderMode, setGitFolderMode] = useState('existing');
+  const [gitUploadBranch, setGitUploadBranch] = useState('');
+  const [gitNewBranch, setGitNewBranch] = useState('');
+  const [gitNewFolderName, setGitNewFolderName] = useState('');
+  const [gitExistingFolder, setGitExistingFolder] = useState('');
+  const [gitNewFileName, setGitNewFileName] = useState('');
+  const [gitUploadLoading, setGitUploadLoading] = useState(false);
+  const [gitUploadMessage, setGitUploadMessage] = useState('');
   const fileInputRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -211,9 +224,51 @@ export default function QueryConverterSection() {
     }
   };
 
+  const handleFetchGitBranches = async () => {
+    if (!gitRepoUrl.trim()) {
+      setGitError('Git repository URL is required.');
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setGitLoading(true);
+    setGitError('');
+    setGitBranches([]);
+    setGitBranch('');
+    setGitUploadBranch('');
+    try {
+      const res = await migrationAPI.getGitBranches({
+        repo_url: gitRepoUrl.trim(),
+        token: gitToken.trim() || null,
+      }, controller.signal);
+      const branches = res.data.branches || [];
+      const defaultBranch = res.data.default_branch || branches[0] || '';
+      setGitBranches(branches);
+      setGitBranch(defaultBranch);
+      setGitUploadBranch(defaultBranch);
+      if (!branches.length) {
+        setGitError('No branches found in the repository.');
+      }
+    } catch (err) {
+      if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+        setGitError(`Git branch fetch error: ${err.response?.data?.detail || err.message}`);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setGitLoading(false);
+    }
+  };
+
   const handleFetchGitFiles = async () => {
     if (!gitRepoUrl.trim()) {
       setGitError('Git repository URL is required.');
+      return;
+    }
+    if (!gitBranch) {
+      setGitError('Select a branch first.');
       return;
     }
 
@@ -229,7 +284,8 @@ export default function QueryConverterSection() {
     try {
       const res = await migrationAPI.getGitFiles({
         repo_url: gitRepoUrl.trim(),
-        ref: gitRef.trim() || null,
+        ref: gitBranch,
+        token: gitToken.trim() || null,
       }, controller.signal);
       const files = res.data.files || [];
       setGitFiles(files);
@@ -260,8 +316,9 @@ export default function QueryConverterSection() {
     try {
       const res = await migrationAPI.getGitFile({
         repo_url: gitRepoUrl.trim(),
-        ref: gitRef.trim() || null,
+        ref: gitBranch,
         path: gitSelectedFile,
+        token: gitToken.trim() || null,
       }, controller.signal);
       setBqSql(res.data.content || '');
       setGitResolvedRef(res.data.ref || gitResolvedRef);
@@ -273,6 +330,81 @@ export default function QueryConverterSection() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setGitLoading(false);
+    }
+  };
+
+  const handleUploadTranslatedSql = async () => {
+    if (!translatedSql.trim()) return;
+    if (!gitRepoUrl.trim()) {
+      setGitUploadMessage('Git repository URL is required.');
+      return;
+    }
+    if (!gitToken.trim()) {
+      setGitUploadMessage('Git access token is required to upload.');
+      return;
+    }
+    if (gitUploadMode === 'existing' && !gitUploadBranch) {
+      setGitUploadMessage('Select an existing target branch.');
+      return;
+    }
+    if (gitUploadMode === 'create' && !gitNewBranch.trim()) {
+      setGitUploadMessage('New branch name is required.');
+      return;
+    }
+    if (!gitNewFileName.trim()) {
+      setGitUploadMessage('New file name is required.');
+      return;
+    }
+
+    if (gitUploadMode === 'create' && gitCreateFolder && !gitNewFolderName.trim()) {
+      setGitUploadMessage('New folder name is required.');
+      return;
+    }
+    if (gitUploadMode === 'existing' && gitFolderMode === 'new' && !gitNewFolderName.trim()) {
+      setGitUploadMessage('New folder name is required.');
+      return;
+    }
+    if (gitUploadMode === 'existing' && gitFolderMode === 'existing' && !gitExistingFolder) {
+      setGitUploadMessage('Select an existing folder.');
+      return;
+    }
+
+    const folder = gitUploadMode === 'create'
+      ? (gitCreateFolder ? gitNewFolderName.trim() : '.')
+      : gitFolderMode === 'new'
+        ? gitNewFolderName.trim()
+        : gitExistingFolder;
+    const uploadPath = folder === '.' ? gitNewFileName.trim() : `${folder.replace(/\/+$/, '')}/${gitNewFileName.trim()}`;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setGitUploadLoading(true);
+    setGitUploadMessage('');
+    try {
+      const res = await migrationAPI.uploadGitFile({
+        repo_url: gitRepoUrl.trim(),
+        token: gitToken.trim(),
+        content: translatedSql,
+        path: uploadPath,
+        mode: gitUploadMode,
+        branch: gitUploadMode === 'existing' ? gitUploadBranch : gitBranch,
+        base_branch: gitBranch,
+        new_branch: gitUploadMode === 'create' ? gitNewBranch.trim() : null,
+        message: `Upload translated Databricks SQL ${uploadPath}`,
+      }, controller.signal);
+      setGitUploadMessage(`Uploaded to ${res.data.branch}:${res.data.path}`);
+      if (res.data.branch && !gitBranches.includes(res.data.branch)) {
+        setGitBranches((prev) => [...prev, res.data.branch]);
+      }
+    } catch (err) {
+      if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
+        setGitUploadMessage(`Git upload error: ${err.response?.data?.detail || err.message}`);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setGitUploadLoading(false);
     }
   };
 
@@ -356,6 +488,20 @@ export default function QueryConverterSection() {
   };
 
   const validCsvCount = csvResults.filter((row) => row.validation?.is_valid).length;
+  const gitFolders = useMemo(() => {
+    const folders = new Set(['.']);
+    gitFiles.forEach((file) => {
+      const parts = String(file || '').split('/').filter(Boolean);
+      for (let index = 1; index < parts.length; index += 1) {
+        folders.add(parts.slice(0, index).join('/'));
+      }
+    });
+    return Array.from(folders).sort((a, b) => {
+      if (a === '.') return -1;
+      if (b === '.') return 1;
+      return a.localeCompare(b);
+    });
+  }, [gitFiles]);
 
   return (
     <div className="space-y-5">
@@ -546,13 +692,26 @@ export default function QueryConverterSection() {
         ) : (
           <div className="space-y-4">
             <div className="rounded-lg border border-gray-200 bg-white p-4">
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr,220px]">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr,260px]">
                 <Input label="Git Repository URL" value={gitRepoUrl} onChange={setGitRepoUrl} placeholder="https://github.com/org/repo.git" />
-                <Input label="Branch / Tag / Commit" value={gitRef} onChange={setGitRef} placeholder="main" />
+                <div className="form-group">
+                  <label className="form-label">Branch</label>
+                  <select className="form-select" value={gitBranch} onChange={(e) => setGitBranch(e.target.value)} disabled={!gitBranches.length}>
+                    <option value="">{gitBranches.length ? 'Select branch' : 'Fetch branches first'}</option>
+                    {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="mt-3">
+                <Input label="Git Access Token (optional)" type="password" value={gitToken} onChange={setGitToken} placeholder="Required for private repos" />
               </div>
 
               <div className="mt-3 flex flex-wrap gap-2">
-                <button className="btn btn-primary" type="button" onClick={handleFetchGitFiles} disabled={gitLoading || !gitRepoUrl.trim()}>
+                <button className="btn btn-primary" type="button" onClick={handleFetchGitBranches} disabled={gitLoading || !gitRepoUrl.trim()}>
+                  {gitLoading ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
+                  Fetch Branches
+                </button>
+                <button className="btn btn-outline" type="button" onClick={handleFetchGitFiles} disabled={gitLoading || !gitRepoUrl.trim() || !gitBranch}>
                   {gitLoading ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
                   Fetch Files
                 </button>
@@ -609,7 +768,119 @@ export default function QueryConverterSection() {
                 {runningDatabricks ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
                 Run in Databricks
               </button>
+              <button className="btn btn-outline" type="button" onClick={() => setShowGitUpload((prev) => !prev)} disabled={!translatedSql}>
+                <GitBranch size={16} /> Upload to Git
+              </button>
             </div>
+
+            {showGitUpload && translatedSql && (
+              <div className="rounded-lg border border-gray-200 bg-white p-4">
+                <div className="mb-3 font-semibold text-gray-900">Upload Translated SQL to Git</div>
+                <fieldset className="mb-4 flex flex-wrap gap-4">
+                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                    <input className="form-radio" type="radio" checked={gitUploadMode === 'create'} onChange={() => setGitUploadMode('create')} />
+                    Create new branch
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                    <input className="form-radio" type="radio" checked={gitUploadMode === 'existing'} onChange={() => setGitUploadMode('existing')} />
+                    Existing branch
+                  </label>
+                </fieldset>
+
+                {gitUploadMode === 'create' ? (
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    <Input label="New Branch Name" value={gitNewBranch} onChange={setGitNewBranch} placeholder="translated/databricks-output" />
+                    <div className="form-group">
+                      <label className="form-label">Base Branch</label>
+                      <select className="form-select" value={gitBranch} onChange={(e) => setGitBranch(e.target.value)}>
+                        {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="form-group">
+                    <label className="form-label">Target Branch</label>
+                    <select className="form-select" value={gitUploadBranch} onChange={(e) => setGitUploadBranch(e.target.value)}>
+                      <option value="">Select branch</option>
+                      {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {gitUploadMode === 'create' ? (
+                  <>
+                    <label className="mt-4 flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        className="form-checkbox"
+                        type="checkbox"
+                        checked={gitCreateFolder}
+                        onChange={(e) => setGitCreateFolder(e.target.checked)}
+                      />
+                      <span>Create folder</span>
+                    </label>
+                    {gitCreateFolder ? (
+                      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        <Input label="Folder Name" value={gitNewFolderName} onChange={setGitNewFolderName} placeholder="translated" />
+                        <Input label="New File Name" value={gitNewFileName} onChange={setGitNewFileName} placeholder="translated.sql" />
+                      </div>
+                    ) : (
+                      <div className="mt-4">
+                        <Input label="New File Name" value={gitNewFileName} onChange={setGitNewFileName} placeholder="translated.sql" />
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <fieldset className="my-4 flex flex-wrap gap-4">
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input className="form-radio" type="radio" checked={gitFolderMode === 'new'} onChange={() => setGitFolderMode('new')} />
+                        Create new folder
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input className="form-radio" type="radio" checked={gitFolderMode === 'existing'} onChange={() => setGitFolderMode('existing')} />
+                        Put in existing folder
+                      </label>
+                    </fieldset>
+
+                    {gitFolderMode === 'new' ? (
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        <Input label="New Folder Name" value={gitNewFolderName} onChange={setGitNewFolderName} placeholder="translated" />
+                        <Input label="New File Name" value={gitNewFileName} onChange={setGitNewFileName} placeholder="translated.sql" />
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        <div className="form-group">
+                          <label className="form-label">Choose Folder</label>
+                          <select
+                            className="form-select"
+                            value={gitExistingFolder}
+                            onChange={(e) => setGitExistingFolder(e.target.value)}
+                          >
+                            <option value="">Select folder</option>
+                            {gitFolders.map((folder) => (
+                              <option key={folder} value={folder}>{folder === '.' ? 'Repository root' : folder}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <Input label="New File Name" value={gitNewFileName} onChange={setGitNewFileName} placeholder="translated.sql" />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button className="btn btn-primary" type="button" onClick={handleUploadTranslatedSql} disabled={gitUploadLoading}>
+                    {gitUploadLoading ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
+                    Upload Translated SQL
+                  </button>
+                </div>
+                {gitUploadMessage && (
+                  <div className={`alert mt-3 ${gitUploadMessage.startsWith('Git upload error') ? 'alert-error' : 'alert-info'}`}>
+                    {gitUploadMessage}
+                  </div>
+                )}
+              </div>
+            )}
 
             <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
           </div>

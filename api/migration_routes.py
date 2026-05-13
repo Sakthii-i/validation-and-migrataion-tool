@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import csv
+import base64
 import io
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+import httpx
 
 from validation_tool.migration.schemas import (
     CacheClearResponse,
@@ -17,10 +21,14 @@ from validation_tool.migration.schemas import (
     CsvTranslateResponse,
     DatabricksExecuteRequest,
     DatabricksExecuteResponse,
+    GitBranchesRequest,
+    GitBranchesResponse,
     GitFileRequest,
     GitFileResponse,
     GitFilesRequest,
     GitFilesResponse,
+    GitUploadRequest,
+    GitUploadResponse,
     NormalizeRequest,
     NormalizeResponse,
     StoredExecuteRequest,
@@ -37,8 +45,6 @@ SQL_FILE_SUFFIXES = {".sql", ".bql", ".ddl", ".dml", ".txt"}
 
 
 def _backend_credential_password() -> str:
-    import os
-
     return (os.getenv("CREDENTIAL_PASSWORD") or "").strip()
 
 
@@ -138,6 +144,240 @@ def _repair_databricks_sql(sql: str, error: str, provider: str, model: str, api_
     return fixed_sql.strip(), None
 
 
+def _parse_github_repo(repo_url: str) -> tuple[str, str] | None:
+    parsed = urlparse((repo_url or "").strip())
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        return None
+
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 2:
+        return None
+
+    owner = parts[0]
+    repo = parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return owner, repo
+
+
+def _github_headers(token: str | None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "validation-tool-query-converter",
+    }
+    resolved_token = (token or os.getenv("GITHUB_TOKEN") or "").strip()
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+    return headers
+
+
+def _github_request(url: str, token: str | None = None) -> dict:
+    try:
+        response = httpx.get(
+            url,
+            headers=_github_headers(token),
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        try:
+            detail = exc.response.json().get("message", detail)
+        except Exception:
+            pass
+        if exc.response.status_code == 404 and "/repos/" in str(exc.request.url):
+            detail = (
+                "Repository or ref was not found. Check the owner/repo spelling, "
+                "or enter a Git access token for a private repository."
+            )
+        raise HTTPException(status_code=400, detail=f"GitHub request failed: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub request failed: {exc}") from exc
+
+
+def _github_send(method: str, url: str, token: str | None = None, json_payload: dict | None = None) -> dict:
+    try:
+        response = httpx.request(
+            method,
+            url,
+            headers=_github_headers(token),
+            json=json_payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json() if response.text else {}
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        try:
+            detail = exc.response.json().get("message", detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"GitHub request failed: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub request failed: {exc}") from exc
+
+
+def _github_default_ref(owner: str, repo: str, token: str | None = None) -> str:
+    data = _github_request(f"https://api.github.com/repos/{owner}/{repo}", token)
+    return data.get("default_branch") or "main"
+
+
+def _list_github_branches(repo_url: str, token: str | None = None) -> tuple[list[str], str] | None:
+    parsed = _parse_github_repo(repo_url)
+    if parsed is None:
+        return None
+
+    owner, repo = parsed
+    default_ref = _github_default_ref(owner, repo, token)
+    branches: list[str] = []
+    page = 1
+    while page <= 10:
+        data = _github_request(f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}", token)
+        if not isinstance(data, list) or not data:
+            break
+        branches.extend(str(item.get("name", "")) for item in data if item.get("name"))
+        if len(data) < 100:
+            break
+        page += 1
+
+    return branches, default_ref
+
+
+def _list_github_files(repo_url: str, ref: str | None, token: str | None = None) -> tuple[list[str], str] | None:
+    parsed = _parse_github_repo(repo_url)
+    if parsed is None:
+        return None
+
+    owner, repo = parsed
+    requested_ref = (ref or "").strip()
+    default_ref = _github_default_ref(owner, repo, token)
+    resolved_ref = requested_ref or default_ref
+    try:
+        tree = _github_request(f"https://api.github.com/repos/{owner}/{repo}/git/trees/{resolved_ref}?recursive=1", token)
+    except HTTPException as exc:
+        if not requested_ref or requested_ref == default_ref:
+            raise
+        resolved_ref = default_ref
+        try:
+            tree = _github_request(f"https://api.github.com/repos/{owner}/{repo}/git/trees/{resolved_ref}?recursive=1", token)
+        except HTTPException:
+            raise exc
+    files = [
+        item.get("path", "")
+        for item in tree.get("tree", [])
+        if item.get("type") == "blob" and item.get("path")
+    ]
+    sql_files = [file for file in files if Path(file).suffix.lower() in SQL_FILE_SUFFIXES]
+    return sorted(sql_files or files), resolved_ref
+
+
+def _read_github_file(repo_url: str, ref: str | None, path: str, token: str | None = None) -> tuple[str, str] | None:
+    parsed = _parse_github_repo(repo_url)
+    if parsed is None:
+        return None
+
+    owner, repo = parsed
+    requested_ref = (ref or "").strip()
+    default_ref = _github_default_ref(owner, repo, token)
+    resolved_ref = requested_ref or default_ref
+    git_path = _safe_git_path(path)
+    encoded_path = "/".join(quote(part, safe="") for part in git_path.split("/"))
+    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{resolved_ref}/{encoded_path}"
+
+    try:
+        response = httpx.get(raw_url, headers=_github_headers(token), timeout=30, follow_redirects=True)
+        response.raise_for_status()
+        return response.text, resolved_ref
+    except httpx.HTTPStatusError as exc:
+        if requested_ref and requested_ref != default_ref:
+            resolved_ref = default_ref
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{resolved_ref}/{encoded_path}"
+            response = httpx.get(raw_url, headers=_github_headers(token), timeout=30, follow_redirects=True)
+            response.raise_for_status()
+            return response.text, resolved_ref
+        raise HTTPException(status_code=400, detail=f"GitHub file request failed: {exc.response.text}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub file request failed: {exc}") from exc
+
+
+def _github_branch_commit_sha(owner: str, repo: str, branch: str, token: str | None) -> str:
+    encoded_branch = quote(branch, safe="")
+    data = _github_request(f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{encoded_branch}", token)
+    sha = ((data.get("object") or {}).get("sha") or "").strip()
+    if not sha:
+        raise HTTPException(status_code=400, detail=f"Could not resolve branch '{branch}'.")
+    return sha
+
+
+def _create_github_branch(owner: str, repo: str, base_branch: str, new_branch: str, token: str | None) -> str:
+    branch_name = (new_branch or "").strip()
+    if not branch_name or branch_name.startswith("/") or branch_name.endswith("/") or ".." in branch_name:
+        raise HTTPException(status_code=400, detail="Invalid new branch name.")
+
+    base_sha = _github_branch_commit_sha(owner, repo, base_branch, token)
+    payload = {"ref": f"refs/heads/{branch_name}", "sha": base_sha}
+    _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/git/refs", token, payload)
+    return branch_name
+
+
+def _github_file_sha(owner: str, repo: str, branch: str, path: str, token: str | None) -> str | None:
+    encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
+    encoded_branch = quote(branch, safe="")
+    try:
+        data = _github_request(f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded_path}?ref={encoded_branch}", token)
+        return data.get("sha")
+    except HTTPException as exc:
+        if "not found" in str(exc.detail).lower():
+            return None
+        raise
+
+
+def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
+    parsed = _parse_github_repo(payload.repo_url)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail="Upload is supported for GitHub repository URLs only.")
+
+    token = (payload.token or os.getenv("GITHUB_TOKEN") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Git access token is required to upload to GitHub.")
+
+    owner, repo = parsed
+    mode = (payload.mode or "existing").strip().lower()
+    if mode == "create":
+        base_branch = (payload.base_branch or payload.branch or "").strip()
+        if not base_branch:
+            base_branch = _github_default_ref(owner, repo, token)
+        target_branch = _create_github_branch(owner, repo, base_branch, payload.new_branch or "", token)
+    else:
+        target_branch = (payload.branch or "").strip()
+        if not target_branch:
+            raise HTTPException(status_code=400, detail="Target branch is required.")
+
+    target_path = _safe_git_path(payload.path)
+    encoded_path = "/".join(quote(part, safe="") for part in target_path.split("/"))
+    existing_sha = _github_file_sha(owner, repo, target_branch, target_path, token)
+    content_b64 = base64.b64encode(payload.content.encode("utf-8")).decode("ascii")
+
+    put_payload = {
+        "message": (payload.message or f"Upload translated SQL to {target_path}").strip(),
+        "content": content_b64,
+        "branch": target_branch,
+    }
+    if existing_sha:
+        put_payload["sha"] = existing_sha
+
+    data = _github_send("PUT", f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded_path}", token, put_payload)
+    commit = data.get("commit") or {}
+    content = data.get("content") or {}
+    return GitUploadResponse(
+        branch=target_branch,
+        path=target_path,
+        commit_sha=commit.get("sha"),
+        html_url=content.get("html_url"),
+    )
+
+
 def _run_git(args: list[str], cwd: str | None = None) -> str:
     try:
         result = subprocess.run(
@@ -188,7 +428,11 @@ def _safe_git_path(path: str) -> str:
     return cleaned
 
 
-def _list_repo_files(repo_url: str, ref: str | None) -> tuple[list[str], str]:
+def _list_repo_files(repo_url: str, ref: str | None, token: str | None = None) -> tuple[list[str], str]:
+    github_files = _list_github_files(repo_url, ref, token)
+    if github_files is not None:
+        return github_files
+
     repo_dir, resolved_ref = _clone_repo(repo_url, ref)
     try:
         raw = _run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=repo_dir)
@@ -199,7 +443,11 @@ def _list_repo_files(repo_url: str, ref: str | None) -> tuple[list[str], str]:
         shutil.rmtree(repo_dir, ignore_errors=True)
 
 
-def _read_repo_file(repo_url: str, ref: str | None, path: str) -> tuple[str, str]:
+def _read_repo_file(repo_url: str, ref: str | None, path: str, token: str | None = None) -> tuple[str, str]:
+    github_file = _read_github_file(repo_url, ref, path, token)
+    if github_file is not None:
+        return github_file
+
     git_path = _safe_git_path(path)
     repo_dir, resolved_ref = _clone_repo(repo_url, ref)
     try:
@@ -228,14 +476,28 @@ def normalized_preview(payload: NormalizeRequest) -> NormalizeResponse:
 
 @router.post("/git/files", response_model=GitFilesResponse)
 def git_files(payload: GitFilesRequest) -> GitFilesResponse:
-    files, resolved_ref = _list_repo_files(payload.repo_url, payload.ref)
+    files, resolved_ref = _list_repo_files(payload.repo_url, payload.ref, payload.token)
     return GitFilesResponse(files=files, ref=resolved_ref)
+
+
+@router.post("/git/branches", response_model=GitBranchesResponse)
+def git_branches(payload: GitBranchesRequest) -> GitBranchesResponse:
+    result = _list_github_branches(payload.repo_url, payload.token)
+    if result is None:
+        raise HTTPException(status_code=400, detail="Branch dropdown is supported for GitHub repository URLs only.")
+    branches, default_branch = result
+    return GitBranchesResponse(branches=branches, default_branch=default_branch)
 
 
 @router.post("/git/file", response_model=GitFileResponse)
 def git_file(payload: GitFileRequest) -> GitFileResponse:
-    content, resolved_ref = _read_repo_file(payload.repo_url, payload.ref, payload.path)
+    content, resolved_ref = _read_repo_file(payload.repo_url, payload.ref, payload.path, payload.token)
     return GitFileResponse(path=payload.path, content=content, ref=resolved_ref)
+
+
+@router.post("/git/upload", response_model=GitUploadResponse)
+def git_upload(payload: GitUploadRequest) -> GitUploadResponse:
+    return _upload_github_file(payload)
 
 
 @router.get("/cache/stats")
