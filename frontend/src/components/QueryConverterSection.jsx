@@ -1,12 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Clipboard, Database, Download, GitBranch, Loader2, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
-import { migrationAPI } from '../services/api';
+import { Clipboard, Database, Download, Eye, GitBranch, Loader2, Play, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
+import { migrationAPI, validationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
-import QueryComplexityMetrics from './QueryComplexityMetrics';
+import { useAuth } from '../context/AuthContext';
+import CollapsibleSection from './CollapsibleSection';
+import StatusBadge from './StatusBadge';
 
 const API_KEY_STORE = 'validation_tool_converter_api_keys';
 const QUERY_SESSION_STORE = 'validation_tool_query_session_id';
 const DEFAULT_MODE = 'Auto (deterministic -> LLM migration -> validation)';
+
+const toPayloadSettings = (settings) => {
+  const rawPercent = Number(settings.threshold);
+  const safePercent = Number.isFinite(rawPercent) ? Math.max(0, Math.min(100, rawPercent)) : 99;
+  return {
+    ...settings,
+    threshold: safePercent / 100,
+  };
+};
 
 function loadJson(key, fallback) {
   try {
@@ -31,6 +42,7 @@ function getOrCreateQuerySessionId() {
 
 export default function QueryConverterSection() {
   const { isConnected, sourceEngine, sessionId } = useConnection();
+  const { user } = useAuth();
   const [config, setConfig] = useState({ providers: ['OpenAI'], provider_model_options: {}, modes: [DEFAULT_MODE] });
   const [provider, setProvider] = useState('OpenAI');
   const [model, setModel] = useState('');
@@ -42,6 +54,19 @@ export default function QueryConverterSection() {
 
   const [bqSql, setBqSql] = useState('');
   const [translatedSql, setTranslatedSql] = useState('');
+
+  const [validationTargetSql, setValidationTargetSql] = useState('');
+
+  const [showDataValidation, setShowDataValidation] = useState(false);
+  const [validationSettings, setValidationSettings] = useState({
+    validationType: 'shallow',
+    rowCount: false, schema: false, numeric: false, hash: false,
+    useThreshold: false, threshold: 99,
+    includeTimestamp: false, caseSensitive: false,
+  });
+  const [queryValidationRunning, setQueryValidationRunning] = useState(false);
+  const [queryValidationResults, setQueryValidationResults] = useState(null);
+  const [queryValidationError, setQueryValidationError] = useState('');
   const [validation, setValidation] = useState(null);
   const [suggestions, setSuggestions] = useState([]);
   const [finalError, setFinalError] = useState('');
@@ -101,6 +126,11 @@ export default function QueryConverterSection() {
     window.localStorage.setItem(API_KEY_STORE, JSON.stringify(apiKeys));
   }, [apiKeys]);
 
+  useEffect(() => {
+    if (!showDataValidation) return;
+    setValidationTargetSql(translatedSql || '');
+  }, [showDataValidation, translatedSql]);
+
   const models = useMemo(() => config.provider_model_options?.[provider] || [], [config, provider]);
 
   useEffect(() => {
@@ -138,6 +168,7 @@ export default function QueryConverterSection() {
 
   const clearOutput = () => {
     setTranslatedSql('');
+    setValidationTargetSql('');
     setValidation(null);
     setSuggestions([]);
     setFinalError('');
@@ -145,7 +176,8 @@ export default function QueryConverterSection() {
     setExplanation('');
     setCacheHit(false);
     setCopyState('idle');
-    setComplexity(null);
+    setQueryValidationResults(null);
+    setQueryValidationError('');
   };
 
   const isSnowflake = sourceEngine === 'Snowflake';
@@ -477,6 +509,49 @@ export default function QueryConverterSection() {
     }
   };
 
+  const handleRunQueryValidation = async () => {
+    setQueryValidationError('');
+    setQueryValidationResults(null);
+
+    if (!showDataValidation) return;
+    if (!sessionId) {
+      setQueryValidationError(`No active session. Load ${sourceLabel} credentials from Run Validation first.`);
+      return;
+    }
+    if (!bqSql.trim() || !validationTargetSql.trim()) {
+      setQueryValidationError('Both source SQL and target SQL are required.');
+      return;
+    }
+    if (isSnowflake && !hasRequiredSnowflakeConnection) {
+      setQueryValidationError('Please establish a Snowflake connection from the sidebar first.');
+      return;
+    }
+
+    const metricsSelected = validationSettings.validationType === 'shallow'
+      || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
+    if (!metricsSelected) {
+      setQueryValidationError('Select at least one metric (or choose Shallow).');
+      return;
+    }
+
+    setQueryValidationRunning(true);
+    try {
+      const res = await validationAPI.runQuery({
+        session_id: sessionId,
+        validation_type: validationSettings.validationType,
+        run_by: user?.username || undefined,
+        settings: toPayloadSettings(validationSettings),
+        source_sql: bqSql,
+        target_sql: validationTargetSql,
+      });
+      setQueryValidationResults(res.data);
+    } catch (err) {
+      setQueryValidationError(err.response?.data?.detail || err.message || 'Failed to run validation.');
+    } finally {
+      setQueryValidationRunning(false);
+    }
+  };
+
   const handleCancel = () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -525,6 +600,37 @@ export default function QueryConverterSection() {
       return a.localeCompare(b);
     });
   }, [gitFiles]);
+
+  const dataValidationMetricsSelected = validationSettings.validationType === 'shallow'
+    || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
+
+  const queryValidationBlockers = useMemo(() => {
+    const blockers = [];
+    if (!showDataValidation) return blockers;
+    if (!sessionId) blockers.push('No active session. Open Run Validation and connect first.');
+    if (!bqSql.trim()) blockers.push(`${sourceLabel} source SQL is empty.`);
+    if (!validationTargetSql.trim()) blockers.push('Converted SQL for validation is empty.');
+    if (!dataValidationMetricsSelected) blockers.push('Select at least one metric (or choose Shallow).');
+    if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
+    return blockers;
+  }, [
+    showDataValidation,
+    sessionId,
+    bqSql,
+    validationTargetSql,
+    dataValidationMetricsSelected,
+    isSnowflake,
+    hasRequiredSnowflakeConnection,
+    sourceLabel,
+  ]);
+  const canRunQueryValidation = Boolean(
+    showDataValidation
+    && sessionId
+    && bqSql.trim()
+    && validationTargetSql.trim()
+    && dataValidationMetricsSelected
+    && (!isSnowflake || hasRequiredSnowflakeConnection)
+  );
 
   return (
     <div className="space-y-5">
@@ -654,7 +760,58 @@ export default function QueryConverterSection() {
                 {runningDatabricks ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
                 Run in Databricks
               </button>
+              <button
+                className={`btn btn-outline ${showDataValidation ? 'btn-primary' : ''}`}
+                type="button"
+                onClick={() => setShowDataValidation((prev) => !prev)}
+                disabled={!bqSql.trim() || !translatedSql.trim()}
+              >
+                <Play size={16} /> Data Validation
+              </button>
             </div>
+
+            {showDataValidation && (
+              <div className="space-y-4">
+                {!sessionId && (
+                  <div className="alert alert-info">
+                    Load {sourceLabel} credentials from Run Validation to enable query validation.
+                  </div>
+                )}
+                <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                <div className="form-group">
+                  <label className="form-label">Converted SQL for validation (editable)</label>
+                  <textarea
+                    className="form-textarea min-h-[240px]"
+                    value={validationTargetSql}
+                    onChange={(e) => setValidationTargetSql(e.target.value)}
+                    placeholder="Edit the converted SQL here before running validation..."
+                  />
+                  <div className="mt-1 text-xs text-gray-500">
+                    Edits here only affect Data Validation. The output SQL above is still used for Copy SQL and Run in Databricks.
+                  </div>
+                </div>
+                {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
+                {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
+                  <div className="alert alert-warning">
+                    <div className="font-semibold mb-1">Run Validation is disabled because:</div>
+                    <ul className="list-disc ml-5 text-sm">
+                      {queryValidationBlockers.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <button
+                  className="btn btn-primary btn-full btn-lg"
+                  type="button"
+                  onClick={handleRunQueryValidation}
+                  disabled={!canRunQueryValidation || queryValidationRunning}
+                >
+                  {queryValidationRunning ? <><Loader2 size={18} className="animate-spin" /> Running Validations...</> : <><Play size={18} /> Run Validation</>}
+                </button>
+                {queryValidationResults && <ResultsDisplay results={queryValidationResults} />}
+              </div>
+            )}
 
             <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
             <QueryComplexityMetrics complexity={complexity} sourceLabel={sourceLabel} />
@@ -805,7 +962,58 @@ export default function QueryConverterSection() {
               <button className="btn btn-outline" type="button" onClick={() => setShowGitUpload((prev) => !prev)} disabled={!translatedSql}>
                 <GitBranch size={16} /> Upload to Git
               </button>
+              <button
+                className={`btn btn-outline ${showDataValidation ? 'btn-primary' : ''}`}
+                type="button"
+                onClick={() => setShowDataValidation((prev) => !prev)}
+                disabled={!bqSql.trim() || !translatedSql.trim()}
+              >
+                <Play size={16} /> Data Validation
+              </button>
             </div>
+
+            {showDataValidation && (
+              <div className="space-y-4">
+                {!sessionId && (
+                  <div className="alert alert-info">
+                    Load {sourceLabel} credentials from Run Validation to enable query validation.
+                  </div>
+                )}
+                <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                <div className="form-group">
+                  <label className="form-label">Converted SQL for validation (editable)</label>
+                  <textarea
+                    className="form-textarea min-h-[240px]"
+                    value={validationTargetSql}
+                    onChange={(e) => setValidationTargetSql(e.target.value)}
+                    placeholder="Edit the converted SQL here before running validation..."
+                  />
+                  <div className="mt-1 text-xs text-gray-500">
+                    Edits here only affect Data Validation. The output SQL above is still used for Copy SQL and Run in Databricks.
+                  </div>
+                </div>
+                {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
+                {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
+                  <div className="alert alert-warning">
+                    <div className="font-semibold mb-1">Run Validation is disabled because:</div>
+                    <ul className="list-disc ml-5 text-sm">
+                      {queryValidationBlockers.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <button
+                  className="btn btn-primary btn-full btn-lg"
+                  type="button"
+                  onClick={handleRunQueryValidation}
+                  disabled={!canRunQueryValidation || queryValidationRunning}
+                >
+                  {queryValidationRunning ? <><Loader2 size={18} className="animate-spin" /> Running Validations...</> : <><Play size={18} /> Run Validation</>}
+                </button>
+                {queryValidationResults && <ResultsDisplay results={queryValidationResults} />}
+              </div>
+            )}
 
             {showGitUpload && translatedSql && (
               <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -921,6 +1129,465 @@ export default function QueryConverterSection() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function QueryComplexityMetrics({ complexity, sourceLabel }) {
+  if (!complexity) return null;
+
+  const level = complexity.complexity_level ?? complexity.level ?? 'Unknown';
+  const score = complexity.complexity_score ?? complexity.score ?? null;
+  const extraEntries = Object.entries(complexity)
+    .filter(([key, value]) => !['complexity_level', 'complexity_score', 'level', 'score'].includes(key) && (typeof value === 'number' || typeof value === 'string'))
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  return (
+    <CollapsibleSection title="Query Complexity" icon={<Eye size={16} />} defaultOpen={false}>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+          <div className="text-xs font-medium text-gray-500">{sourceLabel} Complexity Level</div>
+          <div className="text-lg font-bold text-gray-900">{level}</div>
+        </div>
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+          <div className="text-xs font-medium text-gray-500">Complexity Score</div>
+          <div className="text-lg font-bold text-gray-900">{score ?? '—'}</div>
+        </div>
+      </div>
+
+      {extraEntries.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {extraEntries.map(([key, value]) => (
+                <tr key={key}>
+                  <td className="font-mono text-xs">{key}</td>
+                  <td>{String(value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+function QueryConverterValidationSettings({ settings, setSettings }) {
+  const hashSelected = settings.validationType === 'deep' && settings.hash;
+
+  return (
+    <CollapsibleSection title="⚙️ Validation Settings" icon={<Settings2 size={16} />} defaultOpen={true}>
+      <div className="flex items-center gap-4 mb-4">
+        <label className="form-label mb-0">Validation Type:</label>
+        <div className="flex rounded-lg overflow-hidden border border-gray-300">
+          {['shallow', 'deep'].map((t) => (
+            <button
+              key={t}
+              className={`px-5 py-2 text-sm font-medium transition-colors ${
+                settings.validationType === t
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+              onClick={() => setSettings((p) => ({ ...p, validationType: t }))}
+              type="button"
+            >
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {settings.validationType === 'shallow' && (
+        <div className="alert alert-info mb-4">
+          Shallow mode automatically runs <strong>Row Count</strong> and <strong>Schema</strong> validation.
+        </div>
+      )}
+
+      {settings.validationType === 'deep' && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {[
+            { key: 'rowCount', label: 'Row Count' },
+            { key: 'schema', label: 'Schema' },
+            { key: 'numeric', label: 'Numeric Stats' },
+            { key: 'hash', label: 'Row Hash' },
+          ].map(({ key, label }) => (
+            <label key={key} className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-gray-50">
+              <input
+                type="checkbox"
+                className="form-checkbox"
+                checked={settings[key]}
+                onChange={(e) => setSettings((p) => ({ ...p, [key]: e.target.checked }))}
+              />
+              <span className="text-sm">{label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+
+      <details className="border border-gray-200 rounded-lg">
+        <summary className="px-4 py-2.5 text-sm font-medium text-gray-600 cursor-pointer hover:bg-gray-50 rounded-lg">
+          Advanced Options
+        </summary>
+        <div className="px-4 pb-4 pt-2 space-y-3 border-t border-gray-100">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={settings.useThreshold}
+              onChange={(e) => setSettings((p) => ({ ...p, useThreshold: e.target.checked }))}
+            />
+            <span className="text-sm">Use acceptable threshold for passing</span>
+          </label>
+
+          {settings.useThreshold && (
+            <div className="form-group ml-6">
+              <label className="form-label">Threshold (%)</label>
+              <input
+                type="number"
+                className="form-input w-40"
+                value={settings.threshold}
+                min="0"
+                max="100"
+                step="1"
+                onChange={(e) => setSettings((p) => ({ ...p, threshold: e.target.value }))}
+              />
+              <span className="form-hint">e.g., 99 means 99% match</span>
+            </div>
+          )}
+
+          {hashSelected && (
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="form-checkbox"
+                checked={settings.includeTimestamp}
+                onChange={(e) => setSettings((p) => ({ ...p, includeTimestamp: e.target.checked }))}
+              />
+              <span className="text-sm">Include TIMESTAMP columns in row hash</span>
+            </label>
+          )}
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="form-checkbox"
+              checked={settings.caseSensitive}
+              onChange={(e) => setSettings((p) => ({ ...p, caseSensitive: e.target.checked }))}
+            />
+            <span className="text-sm">Case-sensitive schema validation</span>
+          </label>
+        </div>
+      </details>
+    </CollapsibleSection>
+  );
+}
+
+function ResultsDisplay({ results }) {
+  const [detailRecord, setDetailRecord] = useState(null);
+
+  if (!results) return null;
+  if (results.error) return <div className="alert alert-error mt-4">❌ {results.error}</div>;
+
+  const records = results.results || results.validation_ids || [];
+  const numericRows = detailRecord?.details?.numeric?.rows || [];
+
+  const isNotSelected = (status) => {
+    if (status === null || status === undefined) return true;
+    const text = String(status).trim().toUpperCase();
+    return text === '' || text === 'N/A' || text === 'NONE' || text === '—' || text === '-';
+  };
+
+  const rowCountStatus = detailRecord?.row_count || detailRecord?.count_validation;
+  const schemaStatus = detailRecord?.schema_check;
+  const numericStatus = detailRecord?.numeric_check;
+  const hashStatus = detailRecord?.hash_validation;
+
+  const rowCountNotSelected = isNotSelected(rowCountStatus);
+  const schemaNotSelected = isNotSelected(schemaStatus);
+  const numericNotSelected = isNotSelected(numericStatus);
+  const hashNotSelected = isNotSelected(hashStatus);
+
+  const nullCountRows = numericRows.filter((row) => {
+    const srcNull = Number(row?.source_null_count || 0);
+    const tgtNull = Number(row?.target_null_count || 0);
+    return srcNull > 0 || tgtNull > 0;
+  });
+
+  const nullCountSummary = nullCountRows
+    .map((row) => {
+      const srcNull = Number(row?.source_null_count || 0);
+      const tgtNull = Number(row?.target_null_count || 0);
+      if (srcNull > 0 && tgtNull > 0) return `${row.column}: Source ${srcNull}, Target ${tgtNull}`;
+      if (srcNull > 0) return `${row.column}: Source ${srcNull}`;
+      return `${row.column}: Target ${tgtNull}`;
+    })
+    .join(' | ');
+
+  const formatNumericValue = (value) => {
+    if (value === null || value === undefined || value === '') return '—';
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(4) : value;
+  };
+
+  if (records.length === 0 && !results.error) {
+    return <div className="alert alert-success mt-4">🎉 Validations completed successfully!</div>;
+  }
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-sm font-semibold text-gray-700 mb-3">Validation Results</h3>
+      {Array.isArray(records) && records.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Target</th>
+                <th>Type</th>
+                <th>Row Count</th>
+                <th>Schema</th>
+                <th>Numeric</th>
+                <th>Hash</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r, i) => (
+                <tr key={i}>
+                  <td className="font-mono text-xs">{r.src_table || r.source || '—'}</td>
+                  <td className="font-mono text-xs">{r.tgt_table || r.target || '—'}</td>
+                  <td><StatusBadge status={r.validation_type || '—'} /></td>
+                  <td><StatusBadge status={r.row_count || r.count_validation || '—'} /></td>
+                  <td><StatusBadge status={r.schema_check || '—'} /></td>
+                  <td><StatusBadge status={r.numeric_check || '—'} /></td>
+                  <td><StatusBadge status={r.hash_validation || '—'} /></td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      title="View validation details"
+                      onClick={() => setDetailRecord(r)}
+                    >
+                      <Eye size={14} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {detailRecord && (
+        <div className="card mt-4">
+          <div className="card-header flex items-center justify-between">
+            <span>Validation Details</span>
+            <button type="button" className="btn btn-outline btn-sm" onClick={() => setDetailRecord(null)}>Close</button>
+          </div>
+          <div className="card-body space-y-6">
+            <div className="text-xs text-gray-500 font-mono">
+              {detailRecord.src_table || detailRecord.source || '—'} → {detailRecord.tgt_table || detailRecord.target || '—'}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Row Count</h4>
+              {rowCountNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.row_count?.error ? (
+                <div className="text-sm text-gray-500">{`No row count details available: ${detailRecord.details.row_count.error}`}</div>
+              ) : detailRecord.details?.row_count ? (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="p-3 border rounded-lg">Source: <strong>{detailRecord.details.row_count.source_count}</strong></div>
+                  <div className="p-3 border rounded-lg">Target: <strong>{detailRecord.details.row_count.target_count}</strong></div>
+                  <div className="p-3 border rounded-lg">Difference: <strong>{detailRecord.details.row_count.difference}</strong></div>
+                </div>
+              ) : <div className="text-sm text-gray-500">No row count details available.</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Schema Details</h4>
+              {schemaNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.schema?.rows?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>column_name_src</th>
+                        <th>column_name_tgt</th>
+                        <th>source_type</th>
+                        <th>target_type</th>
+                        <th>status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailRecord.details.schema.rows.map((row, idx) => (
+                        <tr key={idx}>
+                          <td>{row.column_name_src || '—'}</td>
+                          <td>{row.column_name_tgt || '—'}</td>
+                          <td>{row.source_type || '—'}</td>
+                          <td>{row.target_type || '—'}</td>
+                          <td>{row.status || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <div className="text-sm text-gray-500">{detailRecord.details?.schema?.error ? `No schema details available: ${detailRecord.details.schema.error}` : 'No schema details available.'}</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Null Counts</h4>
+              {numericNotSelected ? (
+                <div className="text-sm text-gray-500 mb-6">Not selected.</div>
+              ) : nullCountRows.length ? (
+                <>
+                  <div className="text-sm text-gray-700 mb-2">{nullCountSummary}</div>
+                  <div className="overflow-x-auto mb-6">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Column</th>
+                          <th>Source Null Count</th>
+                          <th>Target Null Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {nullCountRows.map((row, idx) => (
+                          <tr key={idx}>
+                            <td>{row.column}</td>
+                            <td>{row.source_null_count}</td>
+                            <td>{row.target_null_count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : <div className="text-sm text-gray-500 mb-6">{detailRecord.details?.numeric?.error ? `No null count details available: ${detailRecord.details.numeric.error}` : 'No columns are null.'}</div>}
+
+              <h4 className="text-sm font-semibold mb-2">Numeric Column Statistics</h4>
+              {numericNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.numeric?.rows?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Column</th>
+                        <th>Src Min</th>
+                        <th>Src Max</th>
+                        <th>Src Avg</th>
+                        <th>Tgt Min</th>
+                        <th>Tgt Max</th>
+                        <th>Tgt Avg</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailRecord.details.numeric.rows.map((row, idx) => (
+                        <tr key={idx}>
+                          <td>{row.column}</td>
+                          <td>{formatNumericValue(row.source_min)}</td>
+                          <td>{formatNumericValue(row.source_max)}</td>
+                          <td>{formatNumericValue(row.source_avg)}</td>
+                          <td>{formatNumericValue(row.target_min)}</td>
+                          <td>{formatNumericValue(row.target_max)}</td>
+                          <td>{formatNumericValue(row.target_avg)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : <div className="text-sm text-gray-500">{detailRecord.details?.numeric?.error ? `No numeric details available: ${detailRecord.details.numeric.error}` : 'No numeric details available.'}</div>}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-semibold mb-2">Row Hash Differences</h4>
+              {hashNotSelected ? (
+                <div className="text-sm text-gray-500">Not selected.</div>
+              ) : detailRecord.details?.row_hash ? (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div className="p-3 border rounded-lg">Source Hash Rows: <strong>{detailRecord.details.row_hash.source_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Target Hash Rows: <strong>{detailRecord.details.row_hash.target_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
+                    <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
+                  </div>
+                  <div className="p-3 border rounded-lg bg-gray-50 text-sm mb-4">
+                    <span className="font-semibold text-gray-700">Not matched columns: </span>
+                    {(detailRecord.details.row_hash.mismatched_columns || []).length > 0
+                      ? detailRecord.details.row_hash.mismatched_columns.join(', ')
+                      : 'None'}
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-xs font-semibold text-red-600 mb-2">
+                        Source not in Target ({detailRecord.details?.row_hash?.source_not_in_target_count ?? 0})
+                      </div>
+                      {detailRecord.details?.row_hash?.source_not_in_target_rows?.length ? (
+                        <div className="overflow-x-auto">
+                          <table className="data-table">
+                            <thead>
+                              <tr>
+                                {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                  <th key={c}>{c}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {detailRecord.details.row_hash.source_not_in_target_rows.map((row, i) => (
+                                <tr key={i}>
+                                  {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                    <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : <div className="text-sm text-gray-500">No rows.</div>}
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-red-600 mb-2">
+                        Target not in Source ({detailRecord.details?.row_hash?.target_not_in_source_count ?? 0})
+                      </div>
+                      {detailRecord.details?.row_hash?.target_not_in_source_rows?.length ? (
+                        <div className="overflow-x-auto">
+                          <table className="data-table">
+                            <thead>
+                              <tr>
+                                {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                  <th key={c}>{c}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {detailRecord.details.row_hash.target_not_in_source_rows.map((row, i) => (
+                                <tr key={i}>
+                                  {(detailRecord.details?.row_hash?.columns || []).map((c) => (
+                                    <td key={c} className="font-mono text-xs">{row?.[c] ?? '—'}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : <div className="text-sm text-gray-500">No rows.</div>}
+                    </div>
+                  </div>
+                </>
+              ) : <div className="text-sm text-gray-500 mb-3">{detailRecord.details?.row_hash?.error ? `No hash details available: ${detailRecord.details.row_hash.error}` : 'No hash details available.'}</div>}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

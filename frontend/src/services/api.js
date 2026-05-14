@@ -40,7 +40,7 @@ export const resultsAPI = {
 // ── Connections ──
 export const connectionAPI = {
   connect: (payload) => api.post('/connections/connect', payload),
-  disconnect: () => api.post('/connections/disconnect'),
+  disconnect: (payload = {}) => api.post('/connections/disconnect', payload),
   status: () => api.get('/connections/status'),
 };
 
@@ -57,6 +57,7 @@ export const metadataAPI = {
 // ── Validation ──
 export const validationAPI = {
   run: (payload) => api.post('/validate/run', payload),
+  runQuery: (payload) => api.post('/validate/query', payload),
   runCSV: (formData) =>
     api.post('/validate/csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
