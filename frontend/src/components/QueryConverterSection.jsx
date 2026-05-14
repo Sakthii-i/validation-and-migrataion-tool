@@ -104,6 +104,13 @@ export default function QueryConverterSection() {
 
   const [complexity, setComplexity] = useState(null);
   const [querySessionId] = useState(() => getOrCreateQuerySessionId());
+  const [queryName, setQueryName] = useState('');
+  const [queryId] = useState(() => {
+    const prefix = 'QRY';
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `${prefix}_${timestamp}_${random}`;
+  });
 
   useEffect(() => {
     Promise.all([migrationAPI.getConfig(), migrationAPI.getCacheStats()])
@@ -717,21 +724,51 @@ export default function QueryConverterSection() {
         {inputMode === 'manual' ? (
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <div className="form-group">
-                <label className="form-label">{inputLabel}</label>
-                <textarea
-                  className="form-textarea min-h-[360px]"
-                  value={bqSql}
-                  onChange={(e) => {
-                    setBqSql(e.target.value);
-                    clearOutput();
-                  }}
-                  placeholder={inputPlaceholder}
-                />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="form-group">
+                    <label className="form-label text-sm">Query Name</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={queryName}
+                      onChange={(e) => setQueryName(e.target.value)}
+                      placeholder="Enter query name..."
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label text-sm">Query ID</label>
+                    <input
+                      type="text"
+                      className="form-input bg-gray-50"
+                      value={queryId}
+                      readOnly
+                    />
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{inputLabel}</label>
+                  <textarea
+                    className="form-textarea min-h-[360px]"
+                    value={bqSql}
+                    onChange={(e) => {
+                      setBqSql(e.target.value);
+                      clearOutput();
+                    }}
+                    placeholder={inputPlaceholder}
+                  />
+                </div>
               </div>
               <div className="form-group">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <label className="form-label mb-0">Output SQL (Databricks)</label>
+                <label className="form-label">Output SQL (Databricks)</label>
+                <textarea
+                  className="form-textarea min-h-[360px]"
+                  value={translatedSql}
+                  onChange={(e) => setTranslatedSql(e.target.value)}
+                  readOnly={!isOutputEditable}
+                  placeholder="Converted Databricks SQL appears here..."
+                />
+                <div className="mt-2 flex justify-end">
                   <button
                     className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
                     type="button"
@@ -741,13 +778,6 @@ export default function QueryConverterSection() {
                     {isOutputEditable ? 'Lock' : 'Edit'}
                   </button>
                 </div>
-                <textarea
-                  className="form-textarea min-h-[360px]"
-                  value={translatedSql}
-                  onChange={(e) => setTranslatedSql(e.target.value)}
-                  readOnly={!isOutputEditable}
-                  placeholder="Converted Databricks SQL appears here..."
-                />
               </div>
             </div>
 
