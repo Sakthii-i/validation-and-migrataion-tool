@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import redis
 
+from validation_tool.backend import supabase_store
 from validation_tool.backend.settings import redis_url, session_ttl_seconds
 
 
@@ -20,6 +21,11 @@ EMPTY_QUERY_STATS = {
 
 GLOBAL_QUERY_STATS_KEY = "query_stats:global"
 GLOBAL_QUERY_STATS_HASH_KEY = "query_stats:global:v2"
+
+
+def _stats_hash_key(source_engine: str | None = None) -> str:
+    engine = (source_engine or "").strip().lower()
+    return f"{GLOBAL_QUERY_STATS_HASH_KEY}:{engine}" if engine else GLOBAL_QUERY_STATS_HASH_KEY
 
 
 def _client() -> redis.Redis:
@@ -66,13 +72,21 @@ def get_session(session_id: str) -> dict | None:
         return None
 
 
-def get_query_stats(session_id: str) -> dict:
+def get_query_stats(session_id: str, source_engine: str | None = None) -> dict:
+    supabase_stats = supabase_store.get_query_stats(source_engine)
+    if any(supabase_stats.values()):
+        return _normalize_query_stats(supabase_stats)
+
     r = _client()
 
-    payload = r.hgetall(GLOBAL_QUERY_STATS_HASH_KEY)
+    hash_key = _stats_hash_key(source_engine)
+    payload = r.hgetall(hash_key)
     if payload:
-        r.persist(GLOBAL_QUERY_STATS_HASH_KEY)
+        r.persist(hash_key)
         return _normalize_query_stats(payload)
+
+    if source_engine:
+        return dict(EMPTY_QUERY_STATS)
 
     raw = r.get(GLOBAL_QUERY_STATS_KEY)
     if not raw:
@@ -86,8 +100,8 @@ def get_query_stats(session_id: str) -> dict:
     if isinstance(legacy_payload, dict):
         normalized = _normalize_query_stats(legacy_payload)
         pipe = r.pipeline()
-        pipe.hset(GLOBAL_QUERY_STATS_HASH_KEY, mapping={key: str(value) for key, value in normalized.items()})
-        pipe.persist(GLOBAL_QUERY_STATS_HASH_KEY)
+        pipe.hset(hash_key, mapping={key: str(value) for key, value in normalized.items()})
+        pipe.persist(hash_key)
         pipe.execute()
         return normalized
 
@@ -100,8 +114,9 @@ def update_query_stats(
     migrated: bool = False,
     validated: bool = False,
     complexity_level: str | None = None,
+    source_engine: str | None = None,
 ) -> dict:
-    current = get_query_stats(session_id)
+    current = get_query_stats(session_id, source_engine=source_engine)
     current["total_queries_processed"] += 1
     if migrated:
         current["successful_migrations"] += 1
@@ -117,7 +132,9 @@ def update_query_stats(
         current["complex_queries"] += 1
 
     pipe = _client().pipeline()
-    pipe.hset(GLOBAL_QUERY_STATS_HASH_KEY, mapping={key: str(value) for key, value in current.items()})
-    pipe.persist(GLOBAL_QUERY_STATS_HASH_KEY)
+    hash_key = _stats_hash_key(source_engine)
+    pipe.hset(hash_key, mapping={key: str(value) for key, value in current.items()})
+    pipe.persist(hash_key)
     pipe.execute()
+    supabase_store.upsert_query_stats(source_engine, current)
     return current

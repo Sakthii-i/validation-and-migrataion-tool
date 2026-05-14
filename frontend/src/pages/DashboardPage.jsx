@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { dashboardAPI } from '../services/api';
+import { migrationAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import { BarChart3, CheckCircle2, Hash, Table2, Activity, PieChart } from 'lucide-react';
 import { PieChart as RechartPie, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
@@ -11,6 +12,7 @@ const PIE_COLORS = ['#2e7d32', '#c62828'];
 export default function DashboardPage() {
   const { sourceEngine } = useConnection();
   const [stats, setStats] = useState(null);
+  const [queryStats, setQueryStats] = useState(null);
   const [dateFilter, setDateFilter] = useState('All Time');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -29,6 +31,8 @@ export default function DashboardPage() {
         (sourceEngine || '').toLowerCase(),
       );
       setStats(res.data);
+      const queryRes = await migrationAPI.getSessionStats(null, (sourceEngine || '').toLowerCase());
+      setQueryStats(queryRes.data?.stats || null);
     } catch (e) {
       console.error('Dashboard fetch failed', e);
     } finally {
@@ -37,6 +41,8 @@ export default function DashboardPage() {
   };
 
   const metrics = stats ? [
+    { label: 'Queries Migrated', value: queryStats?.successful_migrations ?? 0, icon: <Activity size={20} />, color: 'from-sky-600 to-sky-800' },
+    { label: 'Queries Validated', value: queryStats?.validated_queries ?? 0, icon: <CheckCircle2 size={20} />, color: 'from-lime-600 to-lime-800' },
     { label: 'Tables Validated', value: stats.tables_validated ?? 0, icon: <Table2 size={20} />, color: 'from-indigo-600 to-indigo-800' },
     { label: 'Total Validation Runs', value: stats.total_runs ?? 0, icon: <Activity size={20} />, color: 'from-blue-600 to-blue-800' },
     { label: 'Row Count Passed', value: stats.row_count_pass ?? 0, icon: <CheckCircle2 size={20} />, color: 'from-green-600 to-green-800' },
@@ -74,7 +80,7 @@ export default function DashboardPage() {
           {loading ? (
             <div className="flex justify-center py-12"><span className="spinner"></span></div>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
               {metrics.map((m, i) => (
                 <div key={i} className={`metric-card-colored bg-gradient-to-br ${m.color}`}>
                   <div className="flex items-center gap-2 text-white/80 mb-2">

@@ -1089,6 +1089,7 @@ def run_query_validation(req: QueryValidationRequest):
         migrated=False,
         validated=True,
         complexity_level=None,
+        source_engine=sess.get("engine"),
     )
     response["temp_tables"] = {"source": src_table, "target": tgt_table}
     return response

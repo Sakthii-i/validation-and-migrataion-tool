@@ -89,12 +89,15 @@ export const schemaAPI = {
 export const migrationAPI = {
   getConfig: () => api.get('/migration/config'),
   getCacheStats: () => api.get('/migration/cache/stats'),
-  getSessionStats: (sessionId = null) => {
-    if (sessionId) {
-      return api.get('/migration/session-stats', { params: { session_id: sessionId } });
-    }
+  getSessionStats: (sessionId = null, sourceEngine = null) => {
+    const params = {};
+    if (sessionId) params.session_id = sessionId;
+    if (sourceEngine) params.source_engine = sourceEngine;
+    if (Object.keys(params).length) return api.get('/migration/session-stats', { params });
     return api.get('/migration/session-stats');
   },
+  listQueryHistory: (sourceEngine = 'bigquery') => api.get('/migration/query-history', { params: { source_engine: sourceEngine } }),
+  updateQueryHistory: (queryId, payload) => api.patch(`/migration/query-history/${queryId}`, payload),
   clearCache: () => api.post('/migration/cache/clear'),
   getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
   getGitBranches: (payload, signal) => api.post('/migration/git/branches', payload, { signal }),
