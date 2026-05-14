@@ -38,3 +38,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Generated translation cache
+migration/translation_cache.db
