@@ -54,6 +54,11 @@ export function ConnectionProvider({ children }) {
   };
 
   const disconnect = () => {
+    const sid = sessionId;
+    if (sid) {
+      // Best-effort cleanup; do not block UI.
+      connectionAPI.disconnect({ session_id: sid }).catch(() => {});
+    }
     setConnectionStatus('disconnected');
     setSessionId(null);
     setError(null);

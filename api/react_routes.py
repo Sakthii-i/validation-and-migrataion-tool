@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import io
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -33,6 +34,11 @@ from validation_tool.backend import supabase_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
+
+_BQ_TEMP_DATASET = (os.getenv("BQ_TEMP_DATASET") or "validation_tool_tmp").strip()
+_BQ_TEMP_TTL_HOURS = int(os.getenv("BQ_TEMP_TTL_HOURS") or "6")
+_DBX_TEMP_CATALOG = (os.getenv("DATABRICKS_TEMP_CATALOG") or "").strip()
+_DBX_TEMP_SCHEMA = (os.getenv("DATABRICKS_TEMP_SCHEMA") or "").strip()
 
 # ══════════════════════════════════════
 # HELPERS
@@ -234,6 +240,8 @@ def establish_connection(req: ConnectRequest):
                     sf_creds["password"],
                     sf_creds["warehouse"],
                     sf_creds.get("role"),
+                    sf_creds.get("database") or os.getenv("SNOWFLAKE_DATABASE"),
+                    sf_creds.get("schema") or os.getenv("SNOWFLAKE_SCHEMA"),
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
@@ -252,6 +260,8 @@ def establish_connection(req: ConnectRequest):
                     req.source.get("password", ""),
                     req.source.get("warehouse", ""),
                     req.source.get("role"),
+                    req.source.get("database") or os.getenv("SNOWFLAKE_DATABASE"),
+                    req.source.get("schema") or os.getenv("SNOWFLAKE_SCHEMA"),
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
@@ -267,6 +277,12 @@ def establish_connection(req: ConnectRequest):
             "source_conn": source_conn,
             "target_conn": target_conn,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "bq_dataset_location": (
+                (req.source.get("dataset_location") if isinstance(req.source, dict) else None)
+                or os.getenv("BQ_DATASET_LOCATION")
+                or "US"
+            ),
+            "temp_objects": [],
         }
 
         return {"session_id": session_id, "status": "connected"}
@@ -276,6 +292,54 @@ def establish_connection(req: ConnectRequest):
 @router.get("/connections/status")
 def connection_status():
     return {"active_sessions": len(_sessions)}
+
+
+@router.post("/connections/disconnect")
+def close_connection(session_id: Optional[str] = None):
+    """Close an active backend connection session and cleanup session temp objects."""
+    if session_id and session_id in _sessions:
+        sid = session_id
+    elif _sessions:
+        sid = list(_sessions.keys())[-1]
+    else:
+        return {"status": "ok", "message": "No active session"}
+
+    sess = _sessions.pop(sid, None)
+    if not sess:
+        return {"status": "ok", "session_id": sid}
+
+    temp_objects = sess.get("temp_objects") or []
+    for obj in list(reversed(temp_objects)):
+        try:
+            eng = (obj.get("engine") or "").lower()
+            table = obj.get("table")
+            if not table:
+                continue
+            if eng == "databricks":
+                cur = sess["target_conn"].cursor()
+                cur.execute(f"DROP TABLE IF EXISTS {table}")
+                cur.close()
+            elif eng == "snowflake":
+                cur = sess["source_conn"].cursor()
+                cur.execute(f"DROP TABLE IF EXISTS {table}")
+                cur.close()
+            elif eng == "bigquery":
+                try:
+                    sess["source_conn"].query(f"DROP TABLE IF EXISTS `{table}`").result()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    for key in ("target_conn", "source_conn"):
+        try:
+            conn = sess.get(key)
+            if conn and hasattr(conn, "close"):
+                conn.close()
+        except Exception:
+            pass
+
+    return {"status": "ok", "session_id": sid}
 
 # ══════════════════════════════════════
 # METADATA
@@ -294,6 +358,247 @@ def _get_session(session_id):
     if _sessions:
         return list(_sessions.values())[-1]
     raise HTTPException(status_code=400, detail="No active session. Please connect first.")
+
+
+def _strip_sql(text: str) -> str:
+    return (text or "").strip().rstrip(";").strip()
+
+
+def _ensure_session_temp_list(sess: dict) -> list[dict]:
+    items = sess.get("temp_objects")
+    if not isinstance(items, list):
+        items = []
+        sess["temp_objects"] = items
+    return items
+
+
+def _bq_ensure_dataset(client, dataset_id: str, location: str | None = None) -> None:
+    from google.cloud import bigquery
+
+    project = client.project
+    full = f"{project}.{dataset_id}"
+    try:
+        client.get_dataset(full)
+        return
+    except Exception:
+        pass
+
+    ds = bigquery.Dataset(full)
+    if location:
+        ds.location = location
+    try:
+        client.create_dataset(ds, exists_ok=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unable to create or access BigQuery temp dataset '{full}'. "
+                f"Set env BQ_TEMP_DATASET to an existing dataset you can write to. Error: {exc}"
+            ),
+        ) from exc
+
+
+def _materialize_source_query_to_table(sess: dict, session_id: str, sql_text: str) -> str:
+    engine = (sess.get("engine") or "").lower()
+    source_conn = sess.get("source_conn")
+    sql_text = _strip_sql(sql_text)
+    if not sql_text:
+        raise HTTPException(status_code=400, detail="Source SQL is required")
+
+    def _sf_clean(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.upper() in {"NONE", "NULL"}:
+            return None
+        return text
+
+    suffix = uuid.uuid4().hex[:10]
+    table_name = f"qc_src_{session_id.replace('-', '')[:10]}_{suffix}"
+
+    if engine == "bigquery":
+        project = getattr(source_conn, "project", None) or os.getenv("BQ_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+        if not project:
+            raise HTTPException(status_code=400, detail="BigQuery project is not configured")
+
+        dataset_location = sess.get("bq_dataset_location") or os.getenv("BQ_DATASET_LOCATION") or "US"
+        _bq_ensure_dataset(source_conn, _BQ_TEMP_DATASET, location=dataset_location)
+        fqn_backtick = f"`{project}.{_BQ_TEMP_DATASET}.{table_name}`"
+        ddl = (
+            "CREATE OR REPLACE TABLE "
+            f"{fqn_backtick} "
+            f"OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {_BQ_TEMP_TTL_HOURS} HOUR)) "
+            f"AS {sql_text}"
+        )
+
+        try:
+            job = source_conn.query(ddl)
+            job.result()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to materialize BigQuery source query: {exc}") from exc
+
+        fqn = f"{project}.{_BQ_TEMP_DATASET}.{table_name}"
+        _ensure_session_temp_list(sess).append({"engine": "bigquery", "table": fqn})
+        return fqn
+
+    if engine == "snowflake":
+        try:
+            cur = source_conn.cursor()
+            cur.execute("SELECT CURRENT_DATABASE() AS db, CURRENT_SCHEMA() AS sch")
+            row = cur.fetchone()
+            cur.close()
+            db, sch = row[0], row[1]
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to determine Snowflake database/schema: {exc}") from exc
+
+        db = _sf_clean(db)
+        sch = _sf_clean(sch)
+
+        if not db or not sch:
+            # Fallbacks when the Snowflake session has no current database/schema.
+            # 1) Explicit temp target db/schema via env
+            env_db = _sf_clean(os.getenv("SNOWFLAKE_TEMP_DATABASE"))
+            env_sch = _sf_clean(os.getenv("SNOWFLAKE_TEMP_SCHEMA"))
+            # 2) Infer from the query itself by finding the first DB.SCHEMA.TABLE reference.
+            inferred_db = inferred_sch = None
+            if not (env_db and env_sch):
+                match = re.search(r"\b([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\b", sql_text)
+                if match:
+                    inferred_db, inferred_sch = match.group(1), match.group(2)
+
+            db = db or env_db or inferred_db
+            sch = sch or env_sch or inferred_sch
+
+        if not db or not sch:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Snowflake session has no current database/schema; cannot create temporary tables for query validation. "
+                    "Fix by either: (1) referencing a fully-qualified table like DB.SCHEMA.TABLE in the source query so the tool can infer where to create temp tables, "
+                    "or (2) setting env vars SNOWFLAKE_TEMP_DATABASE and SNOWFLAKE_TEMP_SCHEMA to a writable location."
+                ),
+            )
+
+        fqn = f"{db}.{sch}.{table_name}"
+        ddl = f"CREATE OR REPLACE TEMPORARY TABLE {fqn} AS {sql_text}"
+        try:
+            cur = source_conn.cursor()
+            # Best-effort: set the context to avoid surprises with identifier resolution.
+            try:
+                cur.execute(f"USE DATABASE {db}")
+                cur.execute(f"USE SCHEMA {db}.{sch}")
+            except Exception:
+                pass
+            cur.execute(ddl)
+            cur.close()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to materialize Snowflake source query: {exc}") from exc
+
+        _ensure_session_temp_list(sess).append({"engine": "snowflake", "table": fqn})
+        return fqn
+
+    raise HTTPException(status_code=400, detail=f"Unsupported session source engine: {engine}")
+
+
+def _materialize_databricks_query_to_table(sess: dict, session_id: str, sql_text: str) -> str:
+    target_conn = sess.get("target_conn")
+    sql_text = _strip_sql(sql_text)
+    if not sql_text:
+        raise HTTPException(status_code=400, detail="Target SQL is required")
+
+    suffix = uuid.uuid4().hex[:10]
+    table_name = f"qc_tgt_{session_id.replace('-', '')[:10]}_{suffix}"
+    catalog = _DBX_TEMP_CATALOG
+    schema = _DBX_TEMP_SCHEMA
+
+    def _dbx_ident(value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _dbx_get_current_catalog_schema(cur):
+        # Databricks SQL supports current_catalog() / current_schema() in UC workspaces.
+        cur.execute("SELECT current_catalog() AS catalog, current_schema() AS schema")
+        row = cur.fetchone()
+        if not row:
+            return None, None
+        return _dbx_ident(row[0]), _dbx_ident(row[1])
+
+    def _looks_like_hive_metastore_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "uc_hive_metastore_disabled_exception" in msg
+            or "hive metastore" in msg and "disabled" in msg
+            or "legacy access" in msg
+        )
+
+    def _try_materialize(cur, cat: str, sch: str) -> str:
+        fqn = f"{cat}.{sch}.{table_name}"
+        ddl = f"CREATE OR REPLACE TABLE {fqn} AS {sql_text}"
+        try:
+            cur.execute(ddl)
+            return fqn
+        except Exception as exc:
+            msg = str(exc).lower()
+            schema_missing = (
+                "schema_not_found" in msg
+                or "schema does not exist" in msg
+                or "no such schema" in msg
+                or "unknown schema" in msg
+            )
+            if not schema_missing:
+                raise
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {cat}.{sch}")
+            cur.execute(ddl)
+            return fqn
+
+    # If not explicitly configured, prefer the session's current UC catalog/schema.
+    try:
+        cur = target_conn.cursor()
+        if not catalog or not schema:
+            current_cat, current_sch = _dbx_get_current_catalog_schema(cur)
+            catalog = catalog or current_cat
+            schema = schema or current_sch
+        cur.close()
+    except Exception:
+        # We'll let the create attempt below surface an actionable error.
+        pass
+
+    try:
+        if not catalog or not schema:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Databricks catalog/schema is not set for query validation temp tables. "
+                    "Set env vars DATABRICKS_TEMP_CATALOG and DATABRICKS_TEMP_SCHEMA to a writable Unity Catalog location."
+                ),
+            )
+
+        cur = target_conn.cursor()
+        try:
+            fqn = _try_materialize(cur, catalog, schema)
+        except Exception as exc:
+            # Common in Unity Catalog-only workspaces if someone configured hive_metastore.
+            if _looks_like_hive_metastore_error(exc):
+                current_cat, current_sch = _dbx_get_current_catalog_schema(cur)
+                if current_cat and current_sch and (current_cat.lower() != "hive_metastore"):
+                    fqn = _try_materialize(cur, current_cat, current_sch)
+                else:
+                    raise
+            else:
+                raise
+        finally:
+            cur.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to materialize Databricks target query: {exc}") from exc
+
+    _ensure_session_temp_list(sess).append({"engine": "databricks", "table": fqn})
+    return fqn
 
 @router.post("/metadata/catalogs")
 def get_catalogs_endpoint(req: MetadataRequest):
@@ -734,6 +1039,39 @@ def run_validation(req: RunValidationRequest):
         supabase_store.upsert_results(results_list)
 
     return {"results": results_list}
+
+
+class QueryValidationRequest(BaseModel):
+    session_id: Optional[str] = None
+    validation_type: str = "shallow"
+    settings: dict = {}
+    run_by: Optional[str] = None
+    source_sql: str
+    target_sql: str
+
+
+@router.post("/validate/query")
+def run_query_validation(req: QueryValidationRequest):
+    if not (req.session_id or "").strip():
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    sess = _get_session(req.session_id)
+    session_id = req.session_id
+
+    src_table = _materialize_source_query_to_table(sess, session_id, req.source_sql)
+    tgt_table = _materialize_databricks_query_to_table(sess, session_id, req.target_sql)
+
+    run_req = RunValidationRequest(
+        session_id=session_id,
+        validation_type=(req.validation_type or "shallow").strip().lower(),
+        table_pairs=[{"source": src_table, "target": tgt_table}],
+        settings=req.settings or {},
+        run_by=req.run_by,
+    )
+
+    response = run_validation(run_req)
+    response["temp_tables"] = {"source": src_table, "target": tgt_table}
+    return response
 
 # ══════════════════════════════════════
 # CSV VALIDATION
