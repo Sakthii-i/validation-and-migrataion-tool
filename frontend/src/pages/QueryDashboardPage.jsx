@@ -64,11 +64,30 @@ export default function QueryDashboardPage() {
         sql: row.translated_sql || '',
         source_sql: row.source_sql || '',
         source_engine: row.source_engine || (sourceEngine || '').toLowerCase(),
+        query_id: row.query_id,
       });
       setRunMessage(`Run ok: ${row.query_id}`);
+      await fetchStats();
     } catch (e) {
       setRunMessage(`Run error: ${e.response?.data?.detail || e.message}`);
     }
+  };
+
+  const formatLatency = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? `${n.toLocaleString()} ms` : '-';
+  };
+
+  const renderLatencyComparison = (row) => {
+    const source = Number(row.source_latency_ms || 0);
+    const target = Number(row.target_latency_ms || 0);
+    if (!(source > 0 && target > 0)) return '-';
+
+    const diff = source - target;
+    const diffLabel = `${diff > 0 ? '+' : ''}${diff.toLocaleString()} ms`;
+    if (diff > 0) return <span style={{ color: '#16a34a', fontWeight: 600 }}>{diffLabel} (faster)</span>;
+    if (diff < 0) return <span style={{ color: '#dc2626', fontWeight: 600 }}>{diffLabel} (slower)</span>;
+    return <span style={{ fontWeight: 600 }}>{diffLabel} (same)</span>;
   };
 
   return (
@@ -127,19 +146,7 @@ export default function QueryDashboardPage() {
                       <td>{row.query_name || 'Untitled Query'}</td>
                       <td className="text-xs">{row.run_by || 'N/A'}</td>
                       <td className="text-xs whitespace-nowrap">{formatIstDateTime(row.last_ran_ts)}</td>
-                      <td>
-                        {(() => {
-                          const target = Number(row.target_latency_ms || 0);
-                          const source = Number(row.source_latency_ms || 0);
-                          const label = `${target.toLocaleString()} ms`;
-                          if (source > 0 && target > 0) {
-                            const diff = source - target;
-                            if (diff > 0) return <span style={{color:'#16a34a',fontWeight:600}}>{label} (faster)</span>;
-                            if (diff < 0) return <span style={{color:'#dc2626',fontWeight:600}}>{label} (slower)</span>;
-                          }
-                          return label;
-                        })()}
-                      </td>
+                      <td>{renderLatencyComparison(row)}</td>
                       <td>
                         <div className="flex items-center gap-1">
                           <button className="btn btn-outline btn-sm" type="button" title="View query details" onClick={() => setDetailRow(row)}>
@@ -170,11 +177,14 @@ export default function QueryDashboardPage() {
               <button className="btn btn-outline btn-sm" type="button" onClick={() => setDetailRow(null)}><X size={14} /></button>
             </div>
             <div className="space-y-4 p-4">
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-7">
                 <Info label="Migration Mode" value={detailRow.migration_mode || '-'} />
                 <Info label="Input Mode" value={detailRow.details?.input_mode || '-'} />
                 <Info label="Validation" value={<StatusBadge status={detailRow.validation_status || 'NOT RUN'} />} />
                 <Info label="Pushed To Git" value={detailRow.pushed_to_git ? 'Yes' : 'No'} />
+                <Info label="Source Runtime" value={formatLatency(detailRow.source_latency_ms)} />
+                <Info label="Target Runtime" value={formatLatency(detailRow.target_latency_ms)} />
+                <Info label="Source-Target" value={renderLatencyComparison(detailRow)} />
               </div>
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <SqlBlock title={`${sourceEngine} SQL`} sql={detailRow.source_sql} />

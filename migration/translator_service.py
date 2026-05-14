@@ -390,19 +390,25 @@ class TranslatorService:
                 time.sleep(1)
 
             final_status = (statement_data.get("status") or {}).get("state", "")
+            execution_time_ms = int((time.time() - start_time) * 1000)
             if final_status != "SUCCEEDED":
                 err = (statement_data.get("status") or {}).get("error") or {}
                 message = err.get("message") or f"Databricks statement ended with status: {final_status}"
                 return {
                     "status": final_status,
                     "statement_id": statement_id,
+                    "execution_time_ms": execution_time_ms,
                     "error": message,
                 }
 
             extracted = self._extract_rows(statement_data, max_rows=max_rows, http_client=client, headers=headers)
+            
+            # Estimate Databricks statement runtime from submit-to-terminal-status
+            
             return {
                 "status": final_status,
                 "statement_id": statement_id,
+                "execution_time_ms": execution_time_ms,
                 **extracted,
             }
 

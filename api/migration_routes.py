@@ -113,6 +113,23 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
         rows_raw = cursor.fetchall()
         rows = [normalize_result(dict(zip(columns, row))) for row in rows_raw[:5]]
         columns = list(rows[0].keys()) if rows else []
+
+        # Get Snowflake-reported execution time (what Snowflake UI shows)
+        execution_time_ms = None
+        if statement_id:
+            try:
+                time_cursor = conn.cursor()
+                time_cursor.execute(
+                    "SELECT TOTAL_ELAPSED_TIME FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()) "
+                    f"WHERE QUERY_ID = '{statement_id}' LIMIT 1"
+                )
+                time_row = time_cursor.fetchone()
+                if time_row and time_row[0] is not None:
+                    execution_time_ms = int(time_row[0])
+                time_cursor.close()
+            except Exception:
+                pass
+
         return {
             "status": "SUCCEEDED",
             "statement_id": statement_id,
@@ -120,6 +137,7 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
             "rows": rows,
             "row_count": len(rows),
             "truncated": True,
+            "execution_time_ms": execution_time_ms,
         }
     except Exception as exc:
         return {
@@ -547,7 +565,6 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         source_label = "Snowflake" if payload.source_engine.lower() == "snowflake" else "BigQuery"
         raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
-    started = time.perf_counter()
     use_llm = payload.mode == "Auto (deterministic -> LLM migration -> validation)"
     complexity = complexity_analyzer.analyze(payload.bq_sql)
     translated_sql, explanation, stats, final_error = service.run_pipeline(
@@ -566,16 +583,6 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     suggestions = validator.suggest_fixes(validation) if not validation.is_valid else []
     execution = None
 
-    if payload.run_in_databricks:
-        if payload.databricks is None:
-            raise HTTPException(status_code=400, detail="Databricks config is required when run_in_databricks is true.")
-        try:
-            execution = service.execute_databricks_sql(translated_sql, payload.databricks.model_dump())
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
-
-    target_latency_ms = int((time.perf_counter() - started) * 1000)
-
     # Measure source latency by running source SQL on the active source session
     source_latency_ms = None
     if payload.session_id and payload.bq_sql.strip():
@@ -585,6 +592,18 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             source_latency_ms = int((time.perf_counter() - source_started) * 1000)
         except Exception:
             pass
+
+    # Measure target latency by running original SQL on Databricks
+    target_latency_ms = None
+    if payload.run_in_databricks:
+        if payload.databricks is None:
+            raise HTTPException(status_code=400, detail="Databricks config is required when run_in_databricks is true.")
+        try:
+            target_started = time.perf_counter()
+            execution = service.execute_databricks_sql(payload.bq_sql, payload.databricks.model_dump())
+            target_latency_ms = int((time.perf_counter() - target_started) * 1000)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
     final_query_id = payload.query_id or (supabase_store.make_query_id() if translated_sql and not final_error else None)
     final_query_name = (payload.query_name or "").strip() or "Untitled Query"
 
@@ -697,6 +716,24 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
 
     if source_execution is None:
         final_execution.pop("source")
+
+    # Update database with execution latencies if available
+    if getattr(payload, "query_id", None):
+        source_lat = source_execution.get("execution_time_ms") if source_execution else None
+        target_lat = final_execution["databricks"].get("execution_time_ms") if final_execution.get("databricks") else None
+        
+        updates = {}
+        if source_lat is not None:
+            updates["source_latency_ms"] = source_lat
+        if target_lat is not None:
+            updates["target_latency_ms"] = target_lat
+            
+        if updates:
+            supabase_store.update_query_history(
+                payload.query_id, 
+                payload.source_engine,
+                updates
+            )
 
     return DatabricksExecuteResponse(execution=final_execution)
 

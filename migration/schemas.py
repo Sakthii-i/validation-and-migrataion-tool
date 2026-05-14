@@ -61,6 +61,7 @@ class StoredExecuteRequest(BaseModel):
     model: str = "gpt-5-mini"
     api_key: Optional[str] = None
     session_id: Optional[str] = None
+    query_id: Optional[str] = None
 
 
 class QueryStatsResponse(BaseModel):
