@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -40,6 +42,7 @@ from validation_tool.migration.complexity_analyzer import QueryComplexityAnalyze
 from validation_tool.migration.sql_processor import SQLPreprocessor
 from validation_tool.migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
 from validation_tool.api.auth import load_locked_credentials
+from validation_tool.backend import supabase_store
 from validation_tool.backend.session_store import get_query_stats, update_query_stats
 
 router = APIRouter(prefix="/api/migration")
@@ -514,8 +517,20 @@ def cache_stats() -> dict:
 
 
 @router.get("/session-stats", response_model=QueryStatsResponse)
-def session_stats(session_id: str | None = None) -> QueryStatsResponse:
-    return QueryStatsResponse(session_id=session_id, stats=get_query_stats(session_id or ""))
+def session_stats(session_id: str | None = None, source_engine: str | None = None) -> QueryStatsResponse:
+    return QueryStatsResponse(session_id=session_id, stats=get_query_stats(session_id or "", source_engine=source_engine))
+
+
+@router.get("/query-history")
+def query_history(source_engine: str = "bigquery") -> dict:
+    return {"queries": supabase_store.list_query_history(source_engine=source_engine)}
+
+
+@router.patch("/query-history/{query_id}")
+def update_query_history(query_id: str, payload: dict) -> dict:
+    source_engine = payload.pop("source_engine", None)
+    supabase_store.update_query_history(query_id, source_engine, payload)
+    return {"status": "ok"}
 
 
 @router.post("/cache/clear", response_model=CacheClearResponse)
@@ -532,6 +547,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         source_label = "Snowflake" if payload.source_engine.lower() == "snowflake" else "BigQuery"
         raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
+    started = time.perf_counter()
     use_llm = payload.mode == "Auto (deterministic -> LLM migration -> validation)"
     complexity = complexity_analyzer.analyze(payload.bq_sql)
     translated_sql, explanation, stats, final_error = service.run_pipeline(
@@ -558,12 +574,58 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
 
+    target_latency_ms = int((time.perf_counter() - started) * 1000)
+
+    # Measure source latency by running source SQL on the active source session
+    source_latency_ms = None
+    if payload.session_id and payload.bq_sql.strip():
+        try:
+            source_started = time.perf_counter()
+            _rows_from_source_session(payload.source_engine, payload.bq_sql, payload.session_id)
+            source_latency_ms = int((time.perf_counter() - source_started) * 1000)
+        except Exception:
+            pass
+    final_query_id = payload.query_id or (supabase_store.make_query_id() if translated_sql and not final_error else None)
+    final_query_name = (payload.query_name or "").strip() or "Untitled Query"
+
     update_query_stats(
         payload.session_id or "",
         migrated=bool(translated_sql and not final_error),
         validated=False,
         complexity_level=complexity.get("complexity_level"),
+        source_engine=payload.source_engine,
     )
+
+    if final_query_id:
+        supabase_store.upsert_query_history({
+            "query_id": final_query_id,
+            "query_name": final_query_name,
+            "source_engine": payload.source_engine,
+            "run_by": payload.run_by,
+            "last_ran_ts": datetime.utcnow(),
+            "source_latency_ms": source_latency_ms,
+            "target_latency_ms": target_latency_ms,
+            "migration_mode": payload.mode,
+            "validation_status": "NOT RUN",
+            "pushed_to_git": False,
+            "source_sql": payload.bq_sql,
+            "translated_sql": translated_sql,
+            "details": {
+                "provider": payload.provider,
+                "model": payload.model,
+                "input_mode": payload.input_mode or "manual",
+                "validation": {
+                    "is_valid": validation.is_valid,
+                    "error_message": validation.error_message,
+                    "error_type": validation.error_type,
+                    "line_number": validation.line_number,
+                },
+                "complexity": complexity,
+                "explanation": explanation,
+                "suggestions": suggestions,
+                "final_error": final_error,
+            },
+        })
 
     return TranslateResponse(
         translated_sql=translated_sql,
@@ -578,6 +640,10 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         },
         suggestions=suggestions,
         execution=execution,
+        query_id=final_query_id,
+        query_name=final_query_name,
+        source_latency_ms=source_latency_ms,
+        target_latency_ms=target_latency_ms,
     )
 
 
@@ -776,6 +842,7 @@ async def translate_csv(
                     migrated=bool(translated_sql and not final_error),
                     validated=False,
                     complexity_level=complexity.get("complexity_level"),
+                    source_engine=source_engine,
                 )
 
                 translated_parts.append(translated_sql)

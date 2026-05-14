@@ -105,12 +105,7 @@ export default function QueryConverterSection() {
   const [complexity, setComplexity] = useState(null);
   const [querySessionId] = useState(() => getOrCreateQuerySessionId());
   const [queryName, setQueryName] = useState('');
-  const [queryId] = useState(() => {
-    const prefix = 'QRY';
-    const timestamp = Date.now().toString(36).toUpperCase();
-    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-    return `${prefix}_${timestamp}_${random}`;
-  });
+  const [queryId, setQueryId] = useState('');
 
   useEffect(() => {
     Promise.all([migrationAPI.getConfig(), migrationAPI.getCacheStats()])
@@ -175,10 +170,11 @@ export default function QueryConverterSection() {
     setFinalError('');
     setExecution(null);
     setExplanation('');
-    setCacheHit(false);
-    setCopyState('idle');
-    setQueryValidationResults(null);
-    setQueryValidationError('');
+      setCacheHit(false);
+      setCopyState('idle');
+      setQueryValidationResults(null);
+      setQueryValidationError('');
+      setQueryId('');
   };
 
   const isSnowflake = sourceEngine === 'Snowflake';
@@ -197,6 +193,10 @@ export default function QueryConverterSection() {
     run_in_databricks: false,
     databricks: null,
     session_id: querySessionId,
+    query_name: queryName,
+    query_id: queryId,
+    run_by: user?.username || '',
+    input_mode: inputMode,
   });
 
   const handleTranslateSql = async () => {
@@ -217,7 +217,7 @@ export default function QueryConverterSection() {
     setLoading(true);
     clearOutput();
     try {
-      const res = await migrationAPI.translateSql({ ...buildPayload(), bq_sql: bqSql }, controller.signal);
+      const res = await migrationAPI.translateSql({ ...buildPayload(), query_id: '', bq_sql: bqSql }, controller.signal);
       const data = res.data;
       setTranslatedSql(data.translated_sql || '');
       setValidation(data.validation || null);
@@ -228,6 +228,7 @@ export default function QueryConverterSection() {
       setCacheHit(Number(data.stats?.cache_hits || 0) > 0);
       const queryComplexity = data.stats?.complexity || null;
       setComplexity(queryComplexity);
+      setQueryId(data.query_id || '');
       await refreshCacheStats();
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
@@ -451,6 +452,12 @@ export default function QueryConverterSection() {
         message: `Upload translated Databricks SQL ${uploadPath}`,
       }, controller.signal);
       setGitUploadMessage(`Uploaded to ${res.data.branch}:${res.data.path}`);
+      if (queryId) {
+        await migrationAPI.updateQueryHistory(queryId, {
+          source_engine: sourceEngine.toLowerCase(),
+          pushed_to_git: true,
+        });
+      }
       if (res.data.branch && !gitBranches.includes(res.data.branch)) {
         setGitBranches((prev) => [...prev, res.data.branch]);
       }
@@ -546,6 +553,12 @@ export default function QueryConverterSection() {
         target_sql: translatedSql,
       });
       setQueryValidationResults(res.data);
+      if (queryId) {
+        await migrationAPI.updateQueryHistory(queryId, {
+          source_engine: sourceEngine.toLowerCase(),
+          validation_status: 'VALIDATED',
+        });
+      }
     } catch (err) {
       setQueryValidationError(err.response?.data?.detail || err.message || 'Failed to run validation.');
     } finally {
@@ -725,27 +738,6 @@ export default function QueryConverterSection() {
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="form-group">
-                    <label className="form-label text-sm">Query Name</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      value={queryName}
-                      onChange={(e) => setQueryName(e.target.value)}
-                      placeholder="Enter query name..."
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label text-sm">Query ID</label>
-                    <input
-                      type="text"
-                      className="form-input bg-gray-50"
-                      value={queryId}
-                      readOnly
-                    />
-                  </div>
-                </div>
                 <div className="form-group">
                   <label className="form-label">{inputLabel}</label>
                   <textarea
@@ -768,17 +760,31 @@ export default function QueryConverterSection() {
                   readOnly={!isOutputEditable}
                   placeholder="Converted Databricks SQL appears here..."
                 />
-                <div className="mt-2 flex justify-end">
-                  <button
-                    className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
-                    type="button"
-                    onClick={() => setIsOutputEditable((prev) => !prev)}
-                    disabled={!translatedSql.trim()}
-                  >
-                    {isOutputEditable ? 'Lock' : 'Edit'}
-                  </button>
-                </div>
               </div>
+            </div>
+
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-[minmax(220px,320px),auto]">
+                <div className="form-group">
+                  <label className="form-label text-sm">Query Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={queryName}
+                    onChange={(e) => setQueryName(e.target.value)}
+                    placeholder="Enter query name..."
+                  />
+                </div>
+                <div className="pb-2 text-sm font-medium text-gray-700">Query ID: {queryId}</div>
+              </div>
+              <button
+                className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
+                type="button"
+                onClick={() => setIsOutputEditable((prev) => !prev)}
+                disabled={!translatedSql.trim()}
+              >
+                {isOutputEditable ? 'Lock' : 'Edit'}
+              </button>
             </div>
 
             <div className="flex flex-wrap gap-2">

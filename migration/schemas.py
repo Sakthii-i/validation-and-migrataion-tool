@@ -24,6 +24,10 @@ class TranslateRequest(BaseModel):
     run_in_databricks: bool = False
     databricks: Optional[DatabricksConnection] = None
     session_id: Optional[str] = None
+    query_name: Optional[str] = None
+    query_id: Optional[str] = None
+    run_by: Optional[str] = None
+    input_mode: Optional[str] = None
 
 
 class TranslateResponse(BaseModel):
@@ -34,6 +38,10 @@ class TranslateResponse(BaseModel):
     validation: Dict[str, Any]
     suggestions: List[str]
     execution: Optional[Dict[str, Any]] = None
+    query_id: Optional[str] = None
+    query_name: Optional[str] = None
+    source_latency_ms: Optional[int] = None
+    target_latency_ms: Optional[int] = None
 
 
 class DatabricksExecuteRequest(BaseModel):
