@@ -31,6 +31,7 @@ from validation_tool.query_builder import (
     build_row_hash_mismatch_rows_query_v2,
 )
 from validation_tool.backend import supabase_store
+from validation_tool.backend.session_store import update_query_stats
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -137,11 +138,17 @@ def auth_revoke(req: RevokeRequest):
 # ══════════════════════════════════════
 
 @router.get("/dashboard/stats")
-def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
+def dashboard_stats(
+    date_filter: str = "Past 30 days",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    source_engine: Optional[str] = None,
+):
     s, e = _date_range(date_filter, start_date, end_date)
+    engine_filter = (source_engine or "").strip().lower() or None
     
     try:
-        stats = supabase_store.dashboard_stats(start_date=s, end_date=e)
+        stats = supabase_store.dashboard_stats(start_date=s, end_date=e, source_engine=engine_filter)
         return stats
     except Exception as ex:
         logger.error("Dashboard stats error: %s", ex)
@@ -163,11 +170,17 @@ def dashboard_stats(date_filter: str = "Past 30 days", start_date: Optional[str]
 # ══════════════════════════════════════
 
 @router.get("/results")
-def list_results(date_filter: str = "Past 30 days", start_date: Optional[str] = None, end_date: Optional[str] = None):
+def list_results(
+    date_filter: str = "Past 30 days",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    source_engine: Optional[str] = None,
+):
     s, e = _date_range(date_filter, start_date, end_date)
+    engine_filter = (source_engine or "").strip().lower() or None
     
     try:
-        rows = supabase_store.list_results(start_date=s, end_date=e, limit=500)
+        rows = supabase_store.list_results(start_date=s, end_date=e, limit=500, source_engine=engine_filter)
         return {"results": rows}
     except Exception as ex:
         logger.error("List results error: %s", ex)
@@ -1023,6 +1036,7 @@ def run_validation(req: RunValidationRequest):
                 "validation_id": record.get("validation_id"),
                 "validation_ts": record.get("timestamp"),
                 "run_by": record.get("run_by"),
+                "source_engine": engine.lower(),
                 "source_table_name": f"{src_cat}.{src_sch}.{src_tbl}",
                 "target_table_name": f"{tgt_cat}.{tgt_sch}.{tgt_tbl}",
                 "src_table": f"{src_cat}.{src_sch}.{src_tbl}",
@@ -1070,6 +1084,12 @@ def run_query_validation(req: QueryValidationRequest):
     )
 
     response = run_validation(run_req)
+    update_query_stats(
+        session_id,
+        migrated=False,
+        validated=True,
+        complexity_level=None,
+    )
     response["temp_tables"] = {"source": src_table, "target": tgt_table}
     return response
 

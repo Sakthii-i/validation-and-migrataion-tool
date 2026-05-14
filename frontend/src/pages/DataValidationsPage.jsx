@@ -11,7 +11,7 @@ const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 
 
 export default function DataValidationsPage() {
   const navigate = useNavigate();
-  const { isConnected, sessionId } = useConnection();
+  const { isConnected, sessionId, sourceEngine } = useConnection();
   const { user } = useAuth();
   const [results, setResults] = useState([]);
   const [dateFilter, setDateFilter] = useState('Past 30 days');
@@ -25,12 +25,17 @@ export default function DataValidationsPage() {
   const [actionError, setActionError] = useState('');
   const [copiedValidationId, setCopiedValidationId] = useState('');
 
-  useEffect(() => { fetchResults(); }, [dateFilter, customStart, customEnd]);
+  useEffect(() => { fetchResults(); }, [dateFilter, customStart, customEnd, sourceEngine]);
 
   const fetchResults = async () => {
     setLoading(true);
     try {
-      const res = await resultsAPI.list(dateFilter, customStart || undefined, customEnd || undefined);
+      const res = await resultsAPI.list(
+        dateFilter,
+        customStart || undefined,
+        customEnd || undefined,
+        (sourceEngine || '').toLowerCase(),
+      );
       setResults(res.data.results || []);
     } catch (e) {
       console.error('Results fetch failed', e);

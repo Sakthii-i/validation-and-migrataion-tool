@@ -71,6 +71,7 @@ def get_query_stats(session_id: str) -> dict:
 
     payload = r.hgetall(GLOBAL_QUERY_STATS_HASH_KEY)
     if payload:
+        r.persist(GLOBAL_QUERY_STATS_HASH_KEY)
         return _normalize_query_stats(payload)
 
     raw = r.get(GLOBAL_QUERY_STATS_KEY)
@@ -84,10 +85,9 @@ def get_query_stats(session_id: str) -> dict:
 
     if isinstance(legacy_payload, dict):
         normalized = _normalize_query_stats(legacy_payload)
-        ttl = session_ttl_seconds()
         pipe = r.pipeline()
         pipe.hset(GLOBAL_QUERY_STATS_HASH_KEY, mapping={key: str(value) for key, value in normalized.items()})
-        pipe.expire(GLOBAL_QUERY_STATS_HASH_KEY, ttl)
+        pipe.persist(GLOBAL_QUERY_STATS_HASH_KEY)
         pipe.execute()
         return normalized
 
@@ -116,9 +116,8 @@ def update_query_stats(
     elif level == "COMPLEX":
         current["complex_queries"] += 1
 
-    ttl = session_ttl_seconds()
     pipe = _client().pipeline()
     pipe.hset(GLOBAL_QUERY_STATS_HASH_KEY, mapping={key: str(value) for key, value in current.items()})
-    pipe.expire(GLOBAL_QUERY_STATS_HASH_KEY, ttl)
+    pipe.persist(GLOBAL_QUERY_STATS_HASH_KEY)
     pipe.execute()
     return current

@@ -25,14 +25,28 @@ export const authAPI = {
 
 // ── Dashboard ──
 export const dashboardAPI = {
-  getStats: (dateFilter = 'Past 30 days', startDate, endDate) =>
-    api.get('/dashboard/stats', { params: { date_filter: dateFilter, start_date: startDate, end_date: endDate } }),
+  getStats: (dateFilter = 'Past 30 days', startDate, endDate, sourceEngine) =>
+    api.get('/dashboard/stats', {
+      params: {
+        date_filter: dateFilter,
+        start_date: startDate,
+        end_date: endDate,
+        source_engine: sourceEngine,
+      },
+    }),
 };
 
 // ── Results ──
 export const resultsAPI = {
-  list: (dateFilter = 'Past 30 days', startDate, endDate) =>
-    api.get('/results', { params: { date_filter: dateFilter, start_date: startDate, end_date: endDate } }),
+  list: (dateFilter = 'Past 30 days', startDate, endDate, sourceEngine) =>
+    api.get('/results', {
+      params: {
+        date_filter: dateFilter,
+        start_date: startDate,
+        end_date: endDate,
+        source_engine: sourceEngine,
+      },
+    }),
   getById: (validationId) =>
     api.get(`/results/${validationId}`),
 };

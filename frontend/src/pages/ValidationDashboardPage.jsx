@@ -4,15 +4,17 @@ import { resultsAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import StatusBadge from '../components/StatusBadge';
 import { BarChart3, RefreshCw } from 'lucide-react';
+import { useConnection } from '../context/ConnectionContext';
 
 export default function ValidationDashboardPage() {
+  const { sourceEngine } = useConnection();
   const navigate = useNavigate();
   const [validations, setValidations] = useState([]);
   const [validationsLoading, setValidationsLoading] = useState(true);
 
   useEffect(() => {
     fetchAll();
-  }, []);
+  }, [sourceEngine]);
 
   const fetchAll = async () => {
     await fetchValidations();
@@ -21,7 +23,7 @@ export default function ValidationDashboardPage() {
   const fetchValidations = async () => {
     setValidationsLoading(true);
     try {
-      const res = await resultsAPI.list('All Time');
+      const res = await resultsAPI.list('All Time', undefined, undefined, (sourceEngine || '').toLowerCase());
       setValidations(res.data?.results || []);
     } catch (e) {
       console.error(e);

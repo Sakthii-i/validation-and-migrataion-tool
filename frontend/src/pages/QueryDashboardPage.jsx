@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { BarChart3, CheckCircle2, RefreshCw, RotateCcw } from 'lucide-react';
 import { migrationAPI } from '../services/api';
 const EMPTY_SESSION_STATS = {
-  total_queries_processed: 0,
   successful_migrations: 0,
   validated_queries: 0,
   simple_queries: 0,
@@ -42,10 +41,6 @@ export default function QueryDashboardPage() {
       </div>
 
       <div className="page-content space-y-5">
-        <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-          Showing global query totals for everyone using this tool. Validated remains a placeholder until validation is implemented.
-        </div>
-
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <MetricCard
             title="Queries Migrated"
@@ -60,15 +55,9 @@ export default function QueryDashboardPage() {
             value={stats.validated_queries}
             icon={<CheckCircle2 size={22} />}
             tone="green"
-            subtitle="Not activated yet"
-            disabled
+            subtitle="Validated query runs"
             loading={loading}
           />
-        </div>
-
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <div className="text-sm text-gray-500">Queries processed globally</div>
-          <div className="mt-1 text-3xl font-bold text-gray-900">{loading ? '...' : stats.total_queries_processed}</div>
         </div>
       </div>
     </div>

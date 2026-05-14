@@ -54,8 +54,7 @@ export default function QueryConverterSection() {
 
   const [bqSql, setBqSql] = useState('');
   const [translatedSql, setTranslatedSql] = useState('');
-
-  const [validationTargetSql, setValidationTargetSql] = useState('');
+  const [isOutputEditable, setIsOutputEditable] = useState(false);
 
   const [showDataValidation, setShowDataValidation] = useState(false);
   const [validationSettings, setValidationSettings] = useState({
@@ -126,11 +125,6 @@ export default function QueryConverterSection() {
     window.localStorage.setItem(API_KEY_STORE, JSON.stringify(apiKeys));
   }, [apiKeys]);
 
-  useEffect(() => {
-    if (!showDataValidation) return;
-    setValidationTargetSql(translatedSql || '');
-  }, [showDataValidation, translatedSql]);
-
   const models = useMemo(() => config.provider_model_options?.[provider] || [], [config, provider]);
 
   useEffect(() => {
@@ -168,7 +162,7 @@ export default function QueryConverterSection() {
 
   const clearOutput = () => {
     setTranslatedSql('');
-    setValidationTargetSql('');
+    setIsOutputEditable(false);
     setValidation(null);
     setSuggestions([]);
     setFinalError('');
@@ -518,7 +512,7 @@ export default function QueryConverterSection() {
       setQueryValidationError(`No active session. Load ${sourceLabel} credentials from Run Validation first.`);
       return;
     }
-    if (!bqSql.trim() || !validationTargetSql.trim()) {
+    if (!bqSql.trim() || !translatedSql.trim()) {
       setQueryValidationError('Both source SQL and target SQL are required.');
       return;
     }
@@ -542,7 +536,7 @@ export default function QueryConverterSection() {
         run_by: user?.username || undefined,
         settings: toPayloadSettings(validationSettings),
         source_sql: bqSql,
-        target_sql: validationTargetSql,
+        target_sql: translatedSql,
       });
       setQueryValidationResults(res.data);
     } catch (err) {
@@ -609,7 +603,7 @@ export default function QueryConverterSection() {
     if (!showDataValidation) return blockers;
     if (!sessionId) blockers.push('No active session. Open Run Validation and connect first.');
     if (!bqSql.trim()) blockers.push(`${sourceLabel} source SQL is empty.`);
-    if (!validationTargetSql.trim()) blockers.push('Converted SQL for validation is empty.');
+    if (!translatedSql.trim()) blockers.push('Converted SQL for validation is empty.');
     if (!dataValidationMetricsSelected) blockers.push('Select at least one metric (or choose Shallow).');
     if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
     return blockers;
@@ -617,7 +611,7 @@ export default function QueryConverterSection() {
     showDataValidation,
     sessionId,
     bqSql,
-    validationTargetSql,
+    translatedSql,
     dataValidationMetricsSelected,
     isSnowflake,
     hasRequiredSnowflakeConnection,
@@ -627,7 +621,7 @@ export default function QueryConverterSection() {
     showDataValidation
     && sessionId
     && bqSql.trim()
-    && validationTargetSql.trim()
+    && translatedSql.trim()
     && dataValidationMetricsSelected
     && (!isSnowflake || hasRequiredSnowflakeConnection)
   );
@@ -711,8 +705,6 @@ export default function QueryConverterSection() {
               </div>
               <div className="grid grid-cols-1 gap-2">
                 <CacheMetric title="Persistent cache entries" value={cacheStats?.persistent?.total_entries ?? 0} />
-                <CacheMetric title="Expression cache size" value={cacheStats?.expression?.size ?? 0} />
-                <CacheMetric title="Expression cache hit rate" value={cacheStats?.expression?.hit_rate ?? '0.0%'} />
               </div>
               <button className="btn btn-outline btn-full mt-3" type="button" onClick={handleClearCache} disabled={cacheLoading}>
                 {cacheLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
@@ -738,8 +730,24 @@ export default function QueryConverterSection() {
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Output SQL (Databricks)</label>
-                <textarea className="form-textarea min-h-[360px]" value={translatedSql} readOnly placeholder="Converted Databricks SQL appears here..." />
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <label className="form-label mb-0">Output SQL (Databricks)</label>
+                  <button
+                    className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
+                    type="button"
+                    onClick={() => setIsOutputEditable((prev) => !prev)}
+                    disabled={!translatedSql.trim()}
+                  >
+                    {isOutputEditable ? 'Lock' : 'Edit'}
+                  </button>
+                </div>
+                <textarea
+                  className="form-textarea min-h-[360px]"
+                  value={translatedSql}
+                  onChange={(e) => setTranslatedSql(e.target.value)}
+                  readOnly={!isOutputEditable}
+                  placeholder="Converted Databricks SQL appears here..."
+                />
               </div>
             </div>
 
@@ -778,18 +786,6 @@ export default function QueryConverterSection() {
                   </div>
                 )}
                 <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
-                <div className="form-group">
-                  <label className="form-label">Converted SQL for validation (editable)</label>
-                  <textarea
-                    className="form-textarea min-h-[240px]"
-                    value={validationTargetSql}
-                    onChange={(e) => setValidationTargetSql(e.target.value)}
-                    placeholder="Edit the converted SQL here before running validation..."
-                  />
-                  <div className="mt-1 text-xs text-gray-500">
-                    Edits here only affect Data Validation. The output SQL above is still used for Copy SQL and Run in Databricks.
-                  </div>
-                </div>
                 {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
                 {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
                   <div className="alert alert-warning">
@@ -941,8 +937,24 @@ export default function QueryConverterSection() {
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Output SQL (Databricks)</label>
-                <textarea className="form-textarea min-h-[320px]" value={translatedSql} readOnly placeholder="Converted Databricks SQL appears here..." />
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <label className="form-label mb-0">Output SQL (Databricks)</label>
+                  <button
+                    className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
+                    type="button"
+                    onClick={() => setIsOutputEditable((prev) => !prev)}
+                    disabled={!translatedSql.trim()}
+                  >
+                    {isOutputEditable ? 'Lock' : 'Edit'}
+                  </button>
+                </div>
+                <textarea
+                  className="form-textarea min-h-[320px]"
+                  value={translatedSql}
+                  onChange={(e) => setTranslatedSql(e.target.value)}
+                  readOnly={!isOutputEditable}
+                  placeholder="Converted Databricks SQL appears here..."
+                />
               </div>
             </div>
 
@@ -980,18 +992,6 @@ export default function QueryConverterSection() {
                   </div>
                 )}
                 <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
-                <div className="form-group">
-                  <label className="form-label">Converted SQL for validation (editable)</label>
-                  <textarea
-                    className="form-textarea min-h-[240px]"
-                    value={validationTargetSql}
-                    onChange={(e) => setValidationTargetSql(e.target.value)}
-                    placeholder="Edit the converted SQL here before running validation..."
-                  />
-                  <div className="mt-1 text-xs text-gray-500">
-                    Edits here only affect Data Validation. The output SQL above is still used for Copy SQL and Run in Databricks.
-                  </div>
-                </div>
                 {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
                 {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
                   <div className="alert alert-warning">

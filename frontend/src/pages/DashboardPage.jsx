@@ -3,11 +3,13 @@ import { dashboardAPI } from '../services/api';
 import CollapsibleSection from '../components/CollapsibleSection';
 import { BarChart3, CheckCircle2, Hash, Table2, Activity, PieChart } from 'lucide-react';
 import { PieChart as RechartPie, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { useConnection } from '../context/ConnectionContext';
 
 const DATE_FILTERS = ['All Time', 'Today', 'Past 3 days', 'Past 15 days', 'Past 30 days', 'Custom'];
 const PIE_COLORS = ['#2e7d32', '#c62828'];
 
 export default function DashboardPage() {
+  const { sourceEngine } = useConnection();
   const [stats, setStats] = useState(null);
   const [dateFilter, setDateFilter] = useState('All Time');
   const [customStart, setCustomStart] = useState('');
@@ -15,12 +17,17 @@ export default function DashboardPage() {
   const [showCharts, setShowCharts] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { fetchStats(); }, [dateFilter, customStart, customEnd]);
+  useEffect(() => { fetchStats(); }, [dateFilter, customStart, customEnd, sourceEngine]);
 
   const fetchStats = async () => {
     setLoading(true);
     try {
-      const res = await dashboardAPI.getStats(dateFilter, customStart || undefined, customEnd || undefined);
+      const res = await dashboardAPI.getStats(
+        dateFilter,
+        customStart || undefined,
+        customEnd || undefined,
+        (sourceEngine || '').toLowerCase(),
+      );
       setStats(res.data);
     } catch (e) {
       console.error('Dashboard fetch failed', e);

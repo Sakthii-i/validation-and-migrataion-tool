@@ -74,6 +74,13 @@ def upsert_results(rows: list[dict[str, Any]]) -> None:
 
     payload = []
     for row in rows:
+        details = _json_safe(row.get("details") or {})
+        if not isinstance(details, dict):
+            details = {}
+        row_engine = str(row.get("source_engine") or "").strip().lower()
+        if row_engine:
+            details["source_engine"] = row_engine
+
         payload.append({
             "validation_id": _json_safe(row.get("validation_id")),
             "validation_ts": _to_iso(row.get("validation_ts")),
@@ -85,7 +92,7 @@ def upsert_results(rows: list[dict[str, Any]]) -> None:
             "numeric_check": _json_safe(row.get("numeric_check")),
             "hash_validation": _json_safe(row.get("hash_validation")),
             "run_by": _json_safe(row.get("run_by")),
-            "details": _json_safe(row.get("details") or {}),
+            "details": details,
         })
 
     try:
@@ -109,7 +116,43 @@ def _date_filters(start_date: str | None, end_date: str | None) -> list[tuple[st
     return filters
 
 
-def list_results(start_date: str | None = None, end_date: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+def _row_source_engine(row: dict[str, Any]) -> str | None:
+    direct = row.get("source_engine")
+    if direct is not None:
+        text = str(direct).strip().lower()
+        if text:
+            return text
+
+    details = row.get("details")
+    if isinstance(details, dict):
+        nested = details.get("source_engine")
+        if nested is not None:
+            text = str(nested).strip().lower()
+            if text:
+                return text
+    return None
+
+
+def _matches_source_engine(row: dict[str, Any], source_engine: str | None) -> bool:
+    if not source_engine:
+        return True
+
+    wanted = source_engine.strip().lower()
+    row_engine = _row_source_engine(row)
+    if row_engine:
+        return row_engine == wanted
+
+    # Legacy rows may not carry source-engine metadata.
+    # Keep these visible in Snowflake view (historical default), but hide in BigQuery view.
+    return wanted == "snowflake"
+
+
+def list_results(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 500,
+    source_engine: str | None = None,
+) -> list[dict[str, Any]]:
     if not is_enabled():
         return []
 
@@ -124,7 +167,7 @@ def list_results(start_date: str | None = None, end_date: str | None = None, lim
 
     rows = []
     for row in data:
-        rows.append({
+        normalized = {
             "validation_id": row.get("validation_id"),
             "validation_ts": row.get("validation_ts"),
             "validation_type": row.get("validation_type"),
@@ -137,7 +180,10 @@ def list_results(start_date: str | None = None, end_date: str | None = None, lim
             "hash_validation": row.get("hash_validation"),
             "run_by": row.get("run_by"),
             "details": row.get("details"),
-        })
+            "source_engine": _row_source_engine(row),
+        }
+        if _matches_source_engine(normalized, source_engine):
+            rows.append(normalized)
     return rows
 
 
@@ -171,8 +217,12 @@ def get_result_by_id(validation_id: str) -> dict[str, Any] | None:
     }
 
 
-def dashboard_stats(start_date: str | None = None, end_date: str | None = None) -> dict[str, int]:
-    rows = list_results(start_date=start_date, end_date=end_date, limit=5000)
+def dashboard_stats(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    source_engine: str | None = None,
+) -> dict[str, int]:
+    rows = list_results(start_date=start_date, end_date=end_date, limit=5000, source_engine=source_engine)
     if not rows:
         return {
             "tables_validated": 0,
