@@ -60,8 +60,8 @@ function getOrCreateQuerySessionId() {
 export default function QueryConverterSection() {
   const { isConnected, sourceEngine, sessionId } = useConnection();
   const { user } = useAuth();
-  const [config, setConfig] = useState({ providers: ['OpenAI'], provider_model_options: {}, modes: [DEFAULT_MODE] });
-  const [provider, setProvider] = useState('OpenAI');
+  const [config, setConfig] = useState({ providers: ['Gemini', 'OpenAI'], provider_model_options: {}, modes: [DEFAULT_MODE] });
+  const [provider, setProvider] = useState('Gemini');
   const [model, setModel] = useState('');
   const [mode, setMode] = useState(DEFAULT_MODE);
   const [apiKeys, setApiKeys] = useState(() => loadJson(API_KEY_STORE, { OpenAI: '', Gemini: '', Claude: '' }));
@@ -130,9 +130,11 @@ export default function QueryConverterSection() {
         const data = configRes.data;
         setConfig(data);
         setCacheStats(cacheRes.data || { persistent: {}, expression: {} });
-        const firstProvider = data.providers?.[0] || 'OpenAI';
-        setProvider(firstProvider);
-        setModel(data.provider_model_options?.[firstProvider]?.[0] || '');
+        const preferredProvider = data.providers?.includes('Gemini')
+          ? 'Gemini'
+          : (data.providers?.[0] || 'OpenAI');
+        setProvider(preferredProvider);
+        setModel(data.provider_model_options?.[preferredProvider]?.[0] || '');
         setMode(data.modes?.[0] || DEFAULT_MODE);
       })
       .catch(() => {

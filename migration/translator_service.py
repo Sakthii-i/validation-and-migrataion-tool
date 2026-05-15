@@ -356,6 +356,7 @@ class TranslatorService:
             "on_wait_timeout": "CONTINUE",
             "disposition": "EXTERNAL_LINKS",
             "format": "JSON_ARRAY",
+            "use_cached_result": False,
         }
         if catalog:
             payload["catalog"] = catalog

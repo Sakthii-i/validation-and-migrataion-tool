@@ -4,7 +4,7 @@ import { connectionAPI } from '../services/api';
 const ConnectionContext = createContext(null);
 
 export function ConnectionProvider({ children }) {
-  const [sourceEngine, setSourceEngine] = useState('BigQuery');
+  const [sourceEngine, setSourceEngine] = useState('Snowflake');
   const [connectionStatus, setConnectionStatus] = useState('disconnected'); // disconnected | connecting | connected
   const [sessionId, setSessionId] = useState(null);
   const [error, setError] = useState(null);
