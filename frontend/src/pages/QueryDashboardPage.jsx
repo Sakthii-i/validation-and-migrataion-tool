@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BarChart3, Eye, Play, RefreshCw, X } from 'lucide-react';
+import { BarChart3, Eye, RefreshCw, X } from 'lucide-react';
 import { migrationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
 import StatusBadge from '../components/StatusBadge';
@@ -57,22 +57,6 @@ export default function QueryDashboardPage() {
     });
   };
 
-  const runQuery = async (row) => {
-    setRunMessage('');
-    try {
-      await migrationAPI.runStoredDatabricks({
-        sql: row.translated_sql || '',
-        source_sql: row.source_sql || '',
-        source_engine: row.source_engine || (sourceEngine || '').toLowerCase(),
-        query_id: row.query_id,
-      });
-      setRunMessage(`Run ok: ${row.query_id}`);
-      await fetchStats();
-    } catch (e) {
-      setRunMessage(`Run error: ${e.response?.data?.detail || e.message}`);
-    }
-  };
-
   const formatLatency = (value) => {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? `${n.toLocaleString()} ms` : '-';
@@ -119,8 +103,6 @@ export default function QueryDashboardPage() {
           />
         </div>
 
-        {runMessage && <div className={runMessage.includes('error') ? 'alert alert-error' : 'alert alert-success'}>{runMessage}</div>}
-
         <div className="card">
           {loading ? (
             <div className="flex justify-center py-12"><span className="spinner"></span></div>
@@ -151,9 +133,6 @@ export default function QueryDashboardPage() {
                         <div className="flex items-center gap-1">
                           <button className="btn btn-outline btn-sm" type="button" title="View query details" onClick={() => setDetailRow(row)}>
                             <Eye size={14} />
-                          </button>
-                          <button className="btn btn-outline btn-sm" type="button" title="Run Databricks SQL" onClick={() => runQuery(row)} disabled={!row.translated_sql}>
-                            <Play size={14} />
                           </button>
                         </div>
                       </td>
