@@ -796,6 +796,8 @@ async def translate_csv(
     model: str = Form(""),
     mode: str = Form("Auto (deterministic -> LLM migration -> validation)"),
     api_key: str = Form(""),
+    query_name: str = Form(""),
+    run_by: str = Form(""),
     run_in_databricks: bool = Form(False),
     databricks_host: str = Form(""),
     databricks_token: str = Form(""),
@@ -858,8 +860,10 @@ async def translate_csv(
             continue
 
         translated_parts: list[str] = []
-        for query_index, bq_sql in enumerate(_split_sql_queries(cell_value)):
+        split_queries = _split_sql_queries(cell_value)
+        for query_index, bq_sql in enumerate(split_queries):
             try:
+                started = time.perf_counter()
                 complexity = complexity_analyzer.analyze(bq_sql)
                 translated_sql, explanation, stats, final_error = service.run_pipeline(
                     bq_sql=bq_sql,
@@ -874,11 +878,27 @@ async def translate_csv(
                 validation = validator.validate(translated_sql)
                 suggestions = validator.suggest_fixes(validation) if not validation.is_valid else []
                 execution = None
+                final_query_id = supabase_store.make_query_id() if translated_sql and not final_error else None
+                base_query_name = (query_name or "").strip() or (Path(file.filename).stem if file.filename else "CSV Query")
+                final_query_name = f"{base_query_name} - Row {row_index + 1}"
+                if len(split_queries) > 1:
+                    final_query_name = f"{final_query_name} Query {query_index + 1}"
+
                 if databricks_cfg is not None:
                     try:
                         execution = service.execute_databricks_sql(translated_sql, databricks_cfg)
                     except Exception as exc:
                         execution = {"status": "FAILED", "error": str(exc)}
+
+                target_latency_ms = int((time.perf_counter() - started) * 1000)
+                source_latency_ms = None
+                if session_id and bq_sql.strip():
+                    try:
+                        source_started = time.perf_counter()
+                        _rows_from_source_session(source_engine, bq_sql, session_id)
+                        source_latency_ms = int((time.perf_counter() - source_started) * 1000)
+                    except Exception:
+                        pass
 
                 update_query_stats(
                     session_id.strip(),
@@ -888,10 +908,46 @@ async def translate_csv(
                     source_engine=source_engine,
                 )
 
+                if final_query_id:
+                    supabase_store.upsert_query_history({
+                        "query_id": final_query_id,
+                        "query_name": final_query_name,
+                        "source_engine": source_engine,
+                        "run_by": run_by,
+                        "last_ran_ts": datetime.utcnow(),
+                        "source_latency_ms": source_latency_ms,
+                        "target_latency_ms": target_latency_ms,
+                        "migration_mode": mode,
+                        "validation_status": "NOT RUN",
+                        "pushed_to_git": False,
+                        "source_sql": bq_sql,
+                        "translated_sql": translated_sql,
+                        "details": {
+                            "provider": provider,
+                            "model": model,
+                            "input_mode": "csv",
+                            "csv_file": file.filename,
+                            "csv_row": row_index + 1,
+                            "csv_query": query_index + 1,
+                            "validation": {
+                                "is_valid": validation.is_valid,
+                                "error_message": validation.error_message,
+                                "error_type": validation.error_type,
+                                "line_number": validation.line_number,
+                            },
+                            "complexity": complexity,
+                            "explanation": explanation,
+                            "suggestions": suggestions,
+                            "final_error": final_error,
+                        },
+                    })
+
                 translated_parts.append(translated_sql)
                 results.append(CsvQueryResult(
                     row_index=row_index,
                     query_index=query_index,
+                    query_id=final_query_id,
+                    query_name=final_query_name,
                     original_sql=bq_sql,
                     translated_sql=translated_sql,
                     explanation=explanation,
