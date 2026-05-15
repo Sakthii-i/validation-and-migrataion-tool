@@ -89,9 +89,8 @@ def _is_missing_object_error(message: str) -> bool:
     return any(pattern in text for pattern in patterns)
 
 
-def _sample_query(sql: str) -> str:
-    cleaned = (sql or "").strip().rstrip(";")
-    return f"SELECT * FROM ({cleaned}) AS source_query_sample LIMIT 5"
+def _normalize_query(sql: str) -> str:
+    return (sql or "").strip().rstrip(";")
 
 
 def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
@@ -99,6 +98,7 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
         return None
 
     cursor = None
+    started = time.perf_counter()
     try:
         from validation_tool.api.react_routes import _get_session
         from validation_tool.validation_engine import normalize_result
@@ -107,28 +107,18 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
         conn = session["source_conn"]
 
         cursor = conn.cursor()
-        cursor.execute(_sample_query(source_sql))
+        try:
+            cursor.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE")
+        except Exception:
+            pass
+        cursor.execute(_normalize_query(source_sql))
         statement_id = getattr(cursor, "sfqid", None)
         columns = [col[0] for col in cursor.description] if cursor.description else []
-        rows_raw = cursor.fetchall()
-        rows = [normalize_result(dict(zip(columns, row))) for row in rows_raw[:5]]
+        rows_raw = cursor.fetchmany(5)
+        rows = [normalize_result(dict(zip(columns, row))) for row in rows_raw]
         columns = list(rows[0].keys()) if rows else []
 
-        # Get Snowflake-reported execution time (what Snowflake UI shows)
-        execution_time_ms = None
-        if statement_id:
-            try:
-                time_cursor = conn.cursor()
-                time_cursor.execute(
-                    "SELECT TOTAL_ELAPSED_TIME FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()) "
-                    f"WHERE QUERY_ID = '{statement_id}' LIMIT 1"
-                )
-                time_row = time_cursor.fetchone()
-                if time_row and time_row[0] is not None:
-                    execution_time_ms = int(time_row[0])
-                time_cursor.close()
-            except Exception:
-                pass
+        execution_time_ms = int((time.perf_counter() - started) * 1000)
 
         return {
             "status": "SUCCEEDED",
@@ -146,6 +136,7 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
             "columns": [],
             "rows": [],
             "row_count": 0,
+            "execution_time_ms": int((time.perf_counter() - started) * 1000),
         }
     finally:
         if cursor is not None:
@@ -683,8 +674,15 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
     source_execution = _rows_from_source_session(payload.source_engine, payload.source_sql or "", payload.session_id)
     dbx_config = _stored_databricks_config()
 
+    def _timed_databricks_execute(sql: str) -> dict:
+        started = time.perf_counter()
+        execution = service.execute_databricks_sql(sql, dbx_config)
+        if isinstance(execution, dict):
+            execution["execution_time_ms"] = int((time.perf_counter() - started) * 1000)
+        return execution
+
     try:
-        databricks_execution = service.execute_databricks_sql(payload.sql, dbx_config)
+        databricks_execution = _timed_databricks_execute(payload.sql)
     except HTTPException:
         raise
     except Exception as exc:
@@ -705,7 +703,7 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
             payload.api_key,
         )
         if repaired_sql:
-            repaired_execution = service.execute_databricks_sql(repaired_sql, dbx_config)
+            repaired_execution = _timed_databricks_execute(repaired_sql)
             final_execution["databricks"] = repaired_execution
             final_execution["repaired_sql"] = repaired_sql
             final_execution["repair_message"] = "Databricks returned an error, so the SQL was repaired with LLM and run again."
@@ -727,13 +725,21 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
             updates["source_latency_ms"] = source_lat
         if target_lat is not None:
             updates["target_latency_ms"] = target_lat
+        updates["last_ran_ts"] = datetime.utcnow()
             
         if updates:
-            supabase_store.update_query_history(
-                payload.query_id, 
-                payload.source_engine,
-                updates
-            )
+            engines: list[str] = []
+            if payload.source_engine:
+                engines.append(payload.source_engine)
+            for engine in ("bigquery", "snowflake"):
+                if engine not in engines:
+                    engines.append(engine)
+            for engine in engines:
+                supabase_store.update_query_history(
+                    payload.query_id,
+                    engine,
+                    updates,
+                )
 
     return DatabricksExecuteResponse(execution=final_execution)
 

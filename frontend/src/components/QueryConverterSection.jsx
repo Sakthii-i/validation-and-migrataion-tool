@@ -500,10 +500,18 @@ export default function QueryConverterSection() {
         model,
         api_key: selectedApiKey,
         session_id: sessionId,
+        query_id: queryId,
       }, controller.signal);
       setExecution(res.data.execution || null);
       if (res.data.execution?.repaired_sql) {
         setTranslatedSql(res.data.execution.repaired_sql);
+      }
+      const targetLatencyMs = res.data.execution?.databricks?.execution_time_ms;
+      if (queryId && targetLatencyMs != null) {
+        await migrationAPI.updateQueryHistory(queryId, {
+          source_engine: sourceEngine.toLowerCase(),
+          target_latency_ms: targetLatencyMs,
+        });
       }
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {

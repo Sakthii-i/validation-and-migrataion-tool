@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
@@ -374,6 +375,145 @@ class TranslatorService:
                     "raw": statement_data,
                 }
 
+            def _metrics_runtime_ms(status_obj: dict) -> int | None:
+                if not isinstance(status_obj, dict):
+                    return None
+                metrics = status_obj.get("metrics") or {}
+                if not isinstance(metrics, dict):
+                    return None
+                for key in (
+                    "duration_ms",
+                    "execution_time_ms",
+                    "execution_duration_ms",
+                    "total_duration_ms",
+                    "query_duration_ms",
+                    "total_time_ms",
+                ):
+                    value = metrics.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        return int(float(value))
+                    except Exception:
+                        continue
+                return None
+
+            def _extract_runtime_ms(history_row: dict) -> int | None:
+                if not isinstance(history_row, dict):
+                    return None
+
+                def _coerce_epoch_ms(value: Any) -> int | None:
+                    if value is None:
+                        return None
+                    if isinstance(value, (int, float)):
+                        if value > 1e11:
+                            return int(value)
+                        if value > 1e8:
+                            return int(value * 1000)
+                        return int(value)
+                    if isinstance(value, str):
+                        try:
+                            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                            return int(dt.timestamp() * 1000)
+                        except Exception:
+                            return None
+                    return None
+
+                for key in (
+                    "execution_duration_ms",
+                    "total_duration_ms",
+                    "duration_ms",
+                    "query_duration_ms",
+                    "execution_time_ms",
+                    "total_time_ms",
+                    "duration",
+                ):
+                    value = history_row.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        return int(float(value))
+                    except Exception:
+                        continue
+
+                start_ms = _coerce_epoch_ms(history_row.get("start_time") or history_row.get("start_time_ms"))
+                end_ms = _coerce_epoch_ms(history_row.get("end_time") or history_row.get("end_time_ms"))
+                if start_ms is not None and end_ms is not None and end_ms >= start_ms:
+                    return int(end_ms - start_ms)
+
+                return None
+
+            def _history_runtime_ms(statement_id_value: str) -> int | None:
+                history_sql_candidates = [
+                    (
+                        "system.query_history",
+                        "SELECT * FROM system.query_history "
+                        f"WHERE statement_id = '{statement_id_value}' OR query_id = '{statement_id_value}' "
+                        "ORDER BY start_time DESC LIMIT 5",
+                    ),
+                    (
+                        "system.information_schema.query_history",
+                        "SELECT * FROM system.information_schema.query_history "
+                        f"WHERE statement_id = '{statement_id_value}' OR query_id = '{statement_id_value}' "
+                        "ORDER BY start_time DESC LIMIT 5",
+                    ),
+                ]
+
+                for history_source, history_sql in history_sql_candidates:
+                    history_payload = {
+                        "statement": history_sql,
+                        "warehouse_id": warehouse_id,
+                        "wait_timeout": "10s",
+                        "on_wait_timeout": "CONTINUE",
+                        "disposition": "EXTERNAL_LINKS",
+                        "format": "JSON_ARRAY",
+                    }
+
+                    try:
+                        history_resp = client.post(f"{host}/api/2.0/sql/statements", headers=headers, json=history_payload)
+                        history_resp.raise_for_status()
+                    except Exception:
+                        continue
+
+                    history_data = history_resp.json()
+                    history_statement_id = history_data.get("statement_id")
+                    if not history_statement_id:
+                        continue
+
+                    history_start = time.time()
+                    while True:
+                        status = (history_data.get("status") or {}).get("state", "")
+                        if status in ("SUCCEEDED", "FAILED", "CANCELED", "CLOSED"):
+                            break
+
+                        if (time.time() - history_start) > min(timeout_seconds, 30):
+                            history_statement_id = None
+                            break
+
+                        poll_url = f"{host}/api/2.0/sql/statements/{history_statement_id}"
+                        poll_resp = client.get(poll_url, headers=headers)
+                        poll_resp.raise_for_status()
+                        history_data = poll_resp.json()
+                        time.sleep(1)
+
+                    if not history_statement_id:
+                        continue
+
+                    final_history_status = (history_data.get("status") or {}).get("state", "")
+                    if final_history_status != "SUCCEEDED":
+                        continue
+
+                    history_extracted = self._extract_rows(history_data, max_rows=1, http_client=client, headers=headers)
+                    history_rows = history_extracted.get("rows") or []
+                    if not history_rows:
+                        continue
+
+                    runtime_ms = _extract_runtime_ms(history_rows[0])
+                    if runtime_ms is not None:
+                        return runtime_ms
+
+                return None
+
             start_time = time.time()
             while True:
                 status = (statement_data.get("status") or {}).get("state", "")
@@ -389,8 +529,11 @@ class TranslatorService:
                 statement_data = poll_resp.json()
                 time.sleep(1)
 
-            final_status = (statement_data.get("status") or {}).get("state", "")
-            execution_time_ms = int((time.time() - start_time) * 1000)
+            status_obj = statement_data.get("status") or {}
+            final_status = status_obj.get("state", "")
+            execution_time_ms = _metrics_runtime_ms(status_obj)
+            if execution_time_ms is None:
+                execution_time_ms = _history_runtime_ms(statement_id)
             if final_status != "SUCCEEDED":
                 err = (statement_data.get("status") or {}).get("error") or {}
                 message = err.get("message") or f"Databricks statement ended with status: {final_status}"
@@ -402,9 +545,7 @@ class TranslatorService:
                 }
 
             extracted = self._extract_rows(statement_data, max_rows=max_rows, http_client=client, headers=headers)
-            
-            # Estimate Databricks statement runtime from submit-to-terminal-status
-            
+
             return {
                 "status": final_status,
                 "statement_id": statement_id,
