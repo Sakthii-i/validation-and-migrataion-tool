@@ -30,6 +30,33 @@ class SQLPreprocessor:
         re.IGNORECASE,
     )
 
+    _BQ_HINTS = [
+        r"`[^`]+`",  # backtick-quoted identifiers
+        r"\bUNNEST\s*\(",
+        r"\bSAFE_(?:OFFSET|ORDINAL)\s*\(",
+        r"\bGENERATE_(?:ARRAY|DATE_ARRAY|TIMESTAMP_ARRAY)\s*\(",
+        r"\bARRAY<",  # BigQuery type literal
+        r"\bSTRUCT<",  # BigQuery type literal
+        r"@\w+",  # BigQuery parameter
+        r"\bSELECT\s+AS\s+STRUCT\b",
+    ]
+
+    _SNOWFLAKE_HINTS = [
+        r"::\s*[A-Za-z_][A-Za-z0-9_]*",  # Snowflake cast
+        r"\bILIKE\b",
+        r"\bSPLIT_PART\s*\(",
+        r"\bOBJECT_CONSTRUCT\s*\(",
+        r"\bARRAY_CONSTRUCT\s*\(",
+        r"\bTO_VARIANT\s*\(",
+        r"\bFLATTEN\s*\(",
+        r"\bIDENTIFIER\s*\(",
+        r"\bSEQ[248]\s*\(",
+        r"\bCURRENT_(?:DATABASE|SCHEMA|ROLE|WAREHOUSE)\s*\(",
+        r"\bZEROIFNULL\s*\(",
+        r"\bNVL2\s*\(",
+        r"\bIFF\s*\(",
+    ]
+
     @staticmethod
     def is_scripting_block(sql: str) -> bool:
         """Detect if SQL contains procedural scripting constructs."""
@@ -45,6 +72,42 @@ class SQLPreprocessor:
             if re.search(pat, sql, re.IGNORECASE):
                 return True
         return False
+
+    @staticmethod
+    def _can_parse(sql: str, dialect: str) -> bool:
+        try:
+            sqlglot.parse_one(sql, read=dialect)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def detect_source_engine(sql: str) -> str:
+        """Best-effort detection of BigQuery vs Snowflake input SQL."""
+        cleaned = SQLPreprocessor.clean_sql(sql or "")
+        if not cleaned:
+            return "unknown"
+
+        def _score(patterns: List[str]) -> int:
+            return sum(1 for pat in patterns if re.search(pat, cleaned, re.IGNORECASE))
+
+        bq_score = _score(SQLPreprocessor._BQ_HINTS)
+        sf_score = _score(SQLPreprocessor._SNOWFLAKE_HINTS)
+
+        bq_parse = SQLPreprocessor._can_parse(cleaned, "bigquery")
+        sf_parse = SQLPreprocessor._can_parse(cleaned, "snowflake")
+        if bq_parse and not sf_parse:
+            bq_score += 1
+        elif sf_parse and not bq_parse:
+            sf_score += 1
+
+        if bq_score == 0 and sf_score == 0:
+            return "unknown"
+        if bq_score > sf_score:
+            return "bigquery"
+        if sf_score > bq_score:
+            return "snowflake"
+        return "ambiguous"
 
     @staticmethod
     def clean_sql(sql: str) -> str:

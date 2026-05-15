@@ -96,6 +96,21 @@ def _normalize_query(sql: str) -> str:
     return (sql or "").strip().rstrip(";")
 
 
+def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
+    normalized_engine = (source_engine or "").strip().lower()
+    detected = SQLPreprocessor.detect_source_engine(sql)
+    if detected in ("bigquery", "snowflake") and detected != normalized_engine:
+        expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+        actual = "Snowflake" if detected == "snowflake" else "BigQuery"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Selected source engine is {expected}, but the SQL looks like {actual}. "
+                f"Switch Source Engine to {actual} or paste {expected} SQL."
+            ),
+        )
+
+
 def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
     if (source_engine or "").strip().lower() != "snowflake" or not (source_sql or "").strip():
         return None
@@ -559,6 +574,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         source_label = "Snowflake" if payload.source_engine.lower() == "snowflake" else "BigQuery"
         raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
+    _enforce_source_engine_match(payload.source_engine, payload.bq_sql)
+
     use_llm = payload.mode == "Auto (deterministic -> LLM migration -> validation)"
     complexity = complexity_analyzer.analyze(payload.bq_sql)
     translated_sql, explanation, stats, final_error = service.run_pipeline(
@@ -866,6 +883,7 @@ async def translate_csv(
         split_queries = _split_sql_queries(cell_value)
         for query_index, bq_sql in enumerate(split_queries):
             try:
+                _enforce_source_engine_match(source_engine, bq_sql)
                 started = time.perf_counter()
                 complexity = complexity_analyzer.analyze(bq_sql)
                 translated_sql, explanation, stats, final_error = service.run_pipeline(
