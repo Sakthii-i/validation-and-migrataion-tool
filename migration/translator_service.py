@@ -632,9 +632,101 @@ class TranslatorService:
             sql_text = _repair_common_llm_mistakes(sql_text)
             cleaned = rule_engine.apply_rules(sql_text)
             cleaned = rule_engine.apply_function_translation(cleaned)
+            cleaned = _rewrite_struct_with_as(cleaned)
             cleaned = ExpressionOptimizer.optimize(cleaned)
+            cleaned = _rewrite_struct_with_as(cleaned)
             cleaned = _repair_common_llm_mistakes(cleaned)
+            cleaned = _rewrite_struct_with_as(cleaned)
             return cleaned
+
+        def _rewrite_struct_with_as(sql_text: str) -> str:
+            def _process_struct(match: re.Match) -> str:
+                inner = match.group(1)
+                parts = []
+                depth = 0
+                current = []
+                in_quote = None
+                for ch in inner:
+                    if in_quote:
+                        if ch == in_quote and (len(current) == 0 or current[-1] != "\\"):
+                            in_quote = None
+                        current.append(ch)
+                    else:
+                        if ch in ("'", '"', '`'):
+                            in_quote = ch
+                            current.append(ch)
+                        elif ch == '(':
+                            depth += 1
+                            current.append(ch)
+                        elif ch == ')':
+                            depth -= 1
+                            current.append(ch)
+                        elif ch == ',' and depth == 0:
+                            parts.append("".join(current).strip())
+                            current = []
+                        else:
+                            current.append(ch)
+                if current:
+                    parts.append("".join(current).strip())
+
+                has_as = any(re.search(r"\s+AS\s+", p, re.IGNORECASE) for p in parts)
+                if not has_as:
+                    return f"STRUCT({inner})"
+
+                named_args = []
+                for part in parts:
+                    as_match = re.search(r"\s+AS\s+([A-Za-z0-9_]+)$", part, re.IGNORECASE)
+                    if as_match:
+                        alias = as_match.group(1)
+                        val = part[:as_match.start()].strip()
+                        named_args.append(f"'{alias}'")
+                        named_args.append(val)
+                    else:
+                        clean_part = part.replace('"', '').replace('`', '')
+                        named_args.append(f"'{clean_part}'")
+                        named_args.append(part)
+
+                return f"NAMED_STRUCT({', '.join(named_args)})"
+
+            out = []
+            idx = 0
+            pattern = re.compile(r"\bSTRUCT\s*\(", re.IGNORECASE)
+            while True:
+                match = pattern.search(sql_text, idx)
+                if not match:
+                    out.append(sql_text[idx:])
+                    break
+
+                start_paren = match.end() - 1
+                depth = 0
+                end_paren = -1
+                in_quote = None
+                for pos in range(start_paren, len(sql_text)):
+                    ch = sql_text[pos]
+                    if in_quote:
+                        if ch == in_quote and sql_text[pos - 1] != "\\":
+                            in_quote = None
+                    else:
+                        if ch in ("'", '"', "`"):
+                            in_quote = ch
+                        elif ch == "(":
+                            depth += 1
+                        elif ch == ")":
+                            depth -= 1
+                            if depth == 0:
+                                end_paren = pos
+                                break
+
+                if end_paren == -1:
+                    out.append(sql_text[idx:])
+                    break
+
+                inner = sql_text[start_paren + 1:end_paren]
+                out.append(sql_text[idx:match.start()])
+                out.append(_process_struct(type("StructMatch", (), {"group": lambda _self, _idx: inner})()))
+                idx = end_paren + 1
+
+            return "".join(out)
 
         def _is_suspiciously_short_llm_output(original_sql: str, llm_sql: str) -> bool:
             """Reject likely truncated LLM rewrites that would drop large parts of SQL."""
@@ -646,8 +738,9 @@ class TranslatorService:
                 return False
             return len(n) < max(1200, int(len(o) * 0.35))
 
-        cache_version = ":v2026_04_27_full_coverage"
-        cache_suffix = ":shared" + cache_version
+        cache_version = ":v2026_05_15_struct_named_v2"
+        source_key = (source_engine or "").strip().lower() or "bigquery"
+        cache_suffix = f":shared:{source_key}{cache_version}"
         cached = components["cache"].get(bq_sql + cache_suffix)
         if cached:
             stats["cache_hits"] = 1
@@ -710,6 +803,8 @@ class TranslatorService:
             t = rule_engine.apply_rules(t)
             t = rule_engine.apply_function_translation(t)
             t = ExpressionOptimizer.optimize(t)
+            if is_snowflake:
+                t = _rewrite_struct_with_as(t)
 
             # ── Per-chunk: only fix parse errors / validation failures ──
             # Proactive LLM migration is done ONCE on the full assembled
@@ -836,6 +931,14 @@ class TranslatorService:
         else:
             stats["steps"].append("Final SQL validated")
 
+        assembled = _post_llm_cleanup(assembled)
+        final_v = components["validator"].validate(assembled)
+        if not final_v.is_valid:
+            stats["errors"].append(f"Final deterministic cleanup still invalid: {final_v.error_message}")
+            stats["steps"].append(f"Validation warning: {final_v.error_message}")
+        else:
+            stats["steps"].append("Final deterministic cleanup applied")
+
         final_sql = SQLPreprocessor.restore_comments(assembled, comment_map)
         stats["steps"].append(f"Restored {len(comment_map)} comment(s)")
 
@@ -896,6 +999,15 @@ class TranslatorService:
         last_result = ""
 
         provider_norm = (provider or "OpenAI").strip().lower()
+
+        # Ensure model is valid for the selected provider
+        valid_models = []
+        for p, models in PROVIDER_MODEL_OPTIONS.items():
+            if p.lower() == provider_norm:
+                valid_models = models
+                break
+        if valid_models and (not model or model not in valid_models):
+            model = valid_models[0]
 
         def _extract_sql(text: str) -> str:
             text = text.strip()

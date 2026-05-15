@@ -666,4 +666,12 @@ class ExpressionOptimizer:
             if unit:
                 unit_lit = exp.Literal.string(str(unit).strip("'\""  ).upper())
                 return exp.Anonymous(this="DATE_TRUNC", expressions=[unit_lit, node.this])
+        # Preserve PERCENTILE_CONT / PERCENTILE_DISC (sqlglot databricks dialect degrades it to PERCENTILE_APPROX)
+        if isinstance(node, exp.WithinGroup) and isinstance(node.this, (exp.PercentileCont, exp.PercentileDisc)):
+            pct = node.this.this.sql(dialect="databricks")
+            order = node.expression.sql(dialect="databricks")
+            name = "PERCENTILE_CONT" if isinstance(node.this, exp.PercentileCont) else "PERCENTILE_DISC"
+            raw_sql = f"{name}({pct}) WITHIN GROUP ({order})"
+            return exp.var(raw_sql)
+
         return node

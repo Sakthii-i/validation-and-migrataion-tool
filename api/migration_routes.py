@@ -85,6 +85,9 @@ def _is_missing_object_error(message: str) -> bool:
         "not found",
         "unresolved relation",
         "no such table",
+        "cannot be found",
+        "missing_table_or_view",
+        "TABLE_OR_VIEW_NOT_FOUND",
     ]
     return any(pattern in text for pattern in patterns)
 

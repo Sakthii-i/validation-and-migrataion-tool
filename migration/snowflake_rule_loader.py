@@ -694,6 +694,12 @@ class SnowflakeRuleEngine:
                 'replacement': r'DATE_FORMAT(\1, \2)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
+            # TO_CHAR(x) → CAST(x AS STRING)
+            {
+                'pattern': r'\bTO_CHAR\s*\(([^,)]+)\)',
+                'replacement': r'CAST(\1 AS STRING)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
             # DATE_TRUNC — Snowflake: DATE_TRUNC(part, d)  Databricks: DATE_TRUNC('part', d) — same arg order
             # Normalize unquoted part to quoted
             {
@@ -1409,6 +1415,75 @@ class SnowflakeRuleEngine:
                 return f'CAST({expr} AS {db_type})'
             return pat.sub(_repl, query)
         sql = _replace_double_colon_casts(sql)
+
+        # ── DATE_FORMAT(expr) (missing format) → CAST(expr AS STRING) ───────
+        def _fix_date_format_missing_format(query: str) -> str:
+            pat = re.compile(r'\bDATE_FORMAT\s*\(', re.IGNORECASE)
+            i = 0
+            out = []
+            while True:
+                m = pat.search(query, i)
+                if not m:
+                    out.append(query[i:])
+                    break
+                out.append(query[i:m.start()])
+                start = m.end() - 1  # position of the opening '('
+                arg = self._extract_balanced_arg(query, start + 1)
+                end = start + 1 + len(arg) + 1
+
+                has_comma = False
+                depth = 0
+                in_quote = None
+                for ch in arg:
+                    if in_quote:
+                        if ch == in_quote:
+                            in_quote = None
+                    else:
+                        if ch in ("'", '"', '`'):
+                            in_quote = ch
+                        elif ch == '(':
+                            depth += 1
+                        elif ch == ')':
+                            depth -= 1
+                        elif ch == ',' and depth == 0:
+                            has_comma = True
+                            break
+
+                if not has_comma:
+                    out.append(f"CAST({arg.strip()} AS STRING)")
+                else:
+                    out.append(query[m.start():end])
+                i = end
+            return "".join(out)
+
+        sql = _fix_date_format_missing_format(sql)
+
+        # ── PERCENTILE_APPROX(col, p[, acc]) → PERCENTILE_CONT(p) WITHIN GROUP ─────
+        def _rewrite_percentile_approx(query: str) -> str:
+            pat = re.compile(r'\bPERCENTILE_APPROX\s*\(', re.IGNORECASE)
+            i = 0
+            out = []
+            while True:
+                m = pat.search(query, i)
+                if not m:
+                    out.append(query[i:])
+                    break
+                out.append(query[i:m.start()])
+                start = m.end() - 1
+                arg = self._extract_balanced_arg(query, start + 1)
+                end = start + 1 + len(arg) + 1
+
+                parts = self._split_top_level_commas(arg)
+                if len(parts) >= 2:
+                    col = parts[0].strip()
+                    pct = parts[1].strip()
+                    out.append(f"PERCENTILE_CONT({pct}) WITHIN GROUP (ORDER BY {col})")
+                else:
+                    out.append(query[m.start():end])
+                i = end
+            return "".join(out)
+
+        sql = _rewrite_percentile_approx(sql)
 
         # ── QUALIFY rewrite for ROW_NUMBER = 1 (full SELECT shape) ──────────
         def _rewrite_qualify_full(query: str) -> str:

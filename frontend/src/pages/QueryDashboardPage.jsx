@@ -65,13 +65,13 @@ export default function QueryDashboardPage() {
   const renderLatencyComparison = (row) => {
     const source = Number(row.source_latency_ms || 0);
     const target = Number(row.target_latency_ms || 0);
-    if (!(source > 0 && target > 0)) return '-';
+    if (target <= 0) return '-';
+    if (source <= 0) return `${target.toLocaleString()} ms`;
 
     const diff = source - target;
-    const diffLabel = `${diff > 0 ? '+' : ''}${diff.toLocaleString()} ms`;
-    if (diff > 0) return <span style={{ color: '#16a34a', fontWeight: 600 }}>{diffLabel} (faster)</span>;
-    if (diff < 0) return <span style={{ color: '#dc2626', fontWeight: 600 }}>{diffLabel} (slower)</span>;
-    return <span style={{ fontWeight: 600 }}>{diffLabel} (same)</span>;
+    if (diff > 0) return <span style={{ color: '#16a34a', fontWeight: 600 }}>{target.toLocaleString()} ms (faster)</span>;
+    if (diff < 0) return <span style={{ color: '#dc2626', fontWeight: 600 }}>{target.toLocaleString()} ms (slower)</span>;
+    return <span style={{ fontWeight: 600 }}>{target.toLocaleString()} ms (same)</span>;
   };
 
   return (
@@ -161,9 +161,9 @@ export default function QueryDashboardPage() {
                 <Info label="Input Mode" value={detailRow.details?.input_mode || '-'} />
                 <Info label="Validation" value={<StatusBadge status={detailRow.validation_status || 'NOT RUN'} />} />
                 <Info label="Pushed To Git" value={detailRow.pushed_to_git ? 'Yes' : 'No'} />
-                <Info label="Source Runtime" value={formatLatency(detailRow.source_latency_ms)} />
-                <Info label="Target Runtime" value={formatLatency(detailRow.target_latency_ms)} />
-                <Info label="Source-Target" value={renderLatencyComparison(detailRow)} />
+                <Info label="Source Latency" value={formatLatency(detailRow.source_latency_ms)} />
+                <Info label="Target Latency" value={formatLatency(detailRow.target_latency_ms)} />
+                <Info label="Comparison" value={renderLatencyComparison(detailRow)} />
               </div>
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <SqlBlock title={`${sourceEngine} SQL`} sql={detailRow.source_sql} />

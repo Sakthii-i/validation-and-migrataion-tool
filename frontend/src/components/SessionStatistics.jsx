@@ -18,13 +18,11 @@ export default function SessionStatistics({ stats }) {
       <SummaryMetric
         title="Migrated"
         value={safeStats.successful_migrations ?? 0}
-        icon={<RefreshCw size={22} />}
         tone="blue"
       />
       <SummaryMetric
         title="Validated"
         value={safeStats.validated_queries ?? 0}
-        icon={<CheckCircle2 size={22} />}
         tone="green"
       />
       <SummaryMetric
