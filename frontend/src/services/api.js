@@ -114,6 +114,8 @@ export const migrationAPI = {
     formData.append('model', options.model || '');
     formData.append('mode', options.mode || 'Auto (deterministic -> LLM migration -> validation)');
     formData.append('api_key', options.apiKey || '');
+    formData.append('query_name', options.queryName || options.query_name || '');
+    formData.append('run_by', options.runBy || options.run_by || '');
     formData.append('run_in_databricks', options.runInDatabricks ? 'true' : 'false');
     formData.append('databricks_host', options.databricksConfig?.host || '');
     formData.append('databricks_token', options.databricksConfig?.token || '');

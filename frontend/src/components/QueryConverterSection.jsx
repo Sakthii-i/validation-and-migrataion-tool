@@ -19,6 +19,23 @@ const toPayloadSettings = (settings) => {
   };
 };
 
+const validationSummaryStatus = (payload) => {
+  const rows = Array.isArray(payload?.results) ? payload.results : [];
+  const checks = rows.flatMap((row) => [
+    row.row_count,
+    row.schema_check,
+    row.numeric_check,
+    row.hash_validation,
+  ]).filter((value) => {
+    const text = String(value || '').trim().toUpperCase();
+    return text && text !== 'N/A' && text !== 'NONE' && text !== '-' && text !== '—';
+  });
+
+  if (!rows.length) return '';
+  if (!checks.length) return 'DONE';
+  return checks.every((value) => String(value).trim().toUpperCase() === 'PASS') ? 'PASS' : 'FAIL';
+};
+
 function loadJson(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key);
@@ -205,11 +222,6 @@ export default function QueryConverterSection() {
       return;
     }
 
-    if (!hasRequiredSnowflakeConnection) {
-      setTranslatedSql('Please establish a Snowflake connection first. Stored Snowflake credentials from the backend will be used.');
-      return;
-    }
-
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -245,11 +257,6 @@ export default function QueryConverterSection() {
   const handleCsvTranslate = async () => {
     if (!csvFile) return;
 
-    if (!hasRequiredSnowflakeConnection) {
-      setCsvError('Please establish a Snowflake connection first. Stored Snowflake credentials from the backend will be used.');
-      return;
-    }
-
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -261,6 +268,8 @@ export default function QueryConverterSection() {
       const res = await migrationAPI.translateCsv(csvFile, {
         ...buildPayload(),
         apiKey: selectedApiKey,
+        queryName,
+        runBy: user?.username || '',
         sourceEngine: sourceEngine.toLowerCase(),
         runInDatabricks: false,
         databricksConfig: null,
@@ -517,6 +526,120 @@ export default function QueryConverterSection() {
     }
   };
 
+  const handleRunCsvDatabricks = async () => {
+    const runnableRows = csvResults
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => String(row.translated_sql || '').trim());
+
+    if (!runnableRows.length || runningDatabricks) return;
+    if (isSnowflake && !isConnected) {
+      setCsvError('Please establish a Snowflake connection from the sidebar before running source and Databricks outputs.');
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setRunningDatabricks(true);
+    setCsvError('');
+    try {
+      for (const { row, index } of runnableRows) {
+        const res = await migrationAPI.runStoredDatabricks({
+          sql: row.translated_sql,
+          source_sql: row.original_sql,
+          source_engine: sourceEngine.toLowerCase(),
+          provider,
+          model,
+          api_key: selectedApiKey,
+          session_id: sessionId,
+        }, controller.signal);
+
+        setCsvResults((prev) => prev.map((item, itemIndex) => {
+          if (itemIndex !== index) return item;
+          const executionData = res.data.execution || null;
+          return {
+            ...item,
+            translated_sql: executionData?.repaired_sql || item.translated_sql,
+            execution: executionData,
+          };
+        }));
+      }
+    } catch (err) {
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
+        setCsvError('Databricks run cancelled.');
+      } else {
+        setCsvError(`Databricks run error: ${err.response?.data?.detail || err.message}`);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setRunningDatabricks(false);
+    }
+  };
+
+  const handleRunCsvValidation = async () => {
+    setQueryValidationError('');
+    setQueryValidationResults(null);
+
+    const validRows = csvResults
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => String(row.original_sql || '').trim() && String(row.translated_sql || '').trim());
+
+    if (!showDataValidation || !validRows.length) return;
+    if (!sessionId) {
+      setQueryValidationError(`No active session. Load ${sourceLabel} credentials from Run Validation first.`);
+      return;
+    }
+    if (isSnowflake && !hasRequiredSnowflakeConnection) {
+      setQueryValidationError('Please establish a Snowflake connection from the sidebar first.');
+      return;
+    }
+
+    const metricsSelected = validationSettings.validationType === 'shallow'
+      || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
+    if (!metricsSelected) {
+      setQueryValidationError('Select at least one metric (or choose Shallow).');
+      return;
+    }
+
+    setQueryValidationRunning(true);
+    try {
+      const collectedResults = [];
+      const validationRecords = [];
+      for (const { row, index } of validRows) {
+        const res = await validationAPI.runQuery({
+          session_id: sessionId,
+          validation_type: validationSettings.validationType,
+          run_by: user?.username || undefined,
+          settings: toPayloadSettings(validationSettings),
+          source_sql: row.original_sql,
+          target_sql: row.translated_sql,
+        });
+        const validationData = res.data;
+        collectedResults.push({
+          row: row.row_index + 1,
+          query: row.query_index + 1,
+          result: validationData,
+        });
+        validationRecords.push(...(validationData.results || []));
+        setCsvResults((prev) => prev.map((item, itemIndex) => (
+          itemIndex === index ? { ...item, query_validation: validationData, query_validation_error: '' } : item
+        )));
+        if (row.query_id) {
+          await migrationAPI.updateQueryHistory(row.query_id, {
+            source_engine: sourceEngine.toLowerCase(),
+            validation_status: 'VALIDATED',
+          });
+        }
+      }
+      setQueryValidationResults({ results: validationRecords, csv_results: collectedResults });
+    } catch (err) {
+      setQueryValidationError(err.response?.data?.detail || err.message || 'Failed to run validation.');
+    } finally {
+      setQueryValidationRunning(false);
+    }
+  };
+
   const handleRunQueryValidation = async () => {
     setQueryValidationError('');
     setQueryValidationResults(null);
@@ -618,18 +741,29 @@ export default function QueryConverterSection() {
   const dataValidationMetricsSelected = validationSettings.validationType === 'shallow'
     || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
 
+  const csvRowsReadyForValidation = useMemo(
+    () => csvResults.some((row) => String(row.original_sql || '').trim() && String(row.translated_sql || '').trim()),
+    [csvResults],
+  );
+
   const queryValidationBlockers = useMemo(() => {
     const blockers = [];
     if (!showDataValidation) return blockers;
     if (!sessionId) blockers.push('No active session. Open Run Validation and connect first.');
-    if (!bqSql.trim()) blockers.push(`${sourceLabel} source SQL is empty.`);
-    if (!translatedSql.trim()) blockers.push('Converted SQL for validation is empty.');
+    if (inputMode === 'csv') {
+      if (!csvRowsReadyForValidation) blockers.push('No CSV rows have both source SQL and converted SQL.');
+    } else {
+      if (!bqSql.trim()) blockers.push(`${sourceLabel} source SQL is empty.`);
+      if (!translatedSql.trim()) blockers.push('Converted SQL for validation is empty.');
+    }
     if (!dataValidationMetricsSelected) blockers.push('Select at least one metric (or choose Shallow).');
     if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
     return blockers;
   }, [
     showDataValidation,
     sessionId,
+    inputMode,
+    csvRowsReadyForValidation,
     bqSql,
     translatedSql,
     dataValidationMetricsSelected,
@@ -640,8 +774,7 @@ export default function QueryConverterSection() {
   const canRunQueryValidation = Boolean(
     showDataValidation
     && sessionId
-    && bqSql.trim()
-    && translatedSql.trim()
+    && (inputMode === 'csv' ? csvRowsReadyForValidation : (bqSql.trim() && translatedSql.trim()))
     && dataValidationMetricsSelected
     && (!isSnowflake || hasRequiredSnowflakeConnection)
   );
@@ -673,12 +806,6 @@ export default function QueryConverterSection() {
           </div>
 
           <div className="space-y-4">
-            {isSnowflake && !hasRequiredSnowflakeConnection && (
-              <div className="alert alert-warning">
-                Please establish a Snowflake connection from the sidebar before converting.
-              </div>
-            )}
-
             <div className="form-group">
               <label className="form-label">LLM Provider</label>
               <select className="form-select" value={provider} onChange={(e) => setProvider(e.target.value)}>
@@ -869,6 +996,18 @@ export default function QueryConverterSection() {
               <button className="btn btn-outline" type="button" onClick={downloadCsv} disabled={!csvResults.length}>
                 <Download size={16} /> Download CSV
               </button>
+              <button className="btn btn-success" type="button" onClick={handleRunCsvDatabricks} disabled={!csvResults.length || runningDatabricks}>
+                {runningDatabricks ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+                Run in Databricks
+              </button>
+              <button
+                className={`btn btn-outline ${showDataValidation ? 'btn-primary' : ''}`}
+                type="button"
+                onClick={() => setShowDataValidation((prev) => !prev)}
+                disabled={!csvResults.length}
+              >
+                <Play size={16} /> Data Validation
+              </button>
             </div>
 
             {csvError && <div className="alert alert-error">{csvError}</div>}
@@ -882,17 +1021,19 @@ export default function QueryConverterSection() {
                     <thead>
                       <tr>
                         <th>Row</th>
-                        <th>Status</th>
+                        <th>Query ID</th>
                         <th>Complexity</th>
                         <th>Original SQL</th>
                         <th>Translated SQL</th>
+                        <th>Databricks</th>
+                        <th>Validation</th>
                       </tr>
                     </thead>
                     <tbody>
                       {csvResults.map((row, index) => (
                         <tr key={`${row.row_index}-${row.query_index}-${index}`}>
                           <td>{row.row_index + 1}</td>
-                          <td>{row.validation?.is_valid ? <span className="badge badge-pass">Valid</span> : <span className="badge badge-fail">Issue</span>}</td>
+                          <td className="font-mono text-xs text-primary-600">{row.query_id || '-'}</td>
                           <td>
                             {row.stats?.complexity ? (
                               <span className="badge badge-info">
@@ -904,11 +1045,61 @@ export default function QueryConverterSection() {
                           </td>
                           <td><pre className="max-h-32 max-w-md overflow-auto whitespace-pre-wrap font-mono text-xs">{row.original_sql}</pre></td>
                           <td><pre className="max-h-32 max-w-md overflow-auto whitespace-pre-wrap font-mono text-xs">{row.translated_sql}</pre></td>
+                          <td>
+                            {row.execution ? (
+                              <StatusBadge status={row.execution?.databricks?.status || row.execution?.status || 'RUN'} />
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
+                          </td>
+                          <td>
+                            {row.query_validation ? (
+                              <StatusBadge status={validationSummaryStatus(row.query_validation)} />
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+
+                {showDataValidation && (
+                  <div className="space-y-4">
+                    {!sessionId && (
+                      <div className="alert alert-info">
+                        Load {sourceLabel} credentials from Run Validation to enable query validation.
+                      </div>
+                    )}
+                    <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                    {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
+                    {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
+                      <div className="alert alert-warning">
+                        <div className="font-semibold mb-1">Run Validation is disabled because:</div>
+                        <ul className="list-disc ml-5 text-sm">
+                          {queryValidationBlockers.map((reason) => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <button
+                      className="btn btn-primary btn-full btn-lg"
+                      type="button"
+                      onClick={handleRunCsvValidation}
+                      disabled={!canRunQueryValidation || queryValidationRunning}
+                    >
+                      {queryValidationRunning ? <><Loader2 size={18} className="animate-spin" /> Running Validations...</> : <><Play size={18} /> Run Validation</>}
+                    </button>
+                    {queryValidationResults?.csv_results && (
+                      <div className="alert alert-info">
+                        Completed validation for {queryValidationResults.csv_results.length} CSV quer{queryValidationResults.csv_results.length === 1 ? 'y' : 'ies'}.
+                      </div>
+                    )}
+                    {queryValidationResults && <ResultsDisplay results={queryValidationResults} />}
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -143,6 +143,8 @@ class ConfigResponse(BaseModel):
 class CsvQueryResult(BaseModel):
     row_index: int
     query_index: int
+    query_id: Optional[str] = None
+    query_name: Optional[str] = None
     original_sql: str
     translated_sql: str
     explanation: str
