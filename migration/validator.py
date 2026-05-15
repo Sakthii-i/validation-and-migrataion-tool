@@ -83,7 +83,7 @@ class SQLValidator:
                 if residual:
                     return ValidationResult(
                         is_valid=False,
-                        error_message=f"Untranslated BigQuery syntax detected: {'; '.join(residual)}",
+                        error_message=f"Untranslated source SQL syntax detected: {'; '.join(residual)}",
                         error_type="RESIDUAL_BQ_SYNTAX",
                     )
                 return ValidationResult(is_valid=True)
@@ -229,7 +229,7 @@ class SQLValidator:
         return "Check data type compatibility between BQ and Databricks types"
 
     def _handle_residual_bq(self, error: str) -> str:
-        return f"Deterministic translation incomplete — {error}"
+        return f"Deterministic translation incomplete — unresolved source SQL patterns remain: {error}"
 
     def suggest_fixes(self, result: ValidationResult) -> List[str]:
         """Generate human-readable suggestions for fixing errors."""

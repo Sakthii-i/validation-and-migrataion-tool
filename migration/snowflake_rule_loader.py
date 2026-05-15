@@ -1296,11 +1296,78 @@ class SnowflakeRuleEngine:
         sql = _restore_jinja(sql, jinja_map)
         return sql
 
+    # ── Helper: Convert STRUCT(col AS alias, ...) to NAMED_STRUCT('alias', col, ...) ──────
+
+    def _convert_struct_with_as_to_named_struct(self, sql: str) -> str:
+        """
+        Convert STRUCT(col AS alias, col2 AS alias2, ...) to NAMED_STRUCT('alias', col, 'alias2', col2, ...).
+        Respects nested parentheses and quotes.
+        """
+        def _process_struct(match):
+            inner = match.group(1)
+            # Split by comma while respecting nesting
+            parts = []
+            depth = 0
+            current = []
+            in_quote = None
+            for ch in inner:
+                if in_quote:
+                    if ch == in_quote and (len(current) == 0 or current[-1] != '\\'):
+                        in_quote = None
+                    current.append(ch)
+                else:
+                    if ch in ("'", '"', '`'):
+                        in_quote = ch
+                        current.append(ch)
+                    elif ch == '(': 
+                        depth += 1
+                        current.append(ch)
+                    elif ch == ')': 
+                        depth -= 1
+                        current.append(ch)
+                    elif ch == ',' and depth == 0:
+                        parts.append("".join(current).strip())
+                        current = []
+                    else:
+                        current.append(ch)
+            if current:
+                parts.append("".join(current).strip())
+            
+            # Check if any part has AS clause
+            has_as = any(re.search(r'\s+AS\s+', p, re.IGNORECASE) for p in parts)
+            if not has_as:
+                return f"STRUCT({inner})"
+            
+            # Convert each part to named_struct argument
+            named_args = []
+            for part in parts:
+                as_match = re.search(r'\s+AS\s+([A-Za-z0-9_]+)$', part, re.IGNORECASE)
+                if as_match:
+                    alias = as_match.group(1)
+                    val = part[:as_match.start()].strip()
+                    named_args.append(f"'{alias}'")
+                    named_args.append(val)
+                else:
+                    # No AS clause, treat as-is
+                    clean_part = part.replace('"', '').replace('`', '')
+                    named_args.append(f"'{clean_part}'")
+                    named_args.append(part)
+            
+            return f"NAMED_STRUCT({', '.join(named_args)})"
+        
+        # Match STRUCT(...) with balanced parentheses
+        pattern = r'\bSTRUCT\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)'
+        result = re.sub(pattern, _process_struct, sql, flags=re.IGNORECASE)
+        return result
+
     # ── apply_function_translation ───────────────────────────────────────────
 
     def apply_function_translation(self, sql: str) -> str:
         """Second-pass: type names, cast syntax, trailing commas, safety fixes."""
         sql, jinja_map = _extract_jinja(sql)
+
+        # ── Convert STRUCT(col AS alias, ...) to NAMED_STRUCT('alias', col, ...) ──────
+        sql = self._convert_struct_with_as_to_named_struct(sql)
 
         # ── Double-colon cast: expr::TYPE → CAST(expr AS TYPE) ────────────
         # Walk paren-balanced expressions for ::
