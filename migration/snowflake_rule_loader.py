@@ -22,7 +22,12 @@ Priority ladder (highest wins):
 from __future__ import annotations
 
 import re
+import logging
 from typing import Callable, Dict, List, Optional
+
+# basic logging setup to avoid "No logger" warnings
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 
 # ── tiny Jinja helpers (mirrors ast_transformer stubs) ──────────────────────
@@ -171,8 +176,7 @@ class SnowflakeRuleEngine:
             r'SELECT',
             sql, flags=re.IGNORECASE,
         )
-        # Keep the LIMIT by appending; handled heuristically here,
-        # exact position fixed in apply_function_translation.
+        # Keep the LIMIT by appending; exact position fixed in apply_function_translation.
 
         # ── SAMPLE(n ROWS) → TABLESAMPLE(n ROWS) ────────────────────────────
         sql = re.sub(
@@ -1058,7 +1062,7 @@ class SnowflakeRuleEngine:
             # CLUSTER BY → OPTIMIZE + ZORDER comment
             {
                 'pattern': r'\bCLUSTER\s+BY\s*\(([^)]+)\)',
-                'replacement': r'/* NOTE: Snowflake CLUSTER BY replaced; run: OPTIMIZE <table> ZORDER BY (\1) */',
+                'replacement': r'/* NOTE: Snowflake CLUSTER BY replaced; run: OPTIMIZE <tr> ZORDER BY (\1) */',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             # AT(timestamp => ...) / AT(offset => ...) time travel
@@ -1254,9 +1258,6 @@ class SnowflakeRuleEngine:
 
     def apply_rules(self, sql: str) -> str:
         """Apply all deterministic pattern rules in priority order."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         sql, jinja_map = _extract_jinja(sql)
 
         # ── Rewrite QUALIFY ROW_NUMBER() OVER (...) = 1 to subquery ─────────
@@ -1541,4 +1542,18 @@ def build_engine_from_csv(csv_path: str) -> SnowflakeRuleEngine:
     rules_list, edge_cases = load_snowflake_rules_from_csv(csv_path)
     return SnowflakeRuleEngine(rules_list, edge_cases)
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# Runnable entry point – converts a given Snowflake SQL to Databricks SQL
+# ════════════════════════════════════════════════════════════════════════════
+def convert_snowflake_to_databricks(snowflake_sql: str) -> str:
+    """
+    High-level function to convert a Snowflake SQL string to Databricks SQL.
+    Uses only built‑in rules (no external CSV).
+    """
+    engine = SnowflakeRuleEngine(rules_list=[], edge_cases=[])
+    sql = engine.apply_pre_ast_translation(snowflake_sql)
+    sql = engine.apply_rules(sql)
+    sql = engine.apply_function_translation(sql)
+    return sql
 
