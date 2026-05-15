@@ -27,6 +27,7 @@ except Exception:
 
 from .ast_transformer import BigQueryToDatabricksTransformer, ExpressionOptimizer
 from .rule_engine import RuleEngine
+from .snowflake_rule_loader import SnowflakeRuleEngine, build_engine_from_csv
 from .sql_processor import ExpressionCache, QueryChunker, SQLPreprocessor
 from .translation_cache import TranslationCache
 from .complexity_analyzer import QueryComplexityAnalyzer
@@ -161,11 +162,21 @@ class TranslatorService:
     def _init_components(self) -> Dict[str, Any]:
         rules_list, _, edge_cases = load_conversion_rules()
         cache_db_path = os.environ.get("TRANSLATION_CACHE_DB_PATH", os.path.join(BASE_DIR, "translation_cache.db"))
+        snowflake_csv = os.environ.get("SNOWFLAKE_RULES_CSV_PATH") or os.path.join(BASE_DIR, "conversion_rules_snowflake.csv")
+        snowflake_engine = None
+        if os.path.exists(snowflake_csv):
+            try:
+                snowflake_engine = build_engine_from_csv(snowflake_csv)
+            except Exception:
+                snowflake_engine = None
+        if snowflake_engine is None:
+            snowflake_engine = SnowflakeRuleEngine([], [])
         return {
             "preprocessor": SQLPreprocessor(),
             "chunker": QueryChunker(max_chunk_size=500),
             "transformer": BigQueryToDatabricksTransformer(),
             "rule_engine": RuleEngine(rules_list, edge_cases),
+            "snowflake_rule_engine": snowflake_engine,
             "cache": TranslationCache(db_path=cache_db_path),
             "validator": SQLValidator(),
             "expr_cache": ExpressionCache(),
@@ -595,6 +606,8 @@ class TranslatorService:
     ) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
         components = self.components
         client = self.get_llm_client(provider, api_key) if use_llm else None
+        is_snowflake = (source_engine or "").strip().lower() == "snowflake"
+        rule_engine = components["snowflake_rule_engine"] if is_snowflake else components["rule_engine"]
 
         stats: Dict[str, Any] = {
             "steps": [],
@@ -617,8 +630,8 @@ class TranslatorService:
 
         def _post_llm_cleanup(sql_text: str) -> str:
             sql_text = _repair_common_llm_mistakes(sql_text)
-            cleaned = components["rule_engine"].apply_rules(sql_text)
-            cleaned = components["rule_engine"].apply_function_translation(cleaned)
+            cleaned = rule_engine.apply_rules(sql_text)
+            cleaned = rule_engine.apply_function_translation(cleaned)
             cleaned = ExpressionOptimizer.optimize(cleaned)
             cleaned = _repair_common_llm_mistakes(cleaned)
             return cleaned
@@ -677,18 +690,25 @@ class TranslatorService:
                 translated_map[chunk_id] = cached_expr
                 continue
 
-            t, transpile_err = self._transpile_to_databricks(chunk.sql, source_engine)
+            input_sql = rule_engine.apply_pre_ast_translation(chunk.sql) if is_snowflake else chunk.sql
+            t, transpile_err = self._transpile_to_databricks(input_sql, source_engine)
             if transpile_err:
                 # Keep deterministic behavior robust for noisy/Jinja-heavy inputs:
                 # if direct sqlglot transpile fails, fall back to legacy AST/regex path.
-                pre_ast_sql = RuleEngine.apply_pre_ast_translation(chunk.sql)
-                t = components["transformer"].transform(pre_ast_sql)
-                stats["steps"].append(
-                    f"Chunk {chunk_id}: sqlglot transpile failed -> legacy deterministic fallback applied"
-                )
+                if is_snowflake:
+                    t = rule_engine.apply_pre_ast_translation(chunk.sql)
+                    stats["steps"].append(
+                        f"Chunk {chunk_id}: sqlglot transpile failed -> snowflake rules fallback applied"
+                    )
+                else:
+                    pre_ast_sql = RuleEngine.apply_pre_ast_translation(chunk.sql)
+                    t = components["transformer"].transform(pre_ast_sql)
+                    stats["steps"].append(
+                        f"Chunk {chunk_id}: sqlglot transpile failed -> legacy deterministic fallback applied"
+                    )
 
-            t = components["rule_engine"].apply_rules(t)
-            t = components["rule_engine"].apply_function_translation(t)
+            t = rule_engine.apply_rules(t)
+            t = rule_engine.apply_function_translation(t)
             t = ExpressionOptimizer.optimize(t)
 
             # ── Per-chunk: only fix parse errors / validation failures ──
