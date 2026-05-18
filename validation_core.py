@@ -21,6 +21,10 @@ from .query_builder import (
     build_row_hash_query_v2,
     get_numeric_columns,
 )
+try:
+    from .datatype_utils import normalize_datatype as canonical_normalize_datatype
+except ImportError:
+    from datatype_utils import normalize_datatype as canonical_normalize_datatype
 
 # ---------- Logging setup ----------
 logging.basicConfig(level=logging.INFO)
@@ -219,6 +223,7 @@ DATA_TYPE_EQUIVALENCE = {
 }
 
 def normalize_datatype(dtype: str, column_name: str = None) -> str:
+    return canonical_normalize_datatype(dtype, column_name)
     if not dtype:
         return "unknown"
     dtype_lower = str(dtype).lower().strip()

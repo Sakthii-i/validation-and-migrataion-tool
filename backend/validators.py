@@ -14,6 +14,10 @@ from validation_tool.query_builder import (
     build_shallow_query,
     get_numeric_columns,
 )
+try:
+    from validation_tool.datatype_utils import normalize_datatype as canonical_normalize_datatype
+except ImportError:
+    from datatype_utils import normalize_datatype as canonical_normalize_datatype
 
 
 # Keep schema/type normalization consistent with the Streamlit UI.
@@ -76,6 +80,7 @@ DATA_TYPE_EQUIVALENCE = {
 
 
 def normalize_datatype(dtype, column_name: str | None = None) -> str:
+    return canonical_normalize_datatype(dtype, column_name)
     if not dtype:
         return "unknown"
 

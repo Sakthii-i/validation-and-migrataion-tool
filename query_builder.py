@@ -52,7 +52,11 @@ def build_schema_query(engine, catalog, schema, table):
         return f"""
         SELECT
             column_name,
-            data_type,
+            CASE
+                WHEN lower(data_type) IN ('decimal', 'dec', 'numeric')
+                    THEN data_type || '(' || numeric_precision || ',' || numeric_scale || ')'
+                ELSE data_type
+            END AS data_type,
             is_nullable
         FROM system.information_schema.columns
                 WHERE lower(table_catalog) = lower('{catalog}')
@@ -65,7 +69,11 @@ def build_schema_query(engine, catalog, schema, table):
         return f"""
         SELECT
             column_name,
-            data_type,
+            CASE
+                WHEN data_type IN ('NUMBER', 'DECIMAL', 'NUMERIC')
+                    THEN data_type || '(' || numeric_precision || ',' || numeric_scale || ')'
+                ELSE data_type
+            END AS data_type,
             is_nullable
         FROM {catalog}.information_schema.columns
                 WHERE lower(table_schema) = lower('{schema}')

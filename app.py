@@ -52,6 +52,7 @@ from connections.databricks import connect_databricks
 from connections.postgres import POSTGRES_CONFIG
 from connections.snowflake import connect_snowflake
 from metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
+from datatype_utils import normalize_datatype as canonical_normalize_datatype
 from query_builder import build_shallow_query, build_schema_query, get_numeric_columns,build_numeric_stats_query,build_row_hash_query, build_row_signature_sample_query, build_row_hash_mismatch_rows_query_v2, build_column_diff_query
 os.getenv("DASHBOARD_DBX_TOKEN")
 import plotly.express as px
@@ -765,6 +766,7 @@ DATA_TYPE_EQUIVALENCE = {
 }
 
 def normalize_datatype(dtype, column_name=None):
+    return canonical_normalize_datatype(dtype, column_name)
     """
     Normalize data type with column-specific logic for NUMBER types
     """
