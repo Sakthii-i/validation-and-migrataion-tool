@@ -142,7 +142,8 @@ export default function ValidationDetailsPage() {
                 ) : (
                   (() => {
                     const numericRows = detailRow?.details?.numeric?.rows || [];
-                    const nullCountRows = numericRows.filter((row) => {
+                    const nullRowsArray = detailRow?.details?.numeric?.null_rows || numericRows;
+                    const nullCountRows = nullRowsArray.filter((row) => {
                       const srcNull = Number(row?.source_null_count || 0);
                       const tgtNull = Number(row?.target_null_count || 0);
                       return srcNull > 0 || tgtNull > 0;

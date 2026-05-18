@@ -834,6 +834,37 @@ def run_validation(req: RunValidationRequest):
                             return f"{_quote_ident(q_engine, cat)}.{_quote_ident(q_engine, sch)}.{_quote_ident(q_engine, tbl)}"
                         return f"{cat}.{sch}.{tbl}"
 
+                    src_all_map = {str(r.get("column_name", "")).lower(): str(r.get("column_name", "")) for r in src_schema_rows}
+                    tgt_all_map = {str(r.get("column_name", "")).lower(): str(r.get("column_name", "")) for r in tgt_schema_rows}
+                    common_all = sorted(set(src_all_map.keys()) & set(tgt_all_map.keys()))
+
+                    null_rows_dict = {}
+                    if common_all:
+                        # Build bulk query for source
+                        src_null_cols_sql = [
+                            f"SUM(CASE WHEN {_quote_ident(engine, src_all_map[c])} IS NULL THEN 1 ELSE 0 END) AS {_quote_ident(engine, c + '_nulls')}"
+                            for c in common_all
+                        ]
+                        src_null_bulk_q = f"SELECT {', '.join(src_null_cols_sql)} FROM {_qualify_fqn(engine, src['catalog'], src['schema'], src['table'])} WHERE {normalize_where_input(src_where)}"
+                        src_null_res = normalize_result(execute_query(engine, source_conn, src_null_bulk_q)[0])
+
+                        # Build bulk query for target
+                        tgt_null_cols_sql = [
+                            f"SUM(CASE WHEN {_quote_ident('Databricks', tgt_all_map[c])} IS NULL THEN 1 ELSE 0 END) AS {_quote_ident('Databricks', c + '_nulls')}"
+                            for c in common_all
+                        ]
+                        tgt_null_bulk_q = f"SELECT {', '.join(tgt_null_cols_sql)} FROM {_qualify_fqn('Databricks', tgt['catalog'], tgt['schema'], tgt['table'])} WHERE {normalize_where_input(tgt_where)}"
+                        tgt_null_res = normalize_result(execute_query("Databricks", target_conn, tgt_null_bulk_q)[0])
+
+                        for c in common_all:
+                            src_null_count = src_null_res.get(c + "_nulls", 0)
+                            tgt_null_count = tgt_null_res.get(c + "_nulls", 0)
+                            null_rows_dict[c] = {
+                                "column": src_all_map[c],
+                                "source_null_count": int(src_null_count or 0),
+                                "target_null_count": int(tgt_null_count or 0)
+                            }
+
                     numeric_rows = []
                     for col_key in common:
                         src_col = src_numeric_map[col_key]
@@ -850,24 +881,12 @@ def run_validation(req: RunValidationRequest):
                         src_res = normalize_result(execute_query(engine, source_conn, src_q)[0])
                         tgt_res = normalize_result(execute_query("Databricks", target_conn, tgt_q)[0])
 
-                        src_null_q = (
-                            f"SELECT COUNT(*) AS null_count "
-                            f"FROM {_qualify_fqn(engine, src['catalog'], src['schema'], src['table'])} "
-                            f"WHERE {normalize_where_input(src_where)} AND {_quote_ident(engine, src_col)} IS NULL"
-                        )
-                        tgt_null_q = (
-                            f"SELECT COUNT(*) AS null_count "
-                            f"FROM {_qualify_fqn('Databricks', tgt['catalog'], tgt['schema'], tgt['table'])} "
-                            f"WHERE {normalize_where_input(tgt_where)} AND {_quote_ident('Databricks', tgt_col)} IS NULL"
-                        )
-
-                        src_null = normalize_result(execute_query(engine, source_conn, src_null_q)[0]).get("null_count")
-                        tgt_null = normalize_result(execute_query("Databricks", target_conn, tgt_null_q)[0]).get("null_count")
+                        null_counts = null_rows_dict.get(col_key, {})
 
                         numeric_rows.append({
                             "column": src_col,
-                            "source_null_count": int(src_null or 0),
-                            "target_null_count": int(tgt_null or 0),
+                            "source_null_count": null_counts.get("source_null_count", 0),
+                            "target_null_count": null_counts.get("target_null_count", 0),
                             "source_min": src_res.get("min_val"),
                             "source_max": src_res.get("max_val"),
                             "source_avg": src_res.get("avg_val"),
@@ -876,7 +895,10 @@ def run_validation(req: RunValidationRequest):
                             "target_avg": tgt_res.get("avg_val"),
                         })
 
-                    details["numeric"] = {"rows": numeric_rows}
+                    details["numeric"] = {
+                        "rows": numeric_rows,
+                        "null_rows": list(null_rows_dict.values())
+                    }
                 except Exception as e:
                     details["numeric"] = {"rows": [], "error": str(e)}
 

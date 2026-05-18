@@ -1608,7 +1608,8 @@ function ResultsDisplay({ results }) {
   const numericNotSelected = isNotSelected(numericStatus);
   const hashNotSelected = isNotSelected(hashStatus);
 
-  const nullCountRows = numericRows.filter((row) => {
+  const nullRowsArray = detailRecord?.details?.numeric?.null_rows || numericRows;
+  const nullCountRows = nullRowsArray.filter((row) => {
     const srcNull = Number(row?.source_null_count || 0);
     const tgtNull = Number(row?.target_null_count || 0);
     return srcNull > 0 || tgtNull > 0;
