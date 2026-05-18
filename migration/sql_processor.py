@@ -33,8 +33,15 @@ class SQLPreprocessor:
     _BQ_HINTS = [
         r"`[^`]+`",  # backtick-quoted identifiers
         r"\bUNNEST\s*\(",
+        r"\bSAFE_(?:CAST|DIVIDE|ADD|SUBTRACT|MULTIPLY|NEGATE)\s*\(",
         r"\bSAFE_(?:OFFSET|ORDINAL)\s*\(",
+        r"\bCOUNTIF\s*\(",
+        r"\bAPPROX_QUANTILES\s*\(",
         r"\bGENERATE_(?:ARRAY|DATE_ARRAY|TIMESTAMP_ARRAY)\s*\(",
+        r"\bFORMAT_(?:DATE|TIMESTAMP|DATETIME)\s*\(",
+        r"\bPARSE_(?:DATE|TIMESTAMP|DATETIME)\s*\(",
+        r"\bTO_JSON_STRING\s*\(",
+        r"\bJSON_EXTRACT_(?:SCALAR|ARRAY)\s*\(",
         r"\bARRAY<",  # BigQuery type literal
         r"\bSTRUCT<",  # BigQuery type literal
         r"@\w+",  # BigQuery parameter
@@ -43,6 +50,13 @@ class SQLPreprocessor:
 
     _SNOWFLAKE_HINTS = [
         r"::\s*[A-Za-z_][A-Za-z0-9_]*",  # Snowflake cast
+        r"\bOBJECT_AGG\s*\(",
+        r"\bMEDIAN\s*\(",
+        r"\bBOOLOR_AGG\s*\(",
+        r"\bBOOLAND_AGG\s*\(",
+        r"\bCOUNT_IF\s*\(",
+        r"\bHASH_AGG\s*\(",
+        r"\bAPPROX_PERCENTILE\s*\(",
         r"\bILIKE\b",
         r"\bSPLIT_PART\s*\(",
         r"\bOBJECT_CONSTRUCT\s*\(",

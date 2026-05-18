@@ -32,6 +32,7 @@ from validation_tool.query_builder import (
 )
 from validation_tool.backend import supabase_store
 from validation_tool.backend.session_store import update_query_stats
+from validation_tool.migration.sql_processor import SQLPreprocessor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -61,6 +62,26 @@ def _date_range(date_filter, start_date=None, end_date=None):
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=days)
     return str(start), str(end)
+
+
+def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
+    normalized_engine = (source_engine or "").strip().lower()
+    if normalized_engine not in ("bigquery", "snowflake"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+
+    detected = SQLPreprocessor.detect_source_engine(sql)
+    expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+    if detected in ("unknown", "ambiguous"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Selected source engine is {expected}, but the SQL does not have clear {expected} syntax.",
+        )
+    if detected != normalized_engine:
+        actual = "Snowflake" if detected == "snowflake" else "BigQuery"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Selected source engine is {expected}, but the SQL looks like {actual}.",
+        )
 
 # ── Active connections store (in-memory, per-process) ──
 _sessions = {}
@@ -1071,6 +1092,7 @@ def run_query_validation(req: QueryValidationRequest):
 
     sess = _get_session(req.session_id)
     session_id = req.session_id
+    _enforce_source_engine_match(sess.get("engine"), req.source_sql)
 
     src_table = _materialize_source_query_to_table(sess, session_id, req.source_sql)
     tgt_table = _materialize_databricks_query_to_table(sess, session_id, req.target_sql)

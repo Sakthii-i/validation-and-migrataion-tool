@@ -98,9 +98,22 @@ def _normalize_query(sql: str) -> str:
 
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
+    if normalized_engine not in ("bigquery", "snowflake"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+
     detected = SQLPreprocessor.detect_source_engine(sql)
-    if detected in ("bigquery", "snowflake") and detected != normalized_engine:
-        expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+    expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+
+    if detected in ("unknown", "ambiguous"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Selected source engine is {expected}, but the SQL does not have clear {expected} syntax. "
+                f"Add source-specific syntax or select the correct Source Engine."
+            ),
+        )
+
+    if detected != normalized_engine:
         actual = "Snowflake" if detected == "snowflake" else "BigQuery"
         raise HTTPException(
             status_code=400,
