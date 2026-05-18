@@ -811,6 +811,10 @@ export default function QueryConverterSection() {
       return a.localeCompare(b);
     });
   }, [gitFiles]);
+  const gitUploadBranches = useMemo(() => {
+    const filtered = gitBranches.filter((branch) => !['main', 'master'].includes(String(branch).toLowerCase()));
+    return filtered.length ? filtered : gitBranches;
+  }, [gitBranches]);
 
   const dataValidationMetricsSelected = validationSettings.validationType === 'shallow'
     || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
@@ -1344,7 +1348,7 @@ export default function QueryConverterSection() {
                     <div className="form-group">
                       <label className="form-label">Base Branch</label>
                       <select className="form-select" value={gitBranch} onChange={(e) => setGitBranch(e.target.value)}>
-                        {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                        {gitUploadBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
                       </select>
                     </div>
                   </div>
@@ -1353,7 +1357,7 @@ export default function QueryConverterSection() {
                     <label className="form-label">Target Branch</label>
                     <select className="form-select" value={gitUploadBranch} onChange={(e) => setGitUploadBranch(e.target.value)}>
                       <option value="">Select branch</option>
-                      {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                      {gitUploadBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
                     </select>
                   </div>
                 )}
