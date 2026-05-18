@@ -444,6 +444,8 @@ def _materialize_source_query_to_table(sess: dict, session_id: str, sql_text: st
             return None
         if text.upper() in {"NONE", "NULL"}:
             return None
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'", "`"}:
+            return text[1:-1].strip()
         return text
 
     suffix = uuid.uuid4().hex[:10]
@@ -830,7 +832,7 @@ def run_validation(req: RunValidationRequest):
                             return f"`{cat}.{sch}.{tbl}`"
                         if q_engine.lower() == "databricks":
                             return f"{_quote_ident(q_engine, cat)}.{_quote_ident(q_engine, sch)}.{_quote_ident(q_engine, tbl)}"
-                        return f'{_quote_ident(q_engine, cat)}.{_quote_ident(q_engine, sch)}.{_quote_ident(q_engine, tbl)}'
+                        return f"{cat}.{sch}.{tbl}"
 
                     numeric_rows = []
                     for col_key in common:

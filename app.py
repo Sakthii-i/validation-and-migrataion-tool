@@ -807,7 +807,13 @@ def parse_table_path(path: str):
     if not path:
         return None, None, None
 
-    parts = [p.strip() for p in path.split(".")]
+    def _clean_ident(value: str) -> str:
+        text = str(value).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'", "`"}:
+            return text[1:-1].strip()
+        return text
+
+    parts = [_clean_ident(p) for p in path.split(".")]
     if len(parts) != 3:
         return None, None, None
 
