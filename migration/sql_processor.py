@@ -32,6 +32,7 @@ class SQLPreprocessor:
 
     _BQ_HINTS = [
         r"`[^`]+`",  # backtick-quoted identifiers
+        r"\bTO_HEX\s*\(",
         r"\bUNNEST\s*\(",
         r"\bSAFE_(?:CAST|DIVIDE|ADD|SUBTRACT|MULTIPLY|NEGATE)\s*\(",
         r"\bSAFE_(?:OFFSET|ORDINAL)\s*\(",
@@ -50,6 +51,7 @@ class SQLPreprocessor:
 
     _SNOWFLAKE_HINTS = [
         r"::\s*[A-Za-z_][A-Za-z0-9_]*",  # Snowflake cast
+        r"\bMD5_HEX\s*\(",
         r"\bOBJECT_AGG\s*\(",
         r"\bMEDIAN\s*\(",
         r"\bBOOLOR_AGG\s*\(",

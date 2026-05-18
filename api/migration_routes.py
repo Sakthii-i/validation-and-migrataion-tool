@@ -103,15 +103,8 @@ def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
 
     detected = SQLPreprocessor.detect_source_engine(sql)
     expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
-
     if detected in ("unknown", "ambiguous"):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Selected source engine is {expected}, but the SQL does not have clear {expected} syntax. "
-                f"Add source-specific syntax or select the correct Source Engine."
-            ),
-        )
+        return
 
     if detected != normalized_engine:
         actual = "Snowflake" if detected == "snowflake" else "BigQuery"
@@ -179,9 +172,21 @@ def _repair_databricks_sql(sql: str, error: str, provider: str, model: str, api_
     if client is None:
         return None, f"Databricks failed and {provider} API key is not available for repair."
 
+    error_l = (error or "").lower()
+    extra_guidance = ""
+    if "scalar_subquery_is_in_group_by_or_aggregate_function" in error_l or "scalar subquery" in error_l:
+        extra_guidance = (
+            "\nThe failure is caused by a correlated scalar subquery inside a grouped query. "
+            "Rewrite it as a LEFT JOIN, INNER JOIN, or grouped CTE keyed by the outer columns. "
+            "Do not leave any scalar subquery inside SELECT, GROUP BY, or aggregate arguments. "
+            "If a lookup returns one row per key, precompute it in a CTE and join it back. "
+            "Use ANY_VALUE, FIRST, or MAX_BY only when they preserve the intended single-value semantics.\n"
+        )
+
     prompt = (
         "You are a Databricks SQL expert. Fix the SQL so it runs in Databricks SQL.\n"
-        "Return only SQL, no markdown, no explanation.\n\n"
+        "Return only SQL, no markdown, no explanation.\n"
+        f"{extra_guidance}\n"
         f"Databricks error:\n{error}\n\n"
         f"SQL:\n{sql}"
     )
@@ -739,7 +744,11 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
             repaired_execution = _timed_databricks_execute(repaired_sql)
             final_execution["databricks"] = repaired_execution
             final_execution["repaired_sql"] = repaired_sql
-            final_execution["repair_message"] = "Databricks returned an error, so the SQL was repaired with LLM and run again."
+            repaired_error = repaired_execution.get("error") if isinstance(repaired_execution, dict) else None
+            if repaired_error:
+                final_execution["repair_message"] = f"LLM repair attempted, but Databricks still returned an error: {repaired_error}"
+            else:
+                final_execution["repair_message"] = "Databricks returned an error, so the SQL was repaired with LLM and run again."
         elif repair_error:
             final_execution["repair_message"] = repair_error
     elif dbx_error:
