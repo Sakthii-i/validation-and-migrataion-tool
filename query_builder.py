@@ -471,7 +471,10 @@ def _numeric_expr_v2(engine: str, col_ref: str) -> str:
     return (
         "COALESCE("
         "regexp_replace("
-        "regexp_replace(TRIM(CAST(" + col_ref + " AS STRING)), '(\\\\.\\\\d*?)0+$', '$1'),"
+        "regexp_replace("
+        "TRIM(CAST(CAST(" + col_ref + " AS DECIMAL(38,8)) AS STRING)),"
+        "'(\\\\.\\\\d*?)0+$', '$1'"
+        "),"
         "'\\\\.$', ''"
         "),"
         "''"
