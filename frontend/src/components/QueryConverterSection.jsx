@@ -372,7 +372,13 @@ export default function QueryConverterSection() {
       const defaultBranch = res.data.default_branch || branches[0] || '';
       setGitBranches(branches);
       setGitBranch(defaultBranch);
-      setGitUploadBranch(defaultBranch);
+      
+      const uploadBranches = branches.filter(b => b !== 'main' && b !== 'master');
+      let uploadDefault = defaultBranch;
+      if (uploadDefault === 'main' || uploadDefault === 'master') {
+        uploadDefault = uploadBranches[0] || '';
+      }
+      setGitUploadBranch(uploadDefault);
       if (!branches.length) {
         setGitError('No branches found in the repository.');
       }
@@ -475,6 +481,17 @@ export default function QueryConverterSection() {
       setGitUploadMessage('New branch name is required.');
       return;
     }
+    
+    // Check against main and master branches
+    if (gitUploadMode === 'existing' && (gitUploadBranch === 'main' || gitUploadBranch === 'master')) {
+      setGitUploadMessage('Uploading directly to main or master branch is not allowed.');
+      return;
+    }
+    if (gitUploadMode === 'create' && (gitNewBranch.trim() === 'main' || gitNewBranch.trim() === 'master')) {
+      setGitUploadMessage('Creating a branch named main or master is not allowed.');
+      return;
+    }
+
     if (!gitNewFileName.trim()) {
       setGitUploadMessage('New file name is required.');
       return;
@@ -525,7 +542,7 @@ export default function QueryConverterSection() {
           pushed_to_git: true,
         });
       }
-      if (res.data.branch && !gitBranches.includes(res.data.branch)) {
+      if (res.data.branch && !gitBranches.includes(res.data.branch) && res.data.branch !== 'main' && res.data.branch !== 'master') {
         setGitBranches((prev) => [...prev, res.data.branch]);
       }
     } catch (err) {
@@ -1357,7 +1374,7 @@ export default function QueryConverterSection() {
                     <label className="form-label">Target Branch</label>
                     <select className="form-select" value={gitUploadBranch} onChange={(e) => setGitUploadBranch(e.target.value)}>
                       <option value="">Select branch</option>
-                      {gitUploadBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                      {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
                     </select>
                   </div>
                 )}
