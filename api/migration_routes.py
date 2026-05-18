@@ -92,6 +92,10 @@ def _is_missing_object_error(message: str) -> bool:
     return any(pattern in text for pattern in patterns)
 
 
+def _should_forward_databricks_error_to_llm(message: str) -> bool:
+    return bool(message and not _is_missing_object_error(message))
+
+
 def _normalize_query(sql: str) -> str:
     return (sql or "").strip().rstrip(";")
 
@@ -733,24 +737,50 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
 
     dbx_error = databricks_execution.get("error") if isinstance(databricks_execution, dict) else None
     if dbx_error and not _is_missing_object_error(dbx_error):
-        repaired_sql, repair_error = _repair_databricks_sql(
-            payload.sql,
-            dbx_error,
-            payload.provider,
-            payload.model,
-            payload.api_key,
-        )
-        if repaired_sql:
-            repaired_execution = _timed_databricks_execute(repaired_sql)
+        repair_messages: list[str] = []
+        current_sql = payload.sql.strip()
+        current_error = dbx_error
+        max_repair_attempts = 3
+
+        for attempt in range(1, max_repair_attempts + 1):
+            if not _should_forward_databricks_error_to_llm(current_error):
+                break
+
+            repaired_sql_candidate, repair_error = _repair_databricks_sql(
+                current_sql,
+                current_error,
+                payload.provider,
+                payload.model,
+                payload.api_key,
+            )
+            if repair_error:
+                repair_messages.append(repair_error)
+                break
+
+            if not repaired_sql_candidate:
+                repair_messages.append("LLM repair did not return SQL.")
+                break
+
+            repaired_sql_candidate = repaired_sql_candidate.strip()
+            if repaired_sql_candidate == current_sql:
+                repair_messages.append("LLM repair returned the same SQL, so no further retry was made.")
+                break
+
+            current_sql = repaired_sql_candidate
+            repaired_execution = _timed_databricks_execute(current_sql)
             final_execution["databricks"] = repaired_execution
-            final_execution["repaired_sql"] = repaired_sql
+            final_execution["repaired_sql"] = current_sql
+
             repaired_error = repaired_execution.get("error") if isinstance(repaired_execution, dict) else None
-            if repaired_error:
-                final_execution["repair_message"] = f"LLM repair attempted, but Databricks still returned an error: {repaired_error}"
-            else:
-                final_execution["repair_message"] = "Databricks returned an error, so the SQL was repaired with LLM and run again."
-        elif repair_error:
-            final_execution["repair_message"] = repair_error
+            if not repaired_error:
+                repair_messages.append("Databricks returned an error, so the SQL was repaired with LLM and run again.")
+                break
+
+            repair_messages.append(f"LLM repair attempt {attempt} still returned a Databricks error: {repaired_error}")
+            current_error = repaired_error
+
+        if repair_messages:
+            final_execution["repair_message"] = " ".join(repair_messages)
     elif dbx_error:
         final_execution["repair_message"] = "Databricks object/catalog/schema/table error returned. LLM repair was skipped."
 
