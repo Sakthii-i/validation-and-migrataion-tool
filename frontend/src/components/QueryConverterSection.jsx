@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clipboard, Database, Download, Eye, GitBranch, Loader2, Play, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
-import { migrationAPI, validationAPI } from '../services/api';
+import { migrationAPI, schemaAPI, validationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
 import { useAuth } from '../context/AuthContext';
 import CollapsibleSection from './CollapsibleSection';
@@ -79,6 +79,9 @@ export default function QueryConverterSection() {
     rowCount: false, schema: false, numeric: false, hash: false,
     useThreshold: false, threshold: 99,
     includeTimestamp: false, caseSensitive: false,
+    primaryKeys: '',
+    colDiffEnabled: false,
+    availablePrimaryKeyColumns: [],
   });
   const [queryValidationRunning, setQueryValidationRunning] = useState(false);
   const [queryValidationResults, setQueryValidationResults] = useState(null);
@@ -164,6 +167,49 @@ export default function QueryConverterSection() {
     setCsvError('');
   }, [sourceEngine]);
 
+  useEffect(() => {
+    if (!(validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled)) {
+      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      return;
+    }
+
+    const tablePath = extractFirstTablePath(bqSql);
+    if (!tablePath || tablePath.split('.').length < 3) {
+      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await schemaAPI.getSchema(sourceEngine, tablePath);
+        const cols = (res.data.columns || [])
+          .map((col) => col.column_name || col.COLUMN_NAME || col.name)
+          .filter(Boolean);
+        if (cancelled) return;
+        setValidationSettings((prev) => {
+          const selected = (prev.primaryKeys || '')
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+            .filter((value) => cols.includes(value));
+          return {
+            ...prev,
+            availablePrimaryKeyColumns: cols,
+            primaryKeys: selected.join(', '),
+          };
+        });
+      } catch {
+        if (cancelled) return;
+        setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [validationSettings.validationType, validationSettings.hash, validationSettings.colDiffEnabled, bqSql, sourceEngine]);
+
   const selectedApiKey = apiKeys[provider] || '';
 
   const refreshCacheStats = async () => {
@@ -194,6 +240,16 @@ export default function QueryConverterSection() {
       setQueryValidationResults(null);
       setQueryValidationError('');
       setQueryId('');
+  };
+
+  const extractFirstTablePath = (sqlText) => {
+    if (!sqlText) return '';
+    const cleaned = String(sqlText)
+      .replace(/--.*$/gm, ' ')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ');
+    const match = cleaned.match(/\b(from|join)\s+([`\"]?[A-Za-z0-9_]+[`\"]?\.[`\"]?[A-Za-z0-9_]+[`\"]?\.[`\"]?[A-Za-z0-9_]+[`\"]?)/i);
+    if (!match) return '';
+    return match[2].replace(/[`\"]/g, '');
   };
 
   const isSnowflake = sourceEngine === 'Snowflake';
@@ -611,6 +667,10 @@ export default function QueryConverterSection() {
       setQueryValidationError('Select at least one metric (or choose Shallow).');
       return;
     }
+    if (validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim()) {
+      setQueryValidationError('Primary key is required when column-level mismatch is enabled for hash validation.');
+      return;
+    }
 
     setQueryValidationRunning(true);
     try {
@@ -672,6 +732,10 @@ export default function QueryConverterSection() {
       || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
     if (!metricsSelected) {
       setQueryValidationError('Select at least one metric (or choose Shallow).');
+      return;
+    }
+    if (validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim()) {
+      setQueryValidationError('Primary key is required when column-level mismatch is enabled for hash validation.');
       return;
     }
 
@@ -767,6 +831,9 @@ export default function QueryConverterSection() {
       if (!translatedSql.trim()) blockers.push('Converted SQL for validation is empty.');
     }
     if (!dataValidationMetricsSelected) blockers.push('Select at least one metric (or choose Shallow).');
+    if (validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim()) {
+      blockers.push('Primary key is required when column-level mismatch is enabled for hash validation.');
+    }
     if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
     return blockers;
   }, [
@@ -777,6 +844,10 @@ export default function QueryConverterSection() {
     bqSql,
     translatedSql,
     dataValidationMetricsSelected,
+    validationSettings.validationType,
+    validationSettings.hash,
+    validationSettings.colDiffEnabled,
+    validationSettings.primaryKeys,
     isSnowflake,
     hasRequiredSnowflakeConnection,
     sourceLabel,
@@ -786,6 +857,7 @@ export default function QueryConverterSection() {
     && sessionId
     && (inputMode === 'csv' ? csvRowsReadyForValidation : (bqSql.trim() && translatedSql.trim()))
     && dataValidationMetricsSelected
+    && !(validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim())
     && (!isSnowflake || hasRequiredSnowflakeConnection)
   );
 
@@ -1468,6 +1540,18 @@ function QueryConverterValidationSettings({ settings, setSettings }) {
         </div>
       )}
 
+      {hashSelected && settings.validationType === 'deep' && (
+        <label className="flex items-center gap-2 cursor-pointer mb-3">
+          <input
+            type="checkbox"
+            className="form-checkbox"
+            checked={settings.colDiffEnabled}
+            onChange={(e) => setSettings((p) => ({ ...p, colDiffEnabled: e.target.checked }))}
+          />
+          <span className="text-sm">Perform column-level mismatch</span>
+        </label>
+      )}
+
       <details className="border border-gray-200 rounded-lg">
         <summary className="px-4 py-2.5 text-sm font-medium text-gray-600 cursor-pointer hover:bg-gray-50 rounded-lg">
           Advanced Options
@@ -1509,6 +1593,47 @@ function QueryConverterValidationSettings({ settings, setSettings }) {
               />
               <span className="text-sm">Include TIMESTAMP columns in row hash</span>
             </label>
+          )}
+
+          {hashSelected && settings.colDiffEnabled && (
+            <div className="form-group">
+              <label className="form-label">Primary Key Column(s)</label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-gray-200 rounded-lg max-h-48 overflow-y-auto bg-gray-50/30">
+                {(settings.availablePrimaryKeyColumns || []).map((col) => {
+                  const selected = (settings.primaryKeys || '')
+                    .split(',')
+                    .map((value) => value.trim())
+                    .filter(Boolean)
+                    .includes(col);
+                  return (
+                    <label key={col} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox rounded text-primary-600 focus:ring-primary-500"
+                        checked={selected}
+                        onChange={(e) => {
+                          const currentKeys = (settings.primaryKeys || '')
+                            .split(',')
+                            .map((value) => value.trim())
+                            .filter(Boolean);
+                          const nextKeys = e.target.checked
+                            ? [...currentKeys, col]
+                            : currentKeys.filter((key) => key !== col);
+                          setSettings((p) => ({ ...p, primaryKeys: nextKeys.join(', ') }));
+                        }}
+                      />
+                      <span className="truncate" title={col}>{col}</span>
+                    </label>
+                  );
+                })}
+                {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                  <div className="col-span-full py-4 text-center text-gray-400 text-xs italic">
+                    Provide a source query with a 3-part table (catalog.schema.table) to load columns.
+                  </div>
+                )}
+              </div>
+              <span className="form-hint">Used for hash column-level comparison when enabled.</span>
+            </div>
           )}
 
           <label className="flex items-center gap-2 cursor-pointer">
