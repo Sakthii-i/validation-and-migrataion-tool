@@ -108,6 +108,9 @@ export default function QueryConverterSection() {
   const [gitSelectedFile, setGitSelectedFile] = useState('');
   const [gitLoading, setGitLoading] = useState(false);
   const [gitError, setGitError] = useState('');
+  const [gitReviewers, setGitReviewers] = useState([]);
+  const [gitSelectedReviewers, setGitSelectedReviewers] = useState([]);
+  const [gitReviewersLoading, setGitReviewersLoading] = useState(false);
   const [showGitUpload, setShowGitUpload] = useState(false);
   const [gitUploadMode, setGitUploadMode] = useState('existing');
   const [gitCreateFolder, setGitCreateFolder] = useState(false);
@@ -363,6 +366,7 @@ export default function QueryConverterSection() {
     setGitBranches([]);
     setGitBranch('');
     setGitUploadBranch('');
+    setGitReviewersLoading(true);
     try {
       const res = await migrationAPI.getGitBranches({
         repo_url: gitRepoUrl.trim(),
@@ -382,6 +386,16 @@ export default function QueryConverterSection() {
       if (!branches.length) {
         setGitError('No branches found in the repository.');
       }
+      
+      try {
+        const collabRes = await migrationAPI.getGitCollaborators({
+          repo_url: gitRepoUrl.trim(),
+          token: gitToken.trim() || null,
+        }, controller.signal);
+        setGitReviewers(collabRes.data.collaborators || []);
+      } catch (collabErr) {
+        console.error('Failed to fetch collaborators:', collabErr);
+      }
     } catch (err) {
       if (err?.name !== 'CanceledError' && err?.code !== 'ERR_CANCELED') {
         setGitError(`Git branch fetch error: ${err.response?.data?.detail || err.message}`);
@@ -389,6 +403,7 @@ export default function QueryConverterSection() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setGitLoading(false);
+      setGitReviewersLoading(false);
     }
   };
 
@@ -510,6 +525,11 @@ export default function QueryConverterSection() {
       return;
     }
 
+    if (gitSelectedReviewers.length === 0) {
+      setGitUploadMessage('Please select at least one reviewer.');
+      return;
+    }
+
     const folder = gitUploadMode === 'create'
       ? (gitCreateFolder ? gitNewFolderName.trim() : '.')
       : gitFolderMode === 'new'
@@ -534,8 +554,12 @@ export default function QueryConverterSection() {
         base_branch: gitBranch,
         new_branch: gitUploadMode === 'create' ? gitNewBranch.trim() : null,
         message: `Upload translated Databricks SQL ${uploadPath}`,
+        reviewers: gitSelectedReviewers,
       }, controller.signal);
-      setGitUploadMessage(`Uploaded to ${res.data.branch}:${res.data.path}`);
+      
+      const prLink = res.data.pr_url || null;
+      setGitUploadMessage(prLink ? `Pull Request created! PR URL: ${prLink}` : `Uploaded to ${res.data.branch}:${res.data.path}`);
+      
       if (queryId) {
         await migrationAPI.updateQueryHistory(queryId, {
           source_engine: sourceEngine.toLowerCase(),
@@ -1473,15 +1497,55 @@ export default function QueryConverterSection() {
                   </>
                 )}
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button className="btn btn-primary" type="button" onClick={handleUploadTranslatedSql} disabled={gitUploadLoading}>
+                <div className="mt-4 form-group">
+                  <label className="form-label flex items-center justify-between">
+                    <span>Select Reviewers (Required)</span>
+                    {gitReviewersLoading && <Loader2 size={14} className="animate-spin text-gray-500" />}
+                  </label>
+                  {gitReviewers.length > 0 ? (
+                    <div className="border border-gray-200 rounded-md max-h-40 overflow-y-auto p-2 bg-gray-50">
+                      {gitReviewers.map((reviewer) => (
+                        <label key={reviewer} className="flex items-center gap-2 text-sm text-gray-700 py-1 hover:bg-gray-100 px-2 rounded cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={gitSelectedReviewers.includes(reviewer)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setGitSelectedReviewers(prev => [...prev, reviewer]);
+                              } else {
+                                setGitSelectedReviewers(prev => prev.filter(r => r !== reviewer));
+                              }
+                            }}
+                          />
+                          {reviewer}
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-gray-500 italic">No collaborators found or error fetching reviewers.</div>
+                  )}
+                  <p className="text-xs text-gray-500 mt-1">At least one reviewer must be selected to create the PR.</p>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button className="btn btn-primary" type="button" onClick={handleUploadTranslatedSql} disabled={gitUploadLoading || gitSelectedReviewers.length === 0}>
                     {gitUploadLoading ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
-                    Upload Translated SQL
+                    Create PR with Reviewers
                   </button>
                 </div>
                 {gitUploadMessage && (
                   <div className={`alert mt-3 ${gitUploadMessage.startsWith('Git upload error') ? 'alert-error' : 'alert-info'}`}>
-                    {gitUploadMessage}
+                    {gitUploadMessage.includes('PR URL:') ? (
+                      <div>
+                        Pull Request created Successfully!{' '}
+                        <a href={gitUploadMessage.split('PR URL: ')[1]} target="_blank" rel="norenoopener noreferrer" className="font-semibold underline text-blue-600">
+                          View PR on GitHub
+                        </a>
+                      </div>
+                    ) : (
+                      gitUploadMessage
+                    )}
                   </div>
                 )}
               </div>

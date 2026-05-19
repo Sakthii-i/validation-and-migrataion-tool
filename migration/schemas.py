@@ -111,6 +111,15 @@ class GitFileResponse(BaseModel):
     ref: str
 
 
+class GitCollaboratorsRequest(BaseModel):
+    repo_url: str = Field(..., min_length=1)
+    token: Optional[str] = None
+
+
+class GitCollaboratorsResponse(BaseModel):
+    collaborators: List[str]
+
+
 class GitUploadRequest(BaseModel):
     repo_url: str = Field(..., min_length=1)
     token: Optional[str] = None
@@ -121,6 +130,7 @@ class GitUploadRequest(BaseModel):
     base_branch: Optional[str] = None
     new_branch: Optional[str] = None
     message: Optional[str] = None
+    reviewers: Optional[List[str]] = Field(default_factory=list)
 
 
 class GitUploadResponse(BaseModel):
@@ -128,6 +138,8 @@ class GitUploadResponse(BaseModel):
     path: str
     commit_sha: Optional[str] = None
     html_url: Optional[str] = None
+    pr_url: Optional[str] = None
+    reviewers_assigned: Optional[List[str]] = None
 
 
 class CacheClearResponse(BaseModel):

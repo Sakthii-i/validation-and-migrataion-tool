@@ -44,6 +44,7 @@ create table if not exists public.query_history_bigquery (
   migration_mode text,
   validation_status text,
   pushed_to_git boolean not null default false,
+  reviewers text[] default '{}',
   source_sql text,
   translated_sql text,
   details jsonb not null default '{}'::jsonb
@@ -60,6 +61,7 @@ create table if not exists public.query_history_snowflake (
   migration_mode text,
   validation_status text,
   pushed_to_git boolean not null default false,
+  reviewers text[] default '{}',
   source_sql text,
   translated_sql text,
   details jsonb not null default '{}'::jsonb
@@ -159,5 +161,7 @@ end$$;
 -- Migration: add source/target latency columns to existing tables
 alter table public.query_history_bigquery add column if not exists source_latency_ms integer;
 alter table public.query_history_bigquery add column if not exists target_latency_ms integer;
+alter table public.query_history_bigquery add column if not exists reviewers text[] default '{}';
 alter table public.query_history_snowflake add column if not exists source_latency_ms integer;
 alter table public.query_history_snowflake add column if not exists target_latency_ms integer;
+alter table public.query_history_snowflake add column if not exists reviewers text[] default '{}';

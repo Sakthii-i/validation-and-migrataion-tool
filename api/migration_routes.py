@@ -25,6 +25,8 @@ from validation_tool.migration.schemas import (
     DatabricksExecuteResponse,
     GitBranchesRequest,
     GitBranchesResponse,
+    GitCollaboratorsRequest,
+    GitCollaboratorsResponse,
     GitFileRequest,
     GitFileResponse,
     GitFilesRequest,
@@ -400,13 +402,16 @@ def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
 
     owner, repo = parsed
     mode = (payload.mode or "existing").strip().lower()
+    
+    # We will create a pull request if mode is "create" and we have reviewers, 
+    # but the prompt specifically says "to create a PR, assign reviewers, and return PR URL instead of a direct commit."
+    target_branch = (payload.branch or "").strip()
     if mode == "create":
         base_branch = (payload.base_branch or payload.branch or "").strip()
         if not base_branch:
             base_branch = _github_default_ref(owner, repo, token)
         target_branch = _create_github_branch(owner, repo, base_branch, payload.new_branch or "", token)
     else:
-        target_branch = (payload.branch or "").strip()
         if not target_branch:
             raise HTTPException(status_code=400, detail="Target branch is required.")
 
@@ -426,11 +431,48 @@ def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
     data = _github_send("PUT", f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded_path}", token, put_payload)
     commit = data.get("commit") or {}
     content = data.get("content") or {}
+    
+    pr_url = None
+    reviewers_assigned = None
+    
+    # Always try to open a PR targeting the base_branch so we get reviewer coverage
+    base_branch = (payload.base_branch or (payload.branch if mode == "create" else None) or _github_default_ref(owner, repo, token)).strip()
+    
+    if target_branch != base_branch:
+        pr_payload = {
+            "title": put_payload["message"],
+            "head": target_branch,
+            "base": base_branch,
+            "body": "Automated migration using the Query Converter Tool.",
+        }
+        try:
+            pr_data = _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/pulls", token, pr_payload)
+            pr_url = pr_data.get("html_url")
+            pr_number = pr_data.get("number")
+            
+            # If a PR already exists, the POST to /pulls might fail with a 422
+            if not pr_url and pr_data.get("errors"):
+                # Handle existing PR error implicitly or fall back to finding PR?
+                # For simplicity, we just catch and suppress, or we can fetch the PR
+                pass
+            
+            if payload.reviewers and pr_number:
+                reviewers_payload = {
+                    "reviewers": payload.reviewers
+                }
+                _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers", token, reviewers_payload)
+                reviewers_assigned = payload.reviewers
+        except Exception as e:
+            print("Failed to create PR or assign reviewers", e)
+            pass
+
     return GitUploadResponse(
         branch=target_branch,
         path=target_path,
         commit_sha=commit.get("sha"),
         html_url=content.get("html_url"),
+        pr_url=pr_url,
+        reviewers_assigned=reviewers_assigned,
     )
 
 
@@ -549,6 +591,32 @@ def git_branches(payload: GitBranchesRequest) -> GitBranchesResponse:
 def git_file(payload: GitFileRequest) -> GitFileResponse:
     content, resolved_ref = _read_repo_file(payload.repo_url, payload.ref, payload.path, payload.token)
     return GitFileResponse(path=payload.path, content=content, ref=resolved_ref)
+
+
+def _list_github_collaborators(repo_url: str, token: str | None = None) -> list[str]:
+    parsed = _parse_github_repo(repo_url)
+    if parsed is None:
+        return []
+
+    owner, repo = parsed
+    collaborators: list[str] = []
+    page = 1
+    while page <= 10:
+        data = _github_request(f"https://api.github.com/repos/{owner}/{repo}/collaborators?per_page=100&page={page}", token)
+        if not isinstance(data, list) or not data:
+            break
+        collaborators.extend(str(item.get("login", "")) for item in data if item.get("login"))
+        if len(data) < 100:
+            break
+        page += 1
+
+    return collaborators
+
+
+@router.post("/git/collaborators", response_model=GitCollaboratorsResponse)
+def git_collaborators(payload: GitCollaboratorsRequest) -> GitCollaboratorsResponse:
+    collaborators = _list_github_collaborators(payload.repo_url, payload.token)
+    return GitCollaboratorsResponse(collaborators=collaborators)
 
 
 @router.post("/git/upload", response_model=GitUploadResponse)

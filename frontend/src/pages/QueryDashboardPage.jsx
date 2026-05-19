@@ -156,11 +156,12 @@ export default function QueryDashboardPage() {
               <button className="btn btn-outline btn-sm" type="button" onClick={() => setDetailRow(null)}><X size={14} /></button>
             </div>
             <div className="space-y-4 p-4">
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-7">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-8">
                 <Info label="Migration Mode" value={detailRow.migration_mode || '-'} />
                 <Info label="Input Mode" value={detailRow.details?.input_mode || '-'} />
                 <Info label="Validation" value={<StatusBadge status={detailRow.validation_status || 'NOT RUN'} />} />
                 <Info label="Pushed To Git" value={detailRow.pushed_to_git ? 'Yes' : 'No'} />
+                <Info label="Reviewers" value={detailRow.reviewers?.length ? detailRow.reviewers.join(', ') : '-'} />
                 <Info label="Source Latency" value={formatLatency(detailRow.source_latency_ms)} />
                 <Info label="Target Latency" value={formatLatency(detailRow.target_latency_ms)} />
                 <Info label="Comparison" value={renderLatencyComparison(detailRow)} />

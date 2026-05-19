@@ -695,7 +695,7 @@ class SnowflakeRuleEngine:
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             # TO_CHAR(x) → CAST(x AS STRING)
-            {
+            {aaa
                 'pattern': r'\bTO_CHAR\s*\(([^,)]+)\)',
                 'replacement': r'CAST(\1 AS STRING)',
                 'flags': re.IGNORECASE, 'priority': 9,
