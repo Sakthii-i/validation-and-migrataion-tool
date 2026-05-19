@@ -829,8 +829,9 @@ export default function QueryConverterSection() {
     });
   }, [gitFiles]);
   const gitUploadBranches = useMemo(() => {
+    // Always exclude main and master from upload target choices
     const filtered = gitBranches.filter((branch) => !['main', 'master'].includes(String(branch).toLowerCase()));
-    return filtered.length ? filtered : gitBranches;
+    return filtered;
   }, [gitBranches]);
 
   const dataValidationMetricsSelected = validationSettings.validationType === 'shallow'
@@ -1090,6 +1091,22 @@ export default function QueryConverterSection() {
               <div className="mt-1 text-sm text-gray-500">Use a column named bq_sql, sql, query, bigquery_sql, or bq_query.</div>
             </div>
 
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-[minmax(220px,320px),auto]">
+                <div className="form-group">
+                  <label className="form-label text-sm">Query Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={queryName}
+                    onChange={(e) => setQueryName(e.target.value)}
+                    placeholder="Enter query name..."
+                  />
+                </div>
+                <div className="pb-2 text-sm font-medium text-gray-700">Query ID: {queryId}</div>
+              </div>
+            </div>
+
             <div className="flex flex-wrap gap-2">
               <button className="btn btn-primary" type="button" onClick={handleCsvTranslate} disabled={!csvFile || loading}>
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
@@ -1267,16 +1284,8 @@ export default function QueryConverterSection() {
                 />
               </div>
               <div className="form-group">
-                <div className="mb-1 flex items-center justify-between gap-2">
+                <div className="mb-1">
                   <label className="form-label mb-0">Output SQL (Databricks)</label>
-                  <button
-                    className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
-                    type="button"
-                    onClick={() => setIsOutputEditable((prev) => !prev)}
-                    disabled={!translatedSql.trim()}
-                  >
-                    {isOutputEditable ? 'Lock' : 'Edit'}
-                  </button>
                 </div>
                 <textarea
                   className="form-textarea min-h-[320px]"
@@ -1286,6 +1295,30 @@ export default function QueryConverterSection() {
                   placeholder="Converted Databricks SQL appears here..."
                 />
               </div>
+            </div>
+
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-[minmax(220px,320px),auto]">
+                <div className="form-group">
+                  <label className="form-label text-sm">Query Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={queryName}
+                    onChange={(e) => setQueryName(e.target.value)}
+                    placeholder="Enter query name..."
+                  />
+                </div>
+                <div className="pb-2 text-sm font-medium text-gray-700">Query ID: {queryId}</div>
+              </div>
+              <button
+                className={`btn btn-xs ${isOutputEditable ? 'btn-primary' : 'btn-outline'}`}
+                type="button"
+                onClick={() => setIsOutputEditable((prev) => !prev)}
+                disabled={!translatedSql.trim()}
+              >
+                {isOutputEditable ? 'Lock' : 'Edit'}
+              </button>
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -1374,7 +1407,7 @@ export default function QueryConverterSection() {
                     <label className="form-label">Target Branch</label>
                     <select className="form-select" value={gitUploadBranch} onChange={(e) => setGitUploadBranch(e.target.value)}>
                       <option value="">Select branch</option>
-                      {gitBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                      {gitUploadBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
                     </select>
                   </div>
                 )}

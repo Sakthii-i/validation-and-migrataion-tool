@@ -553,11 +553,11 @@ def build_row_hash_query_v2(
         # DATE
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
-                expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+                expr = f"COALESCE(TO_CHAR({col_ref}, 'DD-MM-YYYY'),'')"
             elif engine == "bigquery":
-                expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
+                expr = f"COALESCE(FORMAT_DATE('%d-%m-%Y', CAST({col_ref} AS DATE)), '')"
             else:
-                expr = f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')"
+                expr = f"COALESCE(date_format({col_ref}, 'dd-MM-yyyy'),'')"
 
         # TIME
         elif "TIME" in dtype_upper:
