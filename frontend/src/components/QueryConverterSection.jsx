@@ -564,6 +564,7 @@ export default function QueryConverterSection() {
         await migrationAPI.updateQueryHistory(queryId, {
           source_engine: sourceEngine.toLowerCase(),
           pushed_to_git: true,
+          reviewers: gitSelectedReviewers,
         });
       }
       if (res.data.branch && !gitBranches.includes(res.data.branch) && res.data.branch !== 'main' && res.data.branch !== 'master') {

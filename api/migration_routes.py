@@ -391,6 +391,8 @@ def _github_file_sha(owner: str, repo: str, branch: str, path: str, token: str |
         raise
 
 
+import uuid
+
 def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
     parsed = _parse_github_repo(payload.repo_url)
     if parsed is None:
@@ -403,17 +405,26 @@ def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
     owner, repo = parsed
     mode = (payload.mode or "existing").strip().lower()
     
-    # We will create a pull request if mode is "create" and we have reviewers, 
-    # but the prompt specifically says "to create a PR, assign reviewers, and return PR URL instead of a direct commit."
-    target_branch = (payload.branch or "").strip()
+    # We must NEVER commit directly to the target branch if we want a PR workflow.
+    # We create a temporary branch, commit there, and PR back to the target branch.
+    requested_target = (payload.branch or "").strip()
+    
     if mode == "create":
-        base_branch = (payload.base_branch or payload.branch or "").strip()
+        # They want to create a brand new branch, and PR it into base_branch
+        base_branch = (payload.base_branch or requested_target or "").strip()
         if not base_branch:
             base_branch = _github_default_ref(owner, repo, token)
+        # target_branch here is the branch we commit to
         target_branch = _create_github_branch(owner, repo, base_branch, payload.new_branch or "", token)
+        pr_target_branch = base_branch
     else:
-        if not target_branch:
+        # They selected an existing branch. We don't commit directly!
+        if not requested_target:
             raise HTTPException(status_code=400, detail="Target branch is required.")
+        
+        pr_target_branch = requested_target
+        temp_branch_name = f"pr-update-{uuid.uuid4().hex[:8]}"
+        target_branch = _create_github_branch(owner, repo, pr_target_branch, temp_branch_name, token)
 
     target_path = _safe_git_path(payload.path)
     encoded_path = "/".join(quote(part, safe="") for part in target_path.split("/"))
@@ -435,26 +446,28 @@ def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
     pr_url = None
     reviewers_assigned = None
     
-    # Always try to open a PR targeting the base_branch so we get reviewer coverage
-    base_branch = (payload.base_branch or (payload.branch if mode == "create" else None) or _github_default_ref(owner, repo, token)).strip()
-    
-    if target_branch != base_branch:
+    if target_branch != pr_target_branch:
         pr_payload = {
             "title": put_payload["message"],
             "head": target_branch,
-            "base": base_branch,
+            "base": pr_target_branch,
             "body": "Automated migration using the Query Converter Tool.",
         }
         try:
-            pr_data = _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/pulls", token, pr_payload)
+            # First check if an open PR already exists for this branch combo
+            existing_prs = _github_request(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls?head={owner}:{target_branch}&base={pr_target_branch}&state=open",
+                token
+            )
+            
+            pr_data = existing_prs[0] if isinstance(existing_prs, list) and len(existing_prs) > 0 else None
+            
+            if not pr_data:
+                # If no PR exists, create it
+                pr_data = _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/pulls", token, pr_payload)
+                
             pr_url = pr_data.get("html_url")
             pr_number = pr_data.get("number")
-            
-            # If a PR already exists, the POST to /pulls might fail with a 422
-            if not pr_url and pr_data.get("errors"):
-                # Handle existing PR error implicitly or fall back to finding PR?
-                # For simplicity, we just catch and suppress, or we can fetch the PR
-                pass
             
             if payload.reviewers and pr_number:
                 reviewers_payload = {
@@ -462,9 +475,18 @@ def _upload_github_file(payload: GitUploadRequest) -> GitUploadResponse:
                 }
                 _github_send("POST", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers", token, reviewers_payload)
                 reviewers_assigned = payload.reviewers
+
+        except HTTPException as http_exc:
+            # We want to show github API errors to the user
+            raise HTTPException(
+                status_code=400,
+                detail=f"Committed successfully, but failed to create Pull Request or assign reviewers: {http_exc.detail}"
+            )
         except Exception as e:
-            print("Failed to create PR or assign reviewers", e)
-            pass
+            raise HTTPException(
+                status_code=400,
+                detail=f"Committed successfully, but failed to create Pull Request: {str(e)}"
+            )
 
     return GitUploadResponse(
         branch=target_branch,

@@ -377,7 +377,7 @@ def list_query_history(source_engine: str | None = None, limit: int = 500) -> li
         return []
     table = _query_table_for_engine(source_engine)
     query = urlencode({
-        "select": "query_id,query_name,source_engine,run_by,last_ran_ts,source_latency_ms,target_latency_ms,migration_mode,validation_status,pushed_to_git,source_sql,translated_sql,details",
+        "select": "query_id,query_name,source_engine,run_by,last_ran_ts,source_latency_ms,target_latency_ms,migration_mode,validation_status,pushed_to_git,reviewers,source_sql,translated_sql,details",
         "order": "last_ran_ts.desc",
         "limit": str(limit),
     })
