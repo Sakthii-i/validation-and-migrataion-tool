@@ -755,7 +755,7 @@ def build_categorical_hash_query(
     else:
         raise ValueError(f"Categorical hash not supported for engine: {engine}")
 
-    return f\"\"\"
+    return f"""
     SELECT
         {group_select_expr},
         COUNT(*) AS row_count,
@@ -764,7 +764,7 @@ def build_categorical_hash_query(
     WHERE {where_sql}
     GROUP BY {group_by_clause}
     ORDER BY {order_by_clause}
-    \"\"\".strip()
+    """.strip()
 
 
 def build_row_hash_mismatch_rows_query_v2(
