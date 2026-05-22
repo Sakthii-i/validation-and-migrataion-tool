@@ -18,14 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY validation_tool ./validation_tool
 
-# Expose Streamlit port (API uses 8000 via compose)
-EXPOSE 8501
+# Expose FastAPI port
+EXPOSE 8000
 
-# Streamlit config
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
-
-# Default to UI (docker-compose overrides command per service)
-CMD ["streamlit", "run", "validation_tool/app.py"]
+# Default to running the API (docker-compose can override per service)
+CMD ["python", "-m", "uvicorn", "validation_tool.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

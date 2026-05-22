@@ -326,7 +326,35 @@ def run_row_hash_validation(
     engine, source_conn, target_conn, src, tgt,
     include_timestamp_columns=True, threshold=None,
     source_where="1=1", target_where="1=1",
+    categorical_columns=None
 ):
+    from validation_tool.query_builder import build_shallow_query
+    # 1. Enforce 1M row limit
+    metrics_shallow = {"row_count": True}
+    src_count_query = build_shallow_query(engine, src["catalog"], src["schema"], src["table"], metrics_shallow, where_clause=normalize_where_input(source_where))
+    src_count_res = execute_query(engine, source_conn, src_count_query)
+    source_row_count = int(src_count_res[0].get("row_count", src_count_res[0].get("ROW_COUNT", 0))) if src_count_res else 0
+
+    cat_cols_str = str(categorical_columns or "").strip()
+    cat_cols = [c.strip() for c in cat_cols_str.split(",")] if cat_cols_str else []
+
+    if source_row_count > 1000000 and not cat_cols:
+        raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
+
+    if cat_cols:
+        from validation_tool.validation_core import validate_categorical_hash
+        return validate_categorical_hash(
+            engine,
+            source_conn,
+            target_conn,
+            src,
+            tgt,
+            cat_cols,
+            include_timestamp_columns,
+            source_where=source_where,
+            target_where=target_where
+        )
+
     src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
     tgt_schema = fetch_schema("Databricks", target_conn, tgt["catalog"], tgt["schema"], tgt["table"])
 

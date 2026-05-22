@@ -429,3 +429,104 @@ def validate_row_hash(engine: str, source_conn, target_conn, src: dict, tgt: dic
                   for row in execute_query("databricks", target_conn, tgt_query)}
 
     return src_hashes == tgt_hashes
+
+
+def validate_categorical_hash(engine: str, source_conn, target_conn, src: dict, tgt: dict, categorical_columns: list, include_timestamp: bool = True) -> bool:
+    from .query_builder import build_categorical_hash_query
+
+    src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
+    tgt_schema = fetch_schema("databricks", target_conn, tgt["catalog"], tgt["schema"], tgt["table"])
+
+    def build_colmap(schema_rows):
+        m = {}
+        for r in schema_rows:
+            col = r.get("column_name")
+            dtype = r.get("data_type")
+            if not col:
+                continue
+            key = str(col).lower()
+            m[key] = {
+                "name": col,
+                "type": normalize_datatype(dtype, col),
+                "raw_type": dtype,
+            }
+        return m
+
+    src_map = build_colmap(src_schema)
+    tgt_map = build_colmap(tgt_schema)
+
+    common_keys = sorted(set(src_map.keys()) & set(tgt_map.keys()))
+    if not common_keys:
+        logger.error("No common columns for categorical hashing")
+        return False
+
+    src_columns = []
+    tgt_columns = []
+    for k in common_keys:
+        s = src_map[k]
+        t = tgt_map[k]
+
+        canon = s["type"] if s["type"] == t["type"] else "STRING"
+        s["type"] = canon
+        t["type"] = canon
+
+        if (not include_timestamp) and (canon == "TIMESTAMP"):
+            continue
+
+        src_columns.append(s)
+        tgt_columns.append(t)
+
+    if not src_columns:
+        logger.error("No columns left after filtering for categorical hashing")
+        return False
+
+    src_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in src_columns]
+    tgt_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in tgt_columns]
+
+    src_query = build_categorical_hash_query(
+        engine, src["catalog"], src["schema"], src["table"],
+        schema_rows=src_schema_for_hash, categorical_columns=categorical_columns, include_timestamp=include_timestamp
+    )
+    tgt_query = build_categorical_hash_query(
+        "databricks", tgt["catalog"], tgt["schema"], tgt["table"],
+        schema_rows=tgt_schema_for_hash, categorical_columns=categorical_columns, include_timestamp=include_timestamp
+    )
+
+    src_res = execute_query(engine, source_conn, src_query)
+    tgt_res = execute_query("databricks", target_conn, tgt_query)
+
+    def normalize_results(res):
+        norm = {}
+        for row in res:
+            row_norm = normalize_result(row)
+            # Create a tuple of group keys
+            key_tuple = tuple(str(row_norm.get(f"group_key_{i+1}", "")).strip().lower() for i in range(len(categorical_columns)))
+            norm[key_tuple] = {
+                "row_count": row_norm.get("row_count"),
+                "group_hash_sum": str(row_norm.get("group_hash_sum") or "")
+            }
+        return norm
+
+    src_norm = normalize_results(src_res)
+    tgt_norm = normalize_results(tgt_res)
+
+    match = True
+    for key, src_val in src_norm.items():
+        if key not in tgt_norm:
+            logger.info(f"Group {key} missing in target")
+            match = False
+            continue
+        tgt_val = tgt_norm[key]
+        if src_val["row_count"] != tgt_val["row_count"]:
+            logger.info(f"Group {key} row count mismatch: Source={src_val['row_count']}, Target={tgt_val['row_count']}")
+            match = False
+        if src_val["group_hash_sum"] != tgt_val["group_hash_sum"]:
+            logger.info(f"Group {key} hash sum mismatch: Source={src_val['group_hash_sum']}, Target={tgt_val['group_hash_sum']}")
+            match = False
+
+    for key in tgt_norm:
+        if key not in src_norm:
+            logger.info(f"Group {key} missing in source")
+            match = False
+
+    return match

@@ -16,6 +16,7 @@ const toPayloadSettings = (settings) => {
   return {
     ...settings,
     threshold: safePercent / 100,
+    categoricalColumns: Array.isArray(settings.categoricalColumns) ? settings.categoricalColumns.join(',') : settings.categoricalColumns,
   };
 };
 
@@ -82,6 +83,8 @@ export default function QueryConverterSection() {
     primaryKeys: '',
     colDiffEnabled: false,
     availablePrimaryKeyColumns: [],
+    sourceRowCount: null,
+    categoricalColumns: [],
   });
   const [queryValidationRunning, setQueryValidationRunning] = useState(false);
   const [queryValidationResults, setQueryValidationResults] = useState(null);
@@ -171,47 +174,55 @@ export default function QueryConverterSection() {
   }, [sourceEngine]);
 
   useEffect(() => {
-    if (!(validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled)) {
-      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+    if (!(validationSettings.validationType === 'deep' && validationSettings.hash)) {
+      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '', sourceRowCount: null, categoricalColumns: [] }));
       return;
     }
 
     const tablePath = extractFirstTablePath(bqSql);
     if (!tablePath || tablePath.split('.').length < 3) {
-      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+      setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '', sourceRowCount: null, categoricalColumns: [] }));
       return;
     }
 
     let cancelled = false;
     (async () => {
       try {
-        const res = await schemaAPI.getSchema(sourceEngine, tablePath);
+        const [res, countRes] = await Promise.all([
+          schemaAPI.getSchema(sourceEngine, tablePath),
+          metadataAPI.getRowCount(sourceEngine, tablePath.split('.')[0], tablePath.split('.')[1], tablePath.split('.')[2], sessionId).catch(() => ({ data: { row_count: 0 } }))
+        ]);
         const cols = (res.data.columns || [])
           .map((col) => col.column_name || col.COLUMN_NAME || col.name)
           .filter(Boolean);
+        const count = countRes.data.row_count || countRes.data.ROW_COUNT || 0;
         if (cancelled) return;
         setValidationSettings((prev) => {
-          const selected = (prev.primaryKeys || '')
+          const selectedKeys = (prev.primaryKeys || '')
             .split(',')
             .map((value) => value.trim())
             .filter(Boolean)
             .filter((value) => cols.includes(value));
+          const selectedCat = (prev.categoricalColumns || [])
+            .filter((value) => cols.includes(value));
           return {
             ...prev,
             availablePrimaryKeyColumns: cols,
-            primaryKeys: selected.join(', '),
+            primaryKeys: selectedKeys.join(', '),
+            sourceRowCount: count,
+            categoricalColumns: selectedCat,
           };
         });
       } catch {
         if (cancelled) return;
-        setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '' }));
+        setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '', sourceRowCount: null, categoricalColumns: [] }));
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [validationSettings.validationType, validationSettings.hash, validationSettings.colDiffEnabled, bqSql, sourceEngine]);
+  }, [validationSettings.validationType, validationSettings.hash, bqSql, sourceEngine, sessionId]);
 
   const selectedApiKey = apiKeys[provider] || '';
 
@@ -1671,6 +1682,48 @@ function QueryConverterValidationSettings({ settings, setSettings }) {
         </label>
       )}
 
+      {hashSelected && settings.validationType === 'deep' && typeof settings.sourceRowCount === 'number' && settings.sourceRowCount > 1000000 && (
+        <div className="mb-4 p-4 border border-warning-200 bg-warning-50 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 text-warning-600">⚠️</div>
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-warning-900 mb-1">Large Table Detected ({settings.sourceRowCount.toLocaleString()} rows)</h4>
+              <p className="text-xs text-warning-700 mb-3">
+                Tables over 1,000,000 rows require 1-2 Categorical Columns to optimize hash validation performance via grouped aggregation.
+              </p>
+              <div className="form-group mb-0">
+                <label className="form-label text-warning-900">Categorical Columns (Required)</label>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-warning-200 rounded-lg max-h-48 overflow-y-auto bg-white">
+                  {(settings.availablePrimaryKeyColumns || []).map((col) => {
+                    const selected = (settings.categoricalColumns || []).includes(col);
+                    return (
+                      <label key={col} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-warning-50 p-1.5 rounded transition-colors">
+                        <input
+                          type="checkbox"
+                          className="form-checkbox rounded text-warning-600 focus:ring-warning-500"
+                          checked={selected}
+                          onChange={(e) => {
+                            const current = settings.categoricalColumns || [];
+                            const next = e.target.checked ? [...current, col] : current.filter(c => c !== col);
+                            setSettings((p) => ({ ...p, categoricalColumns: next }));
+                          }}
+                        />
+                        <span className="truncate" title={col}>{col}</span>
+                      </label>
+                    );
+                  })}
+                  {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                    <div className="col-span-full py-2 text-center text-warning-600 text-xs italic">
+                      Provide a source query with a 3-part table (catalog.schema.table) to load columns.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <details className="border border-gray-200 rounded-lg">
         <summary className="px-4 py-2.5 text-sm font-medium text-gray-600 cursor-pointer hover:bg-gray-50 rounded-lg">
           Advanced Options
@@ -1712,6 +1765,37 @@ function QueryConverterValidationSettings({ settings, setSettings }) {
               />
               <span className="text-sm">Include TIMESTAMP columns in row hash</span>
             </label>
+          )}
+
+          {hashSelected && (typeof settings.sourceRowCount !== 'number' || settings.sourceRowCount <= 1000000) && (
+            <div className="form-group mt-3">
+              <label className="form-label">Categorical Columns (Optional Optimization)</label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-gray-200 rounded-lg max-h-48 overflow-y-auto bg-gray-50/30">
+                {(settings.availablePrimaryKeyColumns || []).map((col) => {
+                  const selected = (settings.categoricalColumns || []).includes(col);
+                  return (
+                    <label key={col} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox rounded text-primary-600 focus:ring-primary-500"
+                        checked={selected}
+                        onChange={(e) => {
+                          const current = settings.categoricalColumns || [];
+                          const next = e.target.checked ? [...current, col] : current.filter(c => c !== col);
+                          setSettings((p) => ({ ...p, categoricalColumns: next }));
+                        }}
+                      />
+                      <span className="truncate" title={col}>{col}</span>
+                    </label>
+                  );
+                })}
+                {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                  <div className="col-span-full py-4 text-center text-gray-400 text-xs italic">
+                    Provide a source query with a 3-part table (catalog.schema.table) to load columns.
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           {hashSelected && settings.colDiffEnabled && (

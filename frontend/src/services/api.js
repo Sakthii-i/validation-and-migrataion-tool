@@ -66,6 +66,8 @@ export const metadataAPI = {
     api.post('/metadata/schemas', { target, catalog, session_id: sessionId }),
   getTables: (target, catalog, schema, sessionId = null) =>
     api.post('/metadata/tables', { target, catalog, schema_name: schema, session_id: sessionId }),
+  getRowCount: (target, catalog, schema, table, sessionId = null) =>
+    api.post('/metadata/row-count', { target, catalog, schema_name: schema, table_name: table, session_id: sessionId }),
 };
 
 // ── Validation ──

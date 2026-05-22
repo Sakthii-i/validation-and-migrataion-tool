@@ -131,7 +131,23 @@ async def validate(
             if selected["numeric"]:
                 results["numeric"] = validate_numeric(source_engine, source_conn, target_conn, src, tgt)
             if selected["hash"]:
-                results["hash"] = validate_row_hash(source_engine, source_conn, target_conn, src, tgt, include_timestamp)
+                from ..query_builder import build_shallow_query
+                from ..validation_core import execute_query, validate_categorical_hash
+                metrics_shallow = {"row_count": True}
+                src_count_query = build_shallow_query(source_engine, src["catalog"], src["schema"], src["table"], metrics_shallow)
+                src_count_res = execute_query(source_engine, source_conn, src_count_query)
+                source_row_count = int(src_count_res[0].get("row_count", src_count_res[0].get("ROW_COUNT", 0))) if src_count_res else 0
+
+                cat_cols_str = str(row["categorical_columns"]).strip() if "categorical_columns" in row and pd.notna(row["categorical_columns"]) else ""
+                cat_cols = [c.strip() for c in cat_cols_str.split(",")] if cat_cols_str else []
+
+                if source_row_count > 1000000 and not cat_cols:
+                    raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
+
+                if cat_cols:
+                    results["hash"] = validate_categorical_hash(source_engine, source_conn, target_conn, src, tgt, cat_cols, include_timestamp)
+                else:
+                    results["hash"] = validate_row_hash(source_engine, source_conn, target_conn, src, tgt, include_timestamp)
 
             record = generate_validation_record(
                 validation_type,

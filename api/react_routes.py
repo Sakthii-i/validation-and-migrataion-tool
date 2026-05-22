@@ -666,7 +666,30 @@ def get_tables_endpoint(req: MetadataRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class RowCountRequest(BaseModel):
+    session_id: Optional[str] = None
+    target: str
+    catalog: str
+    schema_name: str
+    table_name: str
+
+@router.post("/metadata/row-count")
+def get_row_count_endpoint(req: RowCountRequest):
+    sess = _get_session(req.session_id)
+    engine = sess["engine"] if req.target == "source" else "Databricks"
+    conn = sess["source_conn"] if req.target == "source" else sess["target_conn"]
+    try:
+        from validation_tool.query_builder import build_shallow_query
+        from validation_tool.validation_core import execute_query
+        from validation_tool.backend.validators import normalize_result
+        query = build_shallow_query(engine, req.catalog, req.schema_name, req.table_name, {"row_count": True})
+        res = normalize_result(execute_query(engine, conn, query)[0])
+        return {"row_count": int(res.get("row_count", 0))}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ══════════════════════════════════════
+
 # VALIDATION
 # ══════════════════════════════════════
 
@@ -730,7 +753,7 @@ def run_validation(req: RunValidationRequest):
             if settings.get("numeric", False):
                 checks.append(("Numeric Statistics Validation", lambda s=src, t=tgt: run_numeric_validation(engine, source_conn, target_conn, s, t, threshold=threshold, source_where=src_where, target_where=tgt_where)))
             if settings.get("hash", False):
-                checks.append(("Row Hash Validation", lambda s=src, t=tgt: run_row_hash_validation(engine, source_conn, target_conn, s, t, include_timestamp_columns=include_ts, threshold=threshold, source_where=src_where, target_where=tgt_where)))
+                checks.append(("Row Hash Validation", lambda s=src, t=tgt: run_row_hash_validation(engine, source_conn, target_conn, s, t, include_timestamp_columns=include_ts, threshold=threshold, source_where=src_where, target_where=tgt_where, categorical_columns=settings.get("categoricalColumns"))))
 
         details = {}
 

@@ -15,6 +15,7 @@ const toPayloadSettings = (settings) => {
   return {
     ...settings,
     threshold: safePercent / 100,
+    categoricalColumns: Array.isArray(settings.categoricalColumns) ? settings.categoricalColumns.join(',') : settings.categoricalColumns,
   };
 };
 
@@ -230,6 +231,49 @@ function ValidationSettings({ settings, setSettings }) {
         </div>
       )}
 
+      {/* Large Table Warning for Deep Hash */}
+      {hashSelected && settings.validationType === 'deep' && typeof settings.sourceRowCount === 'number' && settings.sourceRowCount > 1000000 && (
+        <div className="mb-4 p-4 border border-warning-200 bg-warning-50 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 text-warning-600">⚠️</div>
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-warning-900 mb-1">Large Table Detected ({settings.sourceRowCount.toLocaleString()} rows)</h4>
+              <p className="text-xs text-warning-700 mb-3">
+                Tables over 1,000,000 rows require 1-2 Categorical Columns to optimize hash validation performance via grouped aggregation.
+              </p>
+              <div className="form-group mb-0">
+                <label className="form-label text-warning-900">Categorical Columns (Required)</label>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-warning-200 rounded-lg max-h-48 overflow-y-auto bg-white">
+                  {(settings.availablePrimaryKeyColumns || []).map((col) => {
+                    const selected = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean).includes(col);
+                    return (
+                      <label key={col} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-warning-50 p-1.5 rounded transition-colors">
+                        <input
+                          type="checkbox"
+                          className="form-checkbox rounded text-warning-600 focus:ring-warning-500"
+                          checked={selected}
+                          onChange={(e) => {
+                            const current = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean);
+                            const next = e.target.checked ? [...current, col] : current.filter(c => c !== col);
+                            setSettings((p) => ({ ...p, categoricalColumns: next.join(', ') }));
+                          }}
+                        />
+                        <span className="truncate" title={col}>{col}</span>
+                      </label>
+                    );
+                  })}
+                  {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                    <div className="col-span-full py-2 text-center text-warning-600 text-xs italic">
+                      Select a source table to load columns.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Advanced Options */}
       <details className="border border-gray-200 rounded-lg">
         <summary className="px-4 py-2.5 text-sm font-medium text-gray-600 cursor-pointer hover:bg-gray-50 rounded-lg">
@@ -263,6 +307,41 @@ function ValidationSettings({ settings, setSettings }) {
             <input type="checkbox" className="form-checkbox" checked={settings.caseSensitive} onChange={e => setSettings(p => ({ ...p, caseSensitive: e.target.checked }))} />
             <span className="text-sm">Case-sensitive schema validation</span>
           </label>
+
+          {/* Categorical Columns (Optional when small) */}
+          {hashSelected && (!settings.sourceRowCount || settings.sourceRowCount <= 1000000) && (
+            <div className="form-group pt-2 border-t border-gray-100 mt-2">
+              <label className="form-label">Categorical Columns (Optimization)</label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-gray-200 rounded-lg max-h-48 overflow-y-auto bg-gray-50/30">
+                {(settings.availablePrimaryKeyColumns || []).map(col => {
+                  const selected = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean).includes(col);
+                  return (
+                    <label key={`cat-${col}`} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox rounded text-primary-600 focus:ring-primary-500"
+                        checked={selected}
+                        onChange={(e) => {
+                          const currentKeys = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean);
+                          const nextKeys = e.target.checked
+                            ? [...currentKeys, col]
+                            : currentKeys.filter(k => k !== col);
+                          setSettings(p => ({ ...p, categoricalColumns: nextKeys.join(', ') }));
+                        }}
+                      />
+                      <span className="truncate" title={col}>{col}</span>
+                    </label>
+                  );
+                })}
+                {(!settings.availablePrimaryKeyColumns || settings.availablePrimaryKeyColumns.length === 0) && (
+                  <div className="col-span-full py-4 text-center text-gray-400 text-xs italic">
+                    Select a source table to see available columns.
+                  </div>
+                )}
+              </div>
+              <span className="form-hint">Select 1 or 2 low-cardinality columns to optimize hash comparison.</span>
+            </div>
+          )}
 
         </div>
       </details>
@@ -360,31 +439,39 @@ function BrowseTab({ settings, setSettings }) {
 
   useEffect(() => {
     if (!selectedSrcCatalog || !selectedSrcSchema || !selectedSrcTable) {
-      setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [] }));
+      setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [], sourceRowCount: null }));
       return;
     }
 
     (async () => {
       try {
         const tablePath = `${selectedSrcCatalog}.${selectedSrcSchema}.${selectedSrcTable}`;
-        const res = await schemaAPI.getSchema(sourceEngine, tablePath);
+        const [res, countRes] = await Promise.all([
+          schemaAPI.getSchema(sourceEngine, tablePath),
+          metadataAPI.getRowCount(sourceEngine, selectedSrcCatalog, selectedSrcSchema, selectedSrcTable, sessionId).catch(() => ({ data: { row_count: 0 } }))
+        ]);
         const cols = (res.data.columns || [])
           .map(col => col.column_name || col.COLUMN_NAME || col.name)
           .filter(Boolean);
+        const count = countRes.data.row_count || countRes.data.ROW_COUNT || 0;
         setSettings(prev => ({
           ...prev,
           availablePrimaryKeyColumns: cols,
+          sourceRowCount: count,
           primaryKeys: prev.primaryKeys
             ? prev.primaryKeys.split(',').map(value => value.trim()).filter(Boolean).every(value => cols.includes(value))
               ? prev.primaryKeys
               : ''
             : '',
+          categoricalColumns: prev.categoricalColumns
+            ? prev.categoricalColumns.split(',').map(v => v.trim()).filter(Boolean).filter(v => cols.includes(v)).join(', ')
+            : '',
         }));
       } catch {
-        setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [] }));
+        setSettings(prev => ({ ...prev, availablePrimaryKeyColumns: [], sourceRowCount: null }));
       }
     })();
-  }, [selectedSrcCatalog, selectedSrcSchema, selectedSrcTable, sourceEngine, setSettings]);
+  }, [selectedSrcCatalog, selectedSrcSchema, selectedSrcTable, sourceEngine, setSettings, sessionId]);
 
   useEffect(() => {
     if (!selectedTgtCatalog) {
@@ -736,6 +823,37 @@ function BrowseTab({ settings, setSettings }) {
                 )}
               </div>
               <span className="form-hint">Select one or more columns to form the primary key for join-based comparison.</span>
+            </div>
+          )}
+
+          {settings.validationType === 'deep' && settings.hash && settings.sourceRowCount > 1000000 && (
+            <div className="form-group pt-3 border-t border-gray-100">
+              <label className="form-label text-orange-600 font-bold flex items-center gap-1">
+                ⚠️ Categorical Columns (Required: Table &gt; 1M rows)
+              </label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-3 border border-orange-200 rounded-lg max-h-48 overflow-y-auto bg-orange-50/30">
+                {(settings.availablePrimaryKeyColumns || []).map(col => {
+                  const selected = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean).includes(col);
+                  return (
+                    <label key={`cat-req-${col}`} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-white p-1.5 rounded transition-colors">
+                      <input
+                        type="checkbox"
+                        className="form-checkbox rounded text-orange-600 focus:ring-orange-500"
+                        checked={selected}
+                        onChange={(e) => {
+                          const currentKeys = (settings.categoricalColumns || '').split(',').map(v => v.trim()).filter(Boolean);
+                          const nextKeys = e.target.checked
+                            ? [...currentKeys, col]
+                            : currentKeys.filter(k => k !== col);
+                          setSettings(p => ({ ...p, categoricalColumns: nextKeys.join(', ') }));
+                        }}
+                      />
+                      <span className="truncate" title={col}>{col}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <span className="form-hint text-orange-700">The table has <strong>{settings.sourceRowCount.toLocaleString()}</strong> rows. To avoid extremely long validation times, please select 1 or 2 low-cardinality columns (e.g., status, region, year) to perform a grouped hash comparison.</span>
             </div>
           )}
         </div>

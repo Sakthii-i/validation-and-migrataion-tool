@@ -645,6 +645,128 @@ def build_row_hash_query_v2(
     raise ValueError(f"Row hash not supported for engine: {engine}")
 
 
+def build_categorical_hash_query(
+    engine,
+    catalog,
+    schema,
+    table,
+    schema_rows,
+    categorical_columns,
+    include_timestamp=True,
+    timestamp_mode=None,
+    where_clause="1=1",
+):
+    engine = engine.lower()
+    table_fqn = qualify_table(engine, catalog, schema, table)
+    
+    if not categorical_columns:
+        raise ValueError("categorical_columns is required for categorical hash validation")
+
+    concat_parts = []
+    schema_rows = sorted(schema_rows or [], key=lambda x: str(x.get("column_name", "")).lower())
+
+    for row in schema_rows:
+        col = row.get("column_name")
+        if not col:
+            continue
+        dtype_upper = str(row.get("data_type") or "").upper()
+        col_ref = _quote_col_v2(engine, col)
+
+        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            continue
+
+        if "BINARY" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
+            elif engine == "databricks":
+                expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            else:  # bigquery
+                expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
+            concat_parts.append(str(expr).strip())
+            continue
+
+        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+            if not include_timestamp:
+                continue
+            expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
+        elif "DATE" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
+            else:
+                expr = f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')"
+        elif "TIME" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
+            else:
+                expr = f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')"
+        elif "BOOLEAN" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
+            else:
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL"]):
+            expr = _numeric_expr_v2(engine, col_ref)
+        else:
+            if engine == "snowflake":
+                expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            else:
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
+        
+        concat_parts.append(str(expr).strip())
+
+    if not concat_parts:
+        raise ValueError("No columns available for hashing")
+
+    # Group Key Selection
+    group_select_parts = []
+    for i, cat_col in enumerate(categorical_columns):
+        col_ref = _quote_col_v2(engine, cat_col)
+        if engine == "snowflake":
+            group_select_parts.append(f"COALESCE(TRIM({col_ref}::STRING), '<NULL>') AS group_key_{i+1}")
+        else:
+            group_select_parts.append(f"COALESCE(TRIM(CAST({col_ref} AS STRING)), '<NULL>') AS group_key_{i+1}")
+    
+    group_select_expr = ", ".join(group_select_parts)
+    group_by_clause = ", ".join(str(i+1) for i in range(len(categorical_columns)))
+    order_by_clause = ", ".join(f"group_key_{i+1}" for i in range(len(categorical_columns)))
+    
+    where_sql = (str(where_clause).strip() or "1=1")
+
+    if engine == "snowflake":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"CONCAT_WS('|',\n                        {concat_expr}\n                    )"
+        hash_agg_expr = f"SUM(TO_NUMBER(SUBSTR(UPPER(MD5_HEX({signature_expr})), 1, 8), 'XXXXXXXX'))"
+    elif engine == "databricks":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
+        hash_agg_expr = f"SUM(CAST(conv(SUBSTR(UPPER(md5({signature_expr})), 1, 8), 16, 10) AS BIGINT))"
+    elif engine == "bigquery":
+        if len(concat_parts) == 1:
+            signature_expr = concat_parts[0]
+        else:
+            signature_expr = "CONCAT(" + ", '|' , ".join(concat_parts) + ")"
+        hash_agg_expr = f"SUM(CAST(CONCAT('0x', SUBSTR(UPPER(TO_HEX(MD5({signature_expr}))), 1, 8)) AS INT64))"
+    else:
+        raise ValueError(f"Categorical hash not supported for engine: {engine}")
+
+    return f\"\"\"
+    SELECT
+        {group_select_expr},
+        COUNT(*) AS row_count,
+        {hash_agg_expr} AS group_hash_sum
+    FROM {table_fqn}
+    WHERE {where_sql}
+    GROUP BY {group_by_clause}
+    ORDER BY {order_by_clause}
+    \"\"\".strip()
+
+
 def build_row_hash_mismatch_rows_query_v2(
     engine,
     catalog,

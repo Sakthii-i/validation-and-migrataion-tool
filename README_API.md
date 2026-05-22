@@ -4,7 +4,7 @@ This repo now includes an async API to submit validation jobs and poll results.
 
 ## Services
 
-- `ui` (Streamlit): existing UI
+- `frontend` (React): UI for validation tool
 - `api` (FastAPI): session + validation endpoints
 - `worker` (RQ): executes validation tasks
 - `redis`: session store + queue broker
@@ -13,7 +13,6 @@ This repo now includes an async API to submit validation jobs and poll results.
 ## Environment variables
 
 - `VALIDATION_API_KEYS`: comma-separated list of API keys (required)
-- `VALIDATION_API_BASE_URL`: base URL the Streamlit UI uses to create sessions (optional)
 - `REDIS_URL`: Redis connection string (default `redis://localhost:6379/0`)
 - `VALIDATION_SESSION_TTL_SECONDS`: session TTL in seconds (default `3600`)
 - `VALIDATION_MAX_CONCURRENT_JOBS_PER_SESSION`: max simultaneous RUNNING jobs per session (default `2`)
@@ -57,7 +56,7 @@ From repo root:
 - `set VALIDATION_API_KEYS=dev-key` (Windows)
 - `docker compose -f validation_tool/docker-compose.yml up --build`
 
-UI: http://localhost:8501
+UI: http://localhost:3000
 API: http://localhost:8000
 
 Postgres (local): `localhost:5433` (container runs on 5432; db/user/password all `validation`)

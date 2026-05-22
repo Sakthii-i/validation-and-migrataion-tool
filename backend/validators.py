@@ -20,7 +20,7 @@ except ImportError:
     from datatype_utils import normalize_datatype as canonical_normalize_datatype
 
 
-# Keep schema/type normalization consistent with the Streamlit UI.
+# Keep schema/type normalization consistent with the core validation logic.
 DATA_TYPE_EQUIVALENCE = {
     # Integer types
     "int": "INT",
@@ -373,18 +373,46 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
             )
 
         if "hash" in metric_set:
-            hash_status = (
-                "PASS"
-                if validate_hash(
-                    source_engine,
-                    source_conn,
-                    target_conn,
-                    src,
-                    tgt,
-                    bool(row.get("include_timestamp", True)),
+            # Enforce 1M row limit for row-by-row hash
+            metrics = {"row_count": True}
+            src_count_query = build_shallow_query(source_engine, src[0], src[1], src[2], metrics)
+            src_count_res = normalize_result(execute_query(source_engine, source_conn, src_count_query)[0])
+            source_row_count = int(src_count_res.get("row_count", 0))
+
+            cat_cols_str = str(row.get("categorical_columns") or "").strip()
+            cat_cols = [c.strip() for c in cat_cols_str.split(",")] if cat_cols_str else []
+
+            if source_row_count > 1000000 and not cat_cols:
+                raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
+
+            if cat_cols:
+                from validation_tool.validation_core import validate_categorical_hash
+                hash_status = (
+                    "PASS"
+                    if validate_categorical_hash(
+                        source_engine,
+                        source_conn,
+                        target_conn,
+                        {"catalog": src[0], "schema": src[1], "table": src[2]},
+                        {"catalog": tgt[0], "schema": tgt[1], "table": tgt[2]},
+                        cat_cols,
+                        bool(row.get("include_timestamp", True)),
+                    )
+                    else "FAIL"
                 )
-                else "FAIL"
-            )
+            else:
+                hash_status = (
+                    "PASS"
+                    if validate_hash(
+                        source_engine,
+                        source_conn,
+                        target_conn,
+                        src,
+                        tgt,
+                        bool(row.get("include_timestamp", True)),
+                    )
+                    else "FAIL"
+                )
 
         statuses = [s for s in [row_count_status, schema_status, numeric_status, hash_status] if s is not None]
         overall_status = "PASS" if statuses and all(s == "PASS" for s in statuses) else "FAIL"
