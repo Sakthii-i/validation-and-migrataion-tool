@@ -873,6 +873,17 @@ export default function QueryConverterSection() {
   const dataValidationMetricsSelected = validationSettings.validationType === 'shallow'
     || Boolean(validationSettings.rowCount || validationSettings.schema || validationSettings.numeric || validationSettings.hash);
 
+  const selectedCategoricalColumns = Array.isArray(validationSettings.categoricalColumns)
+    ? validationSettings.categoricalColumns.map((value) => String(value).trim()).filter(Boolean)
+    : [];
+  const requiresCategoricalColumns = (
+    validationSettings.validationType === 'deep'
+    && validationSettings.hash
+    && typeof validationSettings.sourceRowCount === 'number'
+    && validationSettings.sourceRowCount > 1000000
+    && selectedCategoricalColumns.length === 0
+  );
+
   const csvRowsReadyForValidation = useMemo(
     () => csvResults.some((row) => String(row.original_sql || '').trim() && String(row.translated_sql || '').trim()),
     [csvResults],
@@ -892,6 +903,9 @@ export default function QueryConverterSection() {
     if (validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim()) {
       blockers.push('Primary key is required when column-level mismatch is enabled for hash validation.');
     }
+    if (requiresCategoricalColumns) {
+      blockers.push('Categorical columns are required for hash validation when the source table has more than 1,000,000 rows.');
+    }
     if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
     return blockers;
   }, [
@@ -906,6 +920,7 @@ export default function QueryConverterSection() {
     validationSettings.hash,
     validationSettings.colDiffEnabled,
     validationSettings.primaryKeys,
+    requiresCategoricalColumns,
     isSnowflake,
     hasRequiredSnowflakeConnection,
     sourceLabel,
@@ -916,6 +931,7 @@ export default function QueryConverterSection() {
     && (inputMode === 'csv' ? csvRowsReadyForValidation : (bqSql.trim() && translatedSql.trim()))
     && dataValidationMetricsSelected
     && !(validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim())
+    && !requiresCategoricalColumns
     && (!isSnowflake || hasRequiredSnowflakeConnection)
   );
 
@@ -2086,6 +2102,41 @@ function ResultsDisplay({ results }) {
                     <div className="p-3 border rounded-lg">Matched Hash Rows: <strong>{detailRecord.details.row_hash.matched_hash_count ?? 0}</strong></div>
                     <div className="p-3 border rounded-lg">Difference Rows: <strong>{(detailRecord.details.row_hash.source_not_in_target_count ?? 0) + (detailRecord.details.row_hash.target_not_in_source_count ?? 0)}</strong></div>
                   </div>
+                  {detailRecord.details.row_hash.mode === 'categorical' && (
+                    <div className="mb-4">
+                      <div className="text-xs font-semibold text-gray-600 mb-2">
+                        Categorical Hash Groups: {(detailRecord.details.row_hash.categorical_columns || []).join(', ')}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              {(detailRecord.details.row_hash.categorical_columns || []).map((c) => <th key={c}>{c}</th>)}
+                              <th>Source Rows</th>
+                              <th>Target Rows</th>
+                              <th>Source Hash Sum</th>
+                              <th>Target Hash Sum</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(detailRecord.details.row_hash.categories || []).map((row, i) => (
+                              <tr key={i}>
+                                {(detailRecord.details.row_hash.categorical_columns || []).map((c) => (
+                                  <td key={c} className="font-mono text-xs">{row.category_values?.[c] ?? '—'}</td>
+                                ))}
+                                <td>{row.source_row_count ?? 0}</td>
+                                <td>{row.target_row_count ?? 0}</td>
+                                <td className="font-mono text-xs">{row.source_hash_sum || '—'}</td>
+                                <td className="font-mono text-xs">{row.target_hash_sum || '—'}</td>
+                                <td>{row.status}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                   <div className="p-3 border rounded-lg bg-gray-50 text-sm mb-4">
                     <span className="font-semibold text-gray-700">Not matched columns: </span>
                     {(detailRecord.details.row_hash.mismatched_columns || []).length > 0

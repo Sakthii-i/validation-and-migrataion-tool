@@ -93,7 +93,7 @@ def get_numeric_columns(schema_rows):
         "INT", "INTEGER", "BIGINT", "SMALLINT",
         "FLOAT", "DOUBLE", "REAL",
         "NUMERIC", "DECIMAL", "NUMBER",
-        "INT64", "FLOAT64", "BIGNUMERIC"
+        "INT64", "FLOAT64", "BIGNUMERIC", "LONG",
     )
 
     numeric_cols = []
@@ -223,6 +223,7 @@ def _is_numeric_type(col_type: str) -> bool:
             "FLOAT",
             "DOUBLE",
             "REAL",
+            "LONG",
         )
     )
 
@@ -578,7 +579,7 @@ def build_row_hash_query_v2(
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
 
         # NUMERIC
-        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL"]):
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
 
         # STRING / OTHER SIMPLE TYPES
@@ -710,7 +711,7 @@ def build_categorical_hash_query(
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
             else:
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
-        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL"]):
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
             if engine == "snowflake":
@@ -738,31 +739,43 @@ def build_categorical_hash_query(
     
     where_sql = (str(where_clause).strip() or "1=1")
 
+    group_key_names = [f"group_key_{i+1}" for i in range(len(categorical_columns))]
+    outer_group_by_clause = ", ".join(group_key_names)
+
     if engine == "snowflake":
         concat_expr = ",\n                        ".join(concat_parts)
         signature_expr = f"CONCAT_WS('|',\n                        {concat_expr}\n                    )"
-        hash_agg_expr = f"SUM(TO_NUMBER(SUBSTR(UPPER(MD5_HEX({signature_expr})), 1, 8), 'XXXXXXXX'))"
+        row_hash_expr = f"UPPER(MD5_HEX({signature_expr}))"
+        group_hash_expr = "UPPER(MD5_HEX(LISTAGG(row_hash, '|') WITHIN GROUP (ORDER BY row_hash)))"
     elif engine == "databricks":
         concat_expr = ",\n                        ".join(concat_parts)
         signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
-        hash_agg_expr = f"SUM(CAST(conv(SUBSTR(UPPER(md5({signature_expr})), 1, 8), 16, 10) AS BIGINT))"
+        row_hash_expr = f"UPPER(md5({signature_expr}))"
+        group_hash_expr = "UPPER(md5(concat_ws('|', sort_array(collect_list(row_hash)))))"
     elif engine == "bigquery":
         if len(concat_parts) == 1:
             signature_expr = concat_parts[0]
         else:
             signature_expr = "CONCAT(" + ", '|' , ".join(concat_parts) + ")"
-        hash_agg_expr = f"SUM(CAST(CONCAT('0x', SUBSTR(UPPER(TO_HEX(MD5({signature_expr}))), 1, 8)) AS INT64))"
+        row_hash_expr = f"UPPER(TO_HEX(MD5({signature_expr})))"
+        group_hash_expr = "UPPER(TO_HEX(MD5(STRING_AGG(row_hash, '|' ORDER BY row_hash))))"
     else:
         raise ValueError(f"Categorical hash not supported for engine: {engine}")
 
     return f"""
+    WITH row_hashes AS (
+        SELECT
+            {group_select_expr},
+            {row_hash_expr} AS row_hash
+        FROM {table_fqn}
+        WHERE {where_sql}
+    )
     SELECT
-        {group_select_expr},
+        {outer_group_by_clause},
         COUNT(*) AS row_count,
-        {hash_agg_expr} AS group_hash_sum
-    FROM {table_fqn}
-    WHERE {where_sql}
-    GROUP BY {group_by_clause}
+        {group_hash_expr} AS group_hash_sum
+    FROM row_hashes
+    GROUP BY {outer_group_by_clause}
     ORDER BY {order_by_clause}
     """.strip()
 
@@ -835,7 +848,7 @@ def build_row_hash_mismatch_rows_query_v2(
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
-        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL"]):
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
             if engine == "snowflake":
@@ -930,7 +943,7 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
-        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL"]):
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
             if engine == "snowflake":

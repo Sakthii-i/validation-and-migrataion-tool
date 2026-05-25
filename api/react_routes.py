@@ -28,6 +28,7 @@ from validation_tool.query_builder import (
     build_shallow_query,
     build_numeric_stats_query,
     build_row_hash_query,
+    build_categorical_hash_query,
     build_row_hash_mismatch_rows_query_v2,
 )
 from validation_tool.backend import supabase_store
@@ -714,6 +715,9 @@ def run_validation(req: RunValidationRequest):
         bool_to_status, insert_validation_result, normalize_where_input,
         fetch_schema, normalize_schema_df, normalize_datatype,
         get_numeric_columns, execute_query, normalize_result,
+        normalize_column_list,
+        normalize_hash_value,
+        numeric_values_equal,
     )
 
     results_list = []
@@ -950,12 +954,93 @@ def run_validation(req: RunValidationRequest):
                         src_columns.append({"name": s["column_name"], "type": dtype, "raw_type": s.get("data_type", "")})
                         tgt_columns.append({"name": t["column_name"], "type": dtype, "raw_type": t.get("data_type", "")})
 
+                    hash_mode = "row"
+                    categorical_columns = normalize_column_list(settings.get("categoricalColumns"))
+                    category_rows = []
+                    source_hash_count = 0
+                    target_hash_count = 0
+                    matched_hash_count = 0
+                    source_not_in_target_count = 0
+                    target_not_in_source_count = 0
+                    if categorical_columns and src_columns:
+                        hash_mode = "categorical"
+                        src_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in src_columns]
+                        tgt_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in tgt_columns]
+                        src_query = build_categorical_hash_query(
+                            engine,
+                            src["catalog"],
+                            src["schema"],
+                            src["table"],
+                            schema_rows=src_schema_for_hash,
+                            categorical_columns=categorical_columns,
+                            include_timestamp=include_ts,
+                            where_clause=normalize_where_input(src_where),
+                        )
+                        tgt_query = build_categorical_hash_query(
+                            "Databricks",
+                            tgt["catalog"],
+                            tgt["schema"],
+                            tgt["table"],
+                            schema_rows=tgt_schema_for_hash,
+                            categorical_columns=categorical_columns,
+                            include_timestamp=include_ts,
+                            where_clause=normalize_where_input(tgt_where),
+                        )
+
+                        def _categorical_map(rows):
+                            mapped = {}
+                            for row in rows:
+                                normalized = normalize_result(row)
+                                key = tuple(str(normalized.get(f"group_key_{i + 1}", "")).strip() for i in range(len(categorical_columns)))
+                                mapped[key] = {
+                                    "row_count": normalized.get("row_count"),
+                                    "group_hash_sum": normalized.get("group_hash_sum"),
+                                }
+                            return mapped
+
+                        src_groups = _categorical_map(execute_query(engine, source_conn, src_query))
+                        tgt_groups = _categorical_map(execute_query("Databricks", target_conn, tgt_query))
+                        for key in sorted(set(src_groups) | set(tgt_groups)):
+                            src_group = src_groups.get(key)
+                            tgt_group = tgt_groups.get(key)
+                            src_count = int(src_group.get("row_count") or 0) if src_group else 0
+                            tgt_count = int(tgt_group.get("row_count") or 0) if tgt_group else 0
+                            count_match = src_group is not None and tgt_group is not None and numeric_values_equal(src_count, tgt_count)
+                            hash_match = (
+                                src_group is not None
+                                and tgt_group is not None
+                                and numeric_values_equal(src_group.get("group_hash_sum"), tgt_group.get("group_hash_sum"))
+                            )
+                            status = "MATCH" if count_match and hash_match else "NOT MATCH"
+                            category_rows.append({
+                                "category_values": {categorical_columns[i]: key[i] if i < len(key) else "" for i in range(len(categorical_columns))},
+                                "source_row_count": src_count,
+                                "target_row_count": tgt_count,
+                                "source_hash_sum": None if src_group is None else str(src_group.get("group_hash_sum") or ""),
+                                "target_hash_sum": None if tgt_group is None else str(tgt_group.get("group_hash_sum") or ""),
+                                "status": status,
+                            })
+                            source_hash_count += src_count
+                            target_hash_count += tgt_count
+                            if status == "MATCH":
+                                matched_hash_count += src_count
+                            else:
+                                source_not_in_target_count += src_count
+                                target_not_in_source_count += tgt_count
+
+                        results_map["Row Hash Validation"] = all(row["status"] == "MATCH" for row in category_rows)
+                        if not settings.get("colDiffEnabled", False):
+                            src_columns = []
+
                     src_only_hashes = []
                     tgt_only_hashes = []
                     src_only_rows = []
                     tgt_only_rows = []
                     hash_columns = []
                     mismatched_columns = []
+                    src_hashes = []
+                    tgt_hashes = []
+                    matched_hashes = []
                     if src_columns:
                         src_query = build_row_hash_query(
                             engine, src["catalog"], src["schema"], src["table"],
@@ -968,14 +1053,19 @@ def run_validation(req: RunValidationRequest):
 
                         src_rows = execute_query(engine, source_conn, src_query)
                         tgt_rows = execute_query("Databricks", target_conn, tgt_query)
-                        src_hashes = sorted({str(h) for r in src_rows if (h := get_hash(r)) is not None})
-                        tgt_hashes = sorted({str(h) for r in tgt_rows if (h := get_hash(r)) is not None})
+                        src_hashes = sorted({h for r in src_rows if (h := normalize_hash_value(get_hash(r))) is not None})
+                        tgt_hashes = sorted({h for r in tgt_rows if (h := normalize_hash_value(get_hash(r))) is not None})
 
                         tgt_set = set(tgt_hashes)
                         src_set = set(src_hashes)
                         src_only_hashes = [h for h in src_hashes if h not in tgt_set]
                         tgt_only_hashes = [h for h in tgt_hashes if h not in src_set]
                         matched_hashes = sorted(src_set & tgt_set)
+                        source_hash_count = len(src_hashes)
+                        target_hash_count = len(tgt_hashes)
+                        matched_hash_count = len(matched_hashes)
+                        source_not_in_target_count = len(src_only_hashes)
+                        target_not_in_source_count = len(tgt_only_hashes)
 
                         # Keep the same included-column order used in hash signature generation.
                         hash_columns = [str(c.get("name")) for c in src_columns if c.get("name")]
@@ -1071,16 +1161,27 @@ def run_validation(req: RunValidationRequest):
                                     mismatched_columns.append(col_name)
 
                     details["row_hash"] = {
+                        "mode": hash_mode,
                         "columns": hash_columns,
+                        "categorical_columns": categorical_columns,
+                        "categories": category_rows,
                         "mismatched_columns": mismatched_columns,
-                        "source_hash_count": len(src_hashes),
-                        "target_hash_count": len(tgt_hashes),
-                        "matched_hash_count": len(matched_hashes),
-                        "source_not_in_target_count": len(src_only_hashes),
-                        "target_not_in_source_count": len(tgt_only_hashes),
+                        "source_hash_count": source_hash_count,
+                        "target_hash_count": target_hash_count,
+                        "matched_hash_count": matched_hash_count,
+                        "source_not_in_target_count": source_not_in_target_count,
+                        "target_not_in_source_count": target_not_in_source_count,
                         "source_not_in_target_rows": src_only_rows,
                         "target_not_in_source_rows": tgt_only_rows,
                     }
+
+                    if (
+                        details["row_hash"]["source_hash_count"] == details["row_hash"]["target_hash_count"]
+                        and details["row_hash"]["source_hash_count"] == details["row_hash"]["matched_hash_count"]
+                        and details["row_hash"]["source_not_in_target_count"] == 0
+                        and details["row_hash"]["target_not_in_source_count"] == 0
+                    ):
+                        results_map["Row Hash Validation"] = True
                 except Exception as e:
                     details["row_hash"] = {"error": str(e)}
 

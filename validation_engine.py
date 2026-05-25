@@ -8,6 +8,7 @@ import re
 import uuid
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import psycopg2
@@ -63,6 +64,35 @@ def normalize_where_input(where_value, default="1=1"):
         return default
     text = str(where_value).strip()
     return text if text else default
+
+
+def normalize_column_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+
+    columns = []
+    for item in raw_items:
+        text = str(item).strip().strip("\"'`[]")
+        if text:
+            columns.append(text)
+    return columns
+
+
+def normalize_hash_value(value):
+    if value is None:
+        return None
+    return str(value).strip().lower()
+
+
+def numeric_values_equal(left, right):
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(left).strip() == str(right).strip()
 
 
 def parse_table_path(path: str):
@@ -276,20 +306,24 @@ def run_numeric_validation(
 
     src_numeric = get_numeric_columns(src_schema)
     tgt_numeric = get_numeric_columns(tgt_schema)
-    common = sorted(set(c.lower() for c in src_numeric) & set(c.lower() for c in tgt_numeric))
+    src_numeric_map = {str(c).lower(): str(c) for c in src_numeric}
+    tgt_numeric_map = {str(c).lower(): str(c) for c in tgt_numeric}
+    common = sorted(set(src_numeric_map.keys()) & set(tgt_numeric_map.keys()))
 
     if not common:
         logger.info("No common numeric columns found")
         return True
 
     all_pass = True
-    for col in common:
+    for col_key in common:
+        src_col = src_numeric_map[col_key]
+        tgt_col = tgt_numeric_map[col_key]
         src_q = build_numeric_stats_query(
-            engine, src["catalog"], src["schema"], src["table"], col,
+            engine, src["catalog"], src["schema"], src["table"], src_col,
             where_clause=normalize_where_input(source_where),
         )
         tgt_q = build_numeric_stats_query(
-            "Databricks", tgt["catalog"], tgt["schema"], tgt["table"], col,
+            "Databricks", tgt["catalog"], tgt["schema"], tgt["table"], tgt_col,
             where_clause=normalize_where_input(target_where),
         )
         src_res = normalize_result(execute_query(engine, source_conn, src_q)[0])
@@ -335,8 +369,7 @@ def run_row_hash_validation(
     src_count_res = execute_query(engine, source_conn, src_count_query)
     source_row_count = int(src_count_res[0].get("row_count", src_count_res[0].get("ROW_COUNT", 0))) if src_count_res else 0
 
-    cat_cols_str = str(categorical_columns or "").strip()
-    cat_cols = [c.strip() for c in cat_cols_str.split(",")] if cat_cols_str else []
+    cat_cols = normalize_column_list(categorical_columns)
 
     if source_row_count > 1000000 and not cat_cols:
         raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
@@ -400,8 +433,8 @@ def run_row_hash_validation(
     src_rows = execute_query(engine, source_conn, src_query)
     tgt_rows = execute_query("Databricks", target_conn, tgt_query)
 
-    src_hashes = {h for r in src_rows if (h := get_hash(r)) is not None}
-    tgt_hashes = {h for r in tgt_rows if (h := get_hash(r)) is not None}
+    src_hashes = {h for r in src_rows if (h := normalize_hash_value(get_hash(r))) is not None}
+    tgt_hashes = {h for r in tgt_rows if (h := normalize_hash_value(get_hash(r))) is not None}
 
     if src_hashes == tgt_hashes:
         return True

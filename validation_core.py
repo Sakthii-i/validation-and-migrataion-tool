@@ -3,7 +3,7 @@ import uuid
 import re
 import pandas as pd
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, Any, List
 
 from google.oauth2 import service_account
@@ -188,6 +188,29 @@ def execute_query(engine: str, conn, query: str) -> List[dict]:
 def normalize_result(row: dict) -> dict:
     """Convert all dict keys to lowercase."""
     return {k.lower(): v for k, v in row.items()}
+
+
+def normalize_column_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+
+    columns = []
+    for item in raw_items:
+        text = str(item).strip().strip("\"'`[]")
+        if text:
+            columns.append(text)
+    return columns
+
+
+def numeric_values_equal(left, right):
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(left).strip() == str(right).strip()
 
 def normalize_numeric(val):
     """Convert various numeric representations to float or None."""
@@ -431,8 +454,30 @@ def validate_row_hash(engine: str, source_conn, target_conn, src: dict, tgt: dic
     return src_hashes == tgt_hashes
 
 
-def validate_categorical_hash(engine: str, source_conn, target_conn, src: dict, tgt: dict, categorical_columns: list, include_timestamp: bool = True) -> bool:
+def _normalize_where_clause(where_value, default="1=1"):
+    if where_value is None:
+        return default
+    text = str(where_value).strip()
+    return text if text else default
+
+
+def validate_categorical_hash(
+    engine: str,
+    source_conn,
+    target_conn,
+    src: dict,
+    tgt: dict,
+    categorical_columns: list,
+    include_timestamp: bool = True,
+    source_where: str = "1=1",
+    target_where: str = "1=1",
+) -> bool:
     from .query_builder import build_categorical_hash_query
+
+    categorical_columns = normalize_column_list(categorical_columns)
+    if not categorical_columns:
+        logger.error("No categorical columns provided for categorical hashing")
+        return False
 
     src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
     tgt_schema = fetch_schema("databricks", target_conn, tgt["catalog"], tgt["schema"], tgt["table"])
@@ -485,11 +530,17 @@ def validate_categorical_hash(engine: str, source_conn, target_conn, src: dict, 
 
     src_query = build_categorical_hash_query(
         engine, src["catalog"], src["schema"], src["table"],
-        schema_rows=src_schema_for_hash, categorical_columns=categorical_columns, include_timestamp=include_timestamp
+        schema_rows=src_schema_for_hash,
+        categorical_columns=categorical_columns,
+        include_timestamp=include_timestamp,
+        where_clause=_normalize_where_clause(source_where),
     )
     tgt_query = build_categorical_hash_query(
         "databricks", tgt["catalog"], tgt["schema"], tgt["table"],
-        schema_rows=tgt_schema_for_hash, categorical_columns=categorical_columns, include_timestamp=include_timestamp
+        schema_rows=tgt_schema_for_hash,
+        categorical_columns=categorical_columns,
+        include_timestamp=include_timestamp,
+        where_clause=_normalize_where_clause(target_where),
     )
 
     src_res = execute_query(engine, source_conn, src_query)
@@ -517,10 +568,10 @@ def validate_categorical_hash(engine: str, source_conn, target_conn, src: dict, 
             match = False
             continue
         tgt_val = tgt_norm[key]
-        if src_val["row_count"] != tgt_val["row_count"]:
+        if not numeric_values_equal(src_val["row_count"], tgt_val["row_count"]):
             logger.info(f"Group {key} row count mismatch: Source={src_val['row_count']}, Target={tgt_val['row_count']}")
             match = False
-        if src_val["group_hash_sum"] != tgt_val["group_hash_sum"]:
+        if not numeric_values_equal(src_val["group_hash_sum"], tgt_val["group_hash_sum"]):
             logger.info(f"Group {key} hash sum mismatch: Source={src_val['group_hash_sum']}, Target={tgt_val['group_hash_sum']}")
             match = False
 

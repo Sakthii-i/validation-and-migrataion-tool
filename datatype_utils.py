@@ -35,7 +35,7 @@ def normalize_datatype(dtype, column_name=None):
         return "BIGINT"
     if base in {"int", "integer"}:
         return "INT"
-    if base == "bigint":
+    if base in {"bigint", "long"}:
         return "BIGINT"
     if base == "smallint":
         return "SMALLINT"
