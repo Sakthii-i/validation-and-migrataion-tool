@@ -57,6 +57,7 @@ def parse_validations_csv(csv_bytes: bytes) -> list[dict]:
         metrics = _parse_metrics(row.get("metrics"))
         case_sensitive = _parse_bool(row.get("case_sensitive"))
         include_timestamp = _parse_bool(row.get("include_timestamp"))
+        categorical_columns = (row.get("categorical_columns") or row.get("categoricalColumns") or "").strip()
 
         rows.append(
             {
@@ -66,6 +67,7 @@ def parse_validations_csv(csv_bytes: bytes) -> list[dict]:
                 "metrics": metrics,
                 "case_sensitive": case_sensitive,
                 "include_timestamp": include_timestamp,
+                "categorical_columns": categorical_columns,
             }
         )
 

@@ -18,12 +18,32 @@ from ..validation_core import (
     create_snowflake_connection,
     create_databricks_connection,
 )
+from ..query_builder import build_shallow_query
 
 # Use your existing auth function (same directory)
 from .auth import require_api_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _row_count_for_table(engine: str, conn, src: dict) -> int:
+    query = build_shallow_query(engine, src["catalog"], src["schema"], src["table"], {"row_count": True})
+    rows = []
+    try:
+        from ..validation_core import execute_query, normalize_result
+
+        rows = execute_query(engine, conn, query)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to count rows for {src['catalog']}.{src['schema']}.{src['table']}: {exc}")
+
+    if not rows:
+        return 0
+    res = normalize_result(rows[0])
+    return int(res.get("row_count") or 0)
+
+    def _table_fqn(src: dict) -> str:
+        return ".".join([str(src.get("catalog", "")).strip(), str(src.get("schema", "")).strip(), str(src.get("table", "")).strip()]).strip(".")
 @router.get("/results/{validation_id}")
 async def get_validation_result(validation_id: str, _ = Depends(require_api_key)):
     from validation_tool.backend import supabase_store
@@ -131,18 +151,14 @@ async def validate(
             if selected["numeric"]:
                 results["numeric"] = validate_numeric(source_engine, source_conn, target_conn, src, tgt)
             if selected["hash"]:
-                from ..query_builder import build_shallow_query
                 from ..validation_core import execute_query, validate_categorical_hash
-                metrics_shallow = {"row_count": True}
-                src_count_query = build_shallow_query(source_engine, src["catalog"], src["schema"], src["table"], metrics_shallow)
-                src_count_res = execute_query(source_engine, source_conn, src_count_query)
-                source_row_count = int(src_count_res[0].get("row_count", src_count_res[0].get("ROW_COUNT", 0))) if src_count_res else 0
+                source_row_count = _row_count_for_table(source_engine, source_conn, src)
 
                 cat_cols_str = str(row["categorical_columns"]).strip() if "categorical_columns" in row and pd.notna(row["categorical_columns"]) else ""
                 cat_cols = [c.strip() for c in cat_cols_str.split(",")] if cat_cols_str else []
 
                 if source_row_count > 1000000 and not cat_cols:
-                    raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
+                    raise ValueError(f"Source table {_table_fqn(src)} has {source_row_count:,} rows. Categorical columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
 
                 if cat_cols:
                     results["hash"] = validate_categorical_hash(source_engine, source_conn, target_conn, src, tgt, cat_cols, include_timestamp)

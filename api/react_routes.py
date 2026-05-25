@@ -66,6 +66,30 @@ def _date_range(date_filter, start_date=None, end_date=None):
     return str(start), str(end)
 
 
+def _row_count_for_table(engine: str, conn, catalog: str, schema: str, table: str) -> int:
+    from validation_tool.validation_engine import execute_query, normalize_result
+
+    query = build_shallow_query(engine, catalog, schema, table, {"row_count": True})
+    rows = execute_query(engine, conn, query)
+    if not rows:
+        return 0
+    return int(normalize_result(rows[0]).get("row_count") or 0)
+
+
+def _table_fqn(catalog: str, schema: str, table: str) -> str:
+    return ".".join([str(catalog).strip(), str(schema).strip(), str(table).strip()]).strip(".")
+
+
+def _normalize_categorical_columns(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    else:
+        items = str(value).split(",")
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
     if normalized_engine not in ("bigquery", "snowflake"):
@@ -758,6 +782,10 @@ def run_validation(req: RunValidationRequest):
             if settings.get("numeric", False):
                 checks.append(("Numeric Statistics Validation", lambda s=src, t=tgt: run_numeric_validation(engine, source_conn, target_conn, s, t, threshold=threshold, source_where=src_where, target_where=tgt_where)))
             if settings.get("hash", False):
+                source_row_count = _row_count_for_table(engine, source_conn, src["catalog"], src["schema"], src["table"])
+                categorical_columns = _normalize_categorical_columns(settings.get("categoricalColumns"))
+                if source_row_count > 1_000_000 and not categorical_columns:
+                    raise HTTPException(status_code=400, detail=f"Source table {_table_fqn(src['catalog'], src['schema'], src['table'])} has {source_row_count:,} rows. Please select categorical columns before running row hash validation.")
                 checks.append(("Row Hash Validation", lambda s=src, t=tgt: run_row_hash_validation(engine, source_conn, target_conn, s, t, include_timestamp_columns=include_ts, threshold=threshold, source_where=src_where, target_where=tgt_where, categorical_columns=settings.get("categoricalColumns"))))
 
         details = {}
@@ -1562,6 +1590,12 @@ def run_config_validation(req: ConfigValidationRequest):
         if "include_timestamp" in t:
             table_settings["includeTimestamp"] = _to_bool(t.get("include_timestamp"), False)
 
+        categorical_columns = _normalize_categorical_columns(
+            t.get("categorical_columns") or t.get("categoricalColumns") or table_settings.get("categoricalColumns")
+        )
+        if categorical_columns:
+            table_settings["categoricalColumns"] = categorical_columns
+
         row_threshold = t.get("row_threshold")
         if row_threshold not in (None, ""):
             try:
@@ -1572,6 +1606,12 @@ def run_config_validation(req: ConfigValidationRequest):
                 table_settings["threshold"] = threshold_value
             except Exception:
                 pass
+
+        if table_settings.get("hash"):
+            source_catalog, source_schema, source_table = src.split(".", 2)
+            source_row_count = _row_count_for_table(engine, source_conn, source_catalog, source_schema, source_table)
+            if source_row_count > 1_000_000 and not categorical_columns:
+                raise HTTPException(status_code=400, detail=f"Source table {_table_fqn(source_catalog, source_schema, source_table)} has {source_row_count:,} rows. Please select categorical columns before running row hash validation.")
 
         run_req = RunValidationRequest(
             session_id=req.session_id,

@@ -40,6 +40,68 @@ const requiresCategoricalColumnsForHash = (settings) => (
   && getCategoricalColumnsList(settings.categoricalColumns).length === 0
 );
 
+const parseCsvText = (text) => {
+  const rows = [];
+  const lines = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+
+  if (!lines.length) {
+    return { headers: [], rows: [] };
+  }
+
+  const parseLine = (line) => {
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      const next = line[index + 1];
+
+      if (char === '"' && inQuotes && next === '"') {
+        current += '"';
+        index += 1;
+      } else if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        values.push(current);
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+
+    values.push(current);
+    return values.map((value) => value.trim());
+  };
+
+  const headers = parseLine(lines[0]);
+  for (let lineIndex = 1; lineIndex < lines.length; lineIndex += 1) {
+    const values = parseLine(lines[lineIndex]);
+    const row = {};
+    headers.forEach((header, headerIndex) => {
+      row[header] = values[headerIndex] ?? '';
+    });
+    rows.push(row);
+  }
+
+  return { headers, rows };
+};
+
+const serializeCsvRows = (headers, rows) => {
+  const csvHeaders = Array.isArray(headers) ? headers : [];
+  const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const lines = [csvHeaders.join(',')];
+
+  rows.forEach((row) => {
+    lines.push(csvHeaders.map((header) => escapeCell(row?.[header] ?? '')).join(','));
+  });
+
+  return lines.join('\n');
+};
+
 // ═══════════════════════════════════════
 // CREDENTIALS SECTION
 // ═══════════════════════════════════════
@@ -1408,33 +1470,101 @@ function ManualTab({ settings, setSettings }) {
 // TAB: CSV UPLOAD
 // ═══════════════════════════════════════
 function CSVTab({ settings, setSettings }) {
-  const { isConnected, sessionId } = useConnection();
+  const { isConnected, sessionId, sourceEngine } = useConnection();
   const [file, setFile] = useState(null);
+  const [csvHeaders, setCsvHeaders] = useState([]);
+  const [csvRows, setCsvRows] = useState([]);
+  const [csvPreviewMeta, setCsvPreviewMeta] = useState({});
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
-  const needsCategoricalColumns = requiresCategoricalColumnsForHash(settings);
+  const [csvError, setCsvError] = useState(null);
+
+  const csvNeedsCategoricalColumns = csvRows.some((row, index) => {
+    const meta = csvPreviewMeta[index] || {};
+    const rowCount = Number(meta.rowCount || 0);
+    const selected = getCategoricalColumnsList(row.categorical_columns);
+    return rowCount > MAX_ROW_HASH_ROWS && selected.length === 0;
+  });
 
   const handleFileChange = (e) => {
     const f = e.target.files[0];
-    if (!f) return;
+    setCsvError(null);
+    setResults(null);
+    if (!f) {
+      setFile(null);
+      setCsvHeaders([]);
+      setCsvRows([]);
+      setCsvPreviewMeta({});
+      return;
+    }
     setFile(f);
+
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const parsed = parseCsvText(ev.target.result);
+        const rows = parsed.rows.map((row) => ({ ...row, categorical_columns: row.categorical_columns || '' }));
+        setCsvHeaders(parsed.headers);
+        setCsvRows(rows);
+
+        const entries = await Promise.all(rows.map(async (row, index) => {
+          const tablePath = [row.source_catalog, row.source_schema, row.source_table]
+            .map((value) => String(value || '').trim())
+            .filter(Boolean)
+            .join('.');
+
+          if (!sourceEngine || !tablePath || tablePath.split('.').length !== 3) {
+            return [index, { rowCount: 0, columns: [] }];
+          }
+
+          try {
+            const [schemaRes, countRes] = await Promise.all([
+              schemaAPI.getSchema(sourceEngine, tablePath),
+              metadataAPI.getRowCount(sourceEngine, row.source_catalog, row.source_schema, row.source_table, sessionId).catch(() => ({ data: { row_count: 0 } })),
+            ]);
+            const columns = (schemaRes.data.columns || [])
+              .map((col) => col.column_name || col.COLUMN_NAME || col.name)
+              .filter(Boolean);
+            const rowCount = Number(countRes.data.row_count || countRes.data.ROW_COUNT || 0);
+            return [index, { rowCount, columns }];
+          } catch {
+            return [index, { rowCount: 0, columns: [] }];
+          }
+        }));
+
+        setCsvPreviewMeta(Object.fromEntries(entries));
+      } catch (err) {
+        setFile(null);
+        setCsvHeaders([]);
+        setCsvRows([]);
+        setCsvPreviewMeta({});
+        setCsvError(`Invalid CSV: ${err.message}`);
+      }
+    };
+    reader.readAsText(f);
   };
 
   const handleRun = async () => {
-    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
-      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+    if (csvNeedsCategoricalColumns) {
+      setResults({ error: 'Source table has more than 1,000,000 rows. Select categorical columns for the affected row(s) before running hash validation.' });
       return;
     }
 
-    if (needsCategoricalColumns) {
-      setResults({ error: 'Categorical columns are required for hash validation when the source table has more than 1,000,000 rows.' });
+    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
+      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
       return;
     }
 
     setRunning(true);
     try {
       const form = new FormData();
-      form.append('file', file);
+      const uploadHeaders = csvRows.some((row) => getCategoricalColumnsList(row.categorical_columns).length > 0)
+        ? [...csvHeaders.filter((header) => header !== 'categorical_columns'), 'categorical_columns']
+        : csvHeaders;
+      const fileToUpload = file && csvRows.length
+        ? new File([serializeCsvRows(uploadHeaders, csvRows)], file.name, { type: 'text/csv' })
+        : file;
+      form.append('file', fileToUpload);
       form.append('session_id', sessionId);
       form.append('settings', JSON.stringify(toPayloadSettings(settings)));
       const res = await validationAPI.runCSV(form);
@@ -1483,6 +1613,61 @@ function CSVTab({ settings, setSettings }) {
         <div className="card-header"><Upload size={16} /> Upload CSV</div>
         <div className="card-body">
           <input type="file" accept=".csv" onChange={handleFileChange} className="form-input" />
+          {csvRows.length > 0 && (
+            <div className="mt-4 overflow-x-auto">
+              <p className="text-sm text-gray-500 mb-2">Preview rows</p>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    {csvHeaders.map((header) => <th key={header}>{header}</th>)}
+                    <th>row_count</th>
+                    <th>categorical_columns</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {csvRows.map((row, idx) => {
+                    const meta = csvPreviewMeta[idx] || {};
+                    const rowCount = Number(meta.rowCount || 0);
+                    const rowColumns = meta.columns || [];
+                    const selectedCategorical = getCategoricalColumnsList(row.categorical_columns);
+                    return (
+                      <tr key={idx}>
+                        {csvHeaders.map((header) => (
+                          <td key={header} className="text-xs">{String(row?.[header] ?? '')}</td>
+                        ))}
+                        <td className="text-xs">{rowCount ? rowCount.toLocaleString() : ''}</td>
+                        <td className="text-xs min-w-64">
+                          {rowCount > MAX_ROW_HASH_ROWS ? (
+                            <div className="space-y-1">
+                              <select
+                                multiple
+                                className="form-select min-h-24"
+                                value={selectedCategorical}
+                                onChange={(e) => {
+                                  const selected = Array.from(e.target.selectedOptions).map((option) => option.value);
+                                  setCsvRows((prev) => prev.map((item, itemIndex) => (
+                                    itemIndex === idx ? { ...item, categorical_columns: selected.join(', ') } : item
+                                  )));
+                                }}
+                              >
+                                {rowColumns.map((col) => <option key={col} value={col}>{col}</option>)}
+                              </select>
+                              <div className="text-[11px] text-gray-500 italic">
+                                Source table {String(row.source_catalog || '').trim()}.{String(row.source_schema || '').trim()}.{String(row.source_table || '').trim()} has {rowCount.toLocaleString()} rows.
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">Not required</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {csvError && <div className="alert alert-error mt-4">{csvError}</div>}
         </div>
       </div>
 
@@ -1508,7 +1693,7 @@ function CSVTab({ settings, setSettings }) {
         </div>
       </div>
 
-      <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running || !file || needsCategoricalColumns}>
+      <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running || !file || csvNeedsCategoricalColumns}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running CSV Validations...</> : <><Play size={18} /> Run CSV Validations</>}
       </button>
 
@@ -1521,11 +1706,12 @@ function CSVTab({ settings, setSettings }) {
 // TAB: CONFIG DRIVEN
 // ═══════════════════════════════════════
 function ConfigTab({ settings, setSettings }) {
-  const { isConnected, sessionId } = useConnection();
+  const { isConnected, sessionId, sourceEngine } = useConnection();
   const { user } = useAuth();
   const [file, setFile] = useState(null);
   const [config, setConfig] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [previewColumns, setPreviewColumns] = useState({});
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
   const [parseError, setParseError] = useState(null);
@@ -1588,6 +1774,74 @@ function ConfigTab({ settings, setSettings }) {
     'row_threshold',
   ];
 
+  const getCategoricalColumns = (value) => {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item).trim()).filter(Boolean);
+    }
+
+    return String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  };
+
+  const updatePreviewCategoricalColumns = (rowIndex, nextColumns) => {
+    setConfig((prev) => {
+      if (!prev || !Array.isArray(prev.tables)) return prev;
+      return {
+        ...prev,
+        tables: prev.tables.map((row, index) => (
+          index === rowIndex ? { ...row, categorical_columns: nextColumns.join(', ') } : row
+        )),
+      };
+    });
+
+    setPreview((prev) => (Array.isArray(prev)
+      ? prev.map((row, index) => (
+        index === rowIndex ? { ...row, categorical_columns: nextColumns.join(', ') } : row
+      ))
+      : prev));
+  };
+
+  const configNeedsCategoricalColumns = (preview || []).some((row, index) => {
+    const meta = previewColumns[index] || {};
+    const rowCount = Number(meta.rowCount || 0);
+    return rowCount > MAX_ROW_HASH_ROWS && getCategoricalColumns(row?.categorical_columns).length === 0;
+  });
+
+  const loadPreviewColumns = async (rows) => {
+    if (!sourceEngine || !Array.isArray(rows) || !rows.length) {
+      setPreviewColumns({});
+      return;
+    }
+
+    const entries = await Promise.all(rows.map(async (row, index) => {
+      const tablePath = [row?.source_catalog, row?.source_schema, row?.source_table]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+        .join('.');
+
+      if (!tablePath || tablePath.split('.').length !== 3) {
+        return [index, []];
+      }
+
+      try {
+        const [schemaRes, countRes] = await Promise.all([
+          schemaAPI.getSchema(sourceEngine, tablePath),
+          metadataAPI.getRowCount(sourceEngine, row?.source_catalog, row?.source_schema, row?.source_table, sessionId).catch(() => ({ data: { row_count: 0 } })),
+        ]);
+        const cols = (schemaRes.data.columns || [])
+          .map((col) => col.column_name || col.COLUMN_NAME || col.name)
+          .filter(Boolean);
+        return [index, { columns: cols, rowCount: Number(countRes.data.row_count || countRes.data.ROW_COUNT || 0) }];
+      } catch {
+        return [index, { columns: [], rowCount: 0 }];
+      }
+    }));
+
+    setPreviewColumns(Object.fromEntries(entries));
+  };
+
   const handleFileChange = (e) => {
     const f = e.target.files[0];
     setParseError(null);
@@ -1607,9 +1861,12 @@ function ConfigTab({ settings, setSettings }) {
         const rows = Array.isArray(parsed?.tables) ? parsed.tables : [];
         setConfig(parsed);
         setPreview(rows.slice(0, 5));
+        setPreviewColumns({});
+        loadPreviewColumns(rows.slice(0, 5));
       } catch (err) {
         setConfig(null);
         setPreview(null);
+        setPreviewColumns({});
         setParseError(`Invalid JSON: ${err.message}`);
       }
     };
@@ -1622,8 +1879,8 @@ function ConfigTab({ settings, setSettings }) {
       setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
       return;
     }
-    if (needsCategoricalColumns) {
-      setResults({ error: 'Categorical columns are required for hash validation when the source table has more than 1,000,000 rows.' });
+    if (configNeedsCategoricalColumns) {
+      setResults({ error: 'One or more source tables have more than 1,000,000 rows. Select categorical columns in the preview for those rows before running hash validation.' });
       return;
     }
     if (!config) {
@@ -1633,7 +1890,16 @@ function ConfigTab({ settings, setSettings }) {
 
     setRunning(true);
     try {
-      const res = await validationAPI.runConfig({ session_id: sessionId, run_by: user?.username || undefined, config, settings: toPayloadSettings(settings) });
+      const configWithCategoricals = {
+        ...config,
+        tables: Array.isArray(config.tables)
+          ? config.tables.map((row, index) => ({
+            ...row,
+            categorical_columns: preview?.[index]?.categorical_columns || row.categorical_columns || '',
+          }))
+          : [],
+      };
+      const res = await validationAPI.runConfig({ session_id: sessionId, run_by: user?.username || undefined, config: configWithCategoricals, settings: toPayloadSettings(settings) });
       setResults(res.data);
     } catch (e) {
       setResults({ error: e.response?.data?.detail || e.message });
@@ -1692,15 +1958,45 @@ function ConfigTab({ settings, setSettings }) {
                   <tr>{templateFields.map(field => <th key={field}>{field}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {preview.map((row, idx) => (
-                    <tr key={idx}>
-                      {templateFields.map((field) => (
-                        <td key={field} className="text-xs">
-                          {Array.isArray(row?.[field]) ? row[field].join(',') : String(row?.[field] ?? '')}
+                  {preview.map((row, idx) => {
+                    const meta = previewColumns[idx] || {};
+                    const rowCount = Number(meta.rowCount || 0);
+                    const selected = getCategoricalColumns(row?.categorical_columns);
+
+                    return (
+                      <tr key={idx}>
+                        {templateFields.map((field) => (
+                          <td key={field} className="text-xs">
+                            {Array.isArray(row?.[field]) ? row[field].join(',') : String(row?.[field] ?? '')}
+                          </td>
+                        ))}
+                        <td className="text-xs min-w-64">
+                          {rowCount > MAX_ROW_HASH_ROWS ? (
+                            <div className="space-y-1">
+                              <select
+                                multiple
+                                className="form-select min-h-24"
+                                value={selected}
+                                onChange={(e) => {
+                                  const next = Array.from(e.target.selectedOptions).map((option) => option.value);
+                                  updatePreviewCategoricalColumns(idx, next);
+                                }}
+                              >
+                                {(meta.columns || []).map((col) => (
+                                  <option key={col} value={col}>{col}</option>
+                                ))}
+                              </select>
+                              <div className="text-[11px] text-gray-500 italic">
+                                Source table {String(row.source_catalog || '').trim()}.{String(row.source_schema || '').trim()}.{String(row.source_table || '').trim()} has {rowCount.toLocaleString()} rows.
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">Not required</span>
+                          )}
                         </td>
-                      ))}
-                    </tr>
-                  ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1731,8 +2027,13 @@ function ConfigTab({ settings, setSettings }) {
       </div>
 
       {parseError && <div className="alert alert-error">{parseError}</div>}
+      {configNeedsCategoricalColumns && (
+        <div className="alert alert-warning">
+          One or more preview rows need categorical columns because their source table has more than 1,000,000 rows.
+        </div>
+      )}
 
-      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running || !file || !config || needsCategoricalColumns}>
+      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running || !file || !config || configNeedsCategoricalColumns}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running Config Validations...</> : <><Play size={18} /> Run Config Validations</>}
       </button>
 
