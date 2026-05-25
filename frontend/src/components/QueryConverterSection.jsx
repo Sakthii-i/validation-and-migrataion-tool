@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clipboard, Database, Download, Eye, GitBranch, Loader2, Play, RefreshCw, Settings2, Upload, Wand2, X } from 'lucide-react';
-import { migrationAPI, schemaAPI, validationAPI } from '../services/api';
+import { metadataAPI, migrationAPI, schemaAPI, validationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
 import { useAuth } from '../context/AuthContext';
 import CollapsibleSection from './CollapsibleSection';
@@ -179,7 +179,7 @@ export default function QueryConverterSection() {
       return;
     }
 
-    const tablePath = extractFirstTablePath(bqSql);
+    const tablePath = extractFirstTablePath(bqSql) || extractFirstTablePath(translatedSql);
     if (!tablePath || tablePath.split('.').length < 3) {
       setValidationSettings((prev) => ({ ...prev, availablePrimaryKeyColumns: [], primaryKeys: '', sourceRowCount: null, categoricalColumns: [] }));
       return;
@@ -222,7 +222,7 @@ export default function QueryConverterSection() {
     return () => {
       cancelled = true;
     };
-  }, [validationSettings.validationType, validationSettings.hash, bqSql, sourceEngine, sessionId]);
+  }, [validationSettings.validationType, validationSettings.hash, bqSql, translatedSql, sourceEngine, sessionId]);
 
   const selectedApiKey = apiKeys[provider] || '';
 
@@ -935,6 +935,10 @@ export default function QueryConverterSection() {
     && (!isSnowflake || hasRequiredSnowflakeConnection)
   );
 
+  const guardRequiresCategoricalColumns = Boolean(
+    /categorical columns are required/i.test(queryValidationError || '')
+  );
+
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -1104,7 +1108,11 @@ export default function QueryConverterSection() {
                     Load {sourceLabel} credentials from Run Validation to enable query validation.
                   </div>
                 )}
-                <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                <QueryConverterValidationSettings
+                  settings={validationSettings}
+                  setSettings={setValidationSettings}
+                  forceCategoricalColumns={guardRequiresCategoricalColumns}
+                />
                 {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
                 {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
                   <div className="alert alert-warning">
@@ -1244,7 +1252,11 @@ export default function QueryConverterSection() {
                         Load {sourceLabel} credentials from Run Validation to enable query validation.
                       </div>
                     )}
-                    <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                    <QueryConverterValidationSettings
+                      settings={validationSettings}
+                      setSettings={setValidationSettings}
+                      forceCategoricalColumns={guardRequiresCategoricalColumns}
+                    />
                     {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
                     {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
                       <div className="alert alert-warning">
@@ -1406,7 +1418,11 @@ export default function QueryConverterSection() {
                     Load {sourceLabel} credentials from Run Validation to enable query validation.
                   </div>
                 )}
-                <QueryConverterValidationSettings settings={validationSettings} setSettings={setValidationSettings} />
+                <QueryConverterValidationSettings
+                  settings={validationSettings}
+                  setSettings={setValidationSettings}
+                  forceCategoricalColumns={guardRequiresCategoricalColumns}
+                />
                 {queryValidationError && <div className="alert alert-error">{queryValidationError}</div>}
                 {!queryValidationRunning && showDataValidation && !canRunQueryValidation && queryValidationBlockers.length > 0 && (
                   <div className="alert alert-warning">
@@ -1634,8 +1650,12 @@ function QueryComplexityMetrics({ complexity, sourceLabel }) {
   );
 }
 
-function QueryConverterValidationSettings({ settings, setSettings }) {
+function QueryConverterValidationSettings({ settings, setSettings, forceCategoricalColumns = false }) {
   const hashSelected = settings.validationType === 'deep' && settings.hash;
+  const categoricalRequired = Boolean(
+    forceCategoricalColumns
+    || (typeof settings.sourceRowCount === 'number' && settings.sourceRowCount > 1000000)
+  );
 
   return (
     <CollapsibleSection title="⚙️ Validation Settings" icon={<Settings2 size={16} />} defaultOpen={true}>
@@ -1698,12 +1718,16 @@ function QueryConverterValidationSettings({ settings, setSettings }) {
         </label>
       )}
 
-      {hashSelected && settings.validationType === 'deep' && typeof settings.sourceRowCount === 'number' && settings.sourceRowCount > 1000000 && (
+      {hashSelected && settings.validationType === 'deep' && categoricalRequired && (
         <div className="mb-4 p-4 border border-warning-200 bg-warning-50 rounded-lg">
           <div className="flex items-start gap-3">
             <div className="mt-0.5 text-warning-600">⚠️</div>
             <div className="flex-1">
-              <h4 className="text-sm font-semibold text-warning-900 mb-1">Large Table Detected ({settings.sourceRowCount.toLocaleString()} rows)</h4>
+              <h4 className="text-sm font-semibold text-warning-900 mb-1">
+                {typeof settings.sourceRowCount === 'number'
+                  ? `Large Table Detected (${settings.sourceRowCount.toLocaleString()} rows)`
+                  : 'Large Table Detected'}
+              </h4>
               <p className="text-xs text-warning-700 mb-3">
                 Tables over 1,000,000 rows require 1-2 Categorical Columns to optimize hash validation performance via grouped aggregation.
               </p>

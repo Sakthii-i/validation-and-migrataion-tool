@@ -35,6 +35,7 @@ from validation_tool.query_builder import (
 from validation_tool.backend import supabase_store
 from validation_tool.backend.session_store import update_query_stats
 from validation_tool.migration.sql_processor import SQLPreprocessor
+from validation_tool.validation_engine import ValidationGuardError
 from validation_tool.datatype_utils import canonicalize_compatible_type
 
 logger = logging.getLogger(__name__)
@@ -764,7 +765,10 @@ def run_validation(req: RunValidationRequest):
         details = {}
 
         if checks:
-            results_map = run_checks_in_order(checks)
+            try:
+                results_map = run_checks_in_order(checks)
+            except ValidationGuardError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
             src_schema_rows = None
             tgt_schema_rows = None
