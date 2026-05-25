@@ -83,4 +83,56 @@ def normalize_datatype(dtype, column_name=None):
     return base.upper()
 
 
+def type_family(dtype: str) -> str:
+    if not dtype:
+        return "UNKNOWN"
+    t = str(dtype).upper()
+
+    if any(k in t for k in [
+        "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT",
+        "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC",
+        "FLOAT", "DOUBLE", "REAL", "LONG",
+    ]):
+        return "NUMERIC"
+
+    if "TIMESTAMP" in t or "DATETIME" in t:
+        return "TIMESTAMP"
+    if "DATE" in t:
+        return "DATE"
+    if "BOOLEAN" in t or t == "BOOL":
+        return "BOOLEAN"
+    if "BINARY" in t or "BYTES" in t:
+        return "BINARY"
+    if any(k in t for k in ["STRUCT", "ARRAY", "MAP", "OBJECT", "VARIANT"]):
+        return "COMPLEX"
+    if any(k in t for k in ["STRING", "VARCHAR", "CHAR", "TEXT"]):
+        return "STRING"
+
+    return "STRING"
+
+
+def canonicalize_compatible_type(source_dtype, target_dtype, column_name=None) -> str:
+    s_norm = normalize_datatype(source_dtype, column_name)
+    t_norm = normalize_datatype(target_dtype, column_name)
+    s_family = type_family(s_norm)
+    t_family = type_family(t_norm)
+
+    if s_family == t_family:
+        if s_family == "NUMERIC":
+            return "NUMBER"
+        if s_family == "TIMESTAMP":
+            return "TIMESTAMP"
+        if s_family == "DATE":
+            return "DATE"
+        if s_family == "BOOLEAN":
+            return "BOOLEAN"
+        if s_family == "BINARY":
+            return "BINARY"
+        if s_family == "COMPLEX":
+            return "COMPLEX"
+        return "STRING"
+
+    return "STRING"
+
+
 DATA_TYPE_EQUIVALENCE = {}
