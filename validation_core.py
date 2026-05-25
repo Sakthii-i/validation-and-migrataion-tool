@@ -518,6 +518,10 @@ def validate_categorical_hash(
         if (not include_timestamp) and (canon == "TIMESTAMP"):
             continue
 
+        if canon == "STRING":
+            s = {**s, "raw_type": "STRING"}
+            t = {**t, "raw_type": "STRING"}
+
         src_columns.append(s)
         tgt_columns.append(t)
 

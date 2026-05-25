@@ -29,6 +29,7 @@ from validation_tool.query_builder import (
     build_numeric_stats_query,
     build_row_hash_query,
     build_categorical_hash_query,
+    build_categorical_hash_samples_query,
     build_row_hash_mismatch_rows_query_v2,
 )
 from validation_tool.backend import supabase_store
@@ -946,13 +947,28 @@ def run_validation(req: RunValidationRequest):
                     for k in common_keys:
                         s = src_map[k]
                         t = tgt_map[k]
-                        dtype = str(s.get("data_type", "")).upper()
+                        s_raw = str(s.get("data_type", "") or "")
+                        t_raw = str(t.get("data_type", "") or "")
+                        s_norm = normalize_datatype(s_raw, s.get("column_name"))
+                        t_norm = normalize_datatype(t_raw, t.get("column_name"))
+                        canon = s_norm if s_norm == t_norm else "STRING"
+
+                        dtype = str(canon or "").upper()
                         if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
                             continue
                         if not include_ts and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
                             continue
-                        src_columns.append({"name": s["column_name"], "type": dtype, "raw_type": s.get("data_type", "")})
-                        tgt_columns.append({"name": t["column_name"], "type": dtype, "raw_type": t.get("data_type", "")})
+
+                        src_columns.append({
+                            "name": s["column_name"],
+                            "type": dtype,
+                            "raw_type": "STRING" if canon == "STRING" else s_raw,
+                        })
+                        tgt_columns.append({
+                            "name": t["column_name"],
+                            "type": dtype,
+                            "raw_type": "STRING" if canon == "STRING" else t_raw,
+                        })
 
                     hash_mode = "row"
                     categorical_columns = normalize_column_list(settings.get("categoricalColumns"))
@@ -962,6 +978,7 @@ def run_validation(req: RunValidationRequest):
                     matched_hash_count = 0
                     source_not_in_target_count = 0
                     target_not_in_source_count = 0
+                    debug_category_mismatch = None
                     if categorical_columns and src_columns:
                         hash_mode = "categorical"
                         src_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in src_columns]
@@ -1028,7 +1045,48 @@ def run_validation(req: RunValidationRequest):
                                 source_not_in_target_count += src_count
                                 target_not_in_source_count += tgt_count
 
+                                if debug_category_mismatch is None:
+                                    debug_category_mismatch = {
+                                        "category_values": {categorical_columns[i]: key[i] if i < len(key) else "" for i in range(len(categorical_columns))},
+                                        "source_row_count": src_count,
+                                        "target_row_count": tgt_count,
+                                        "source_hash_sum": None if src_group is None else str(src_group.get("group_hash_sum") or ""),
+                                        "target_hash_sum": None if tgt_group is None else str(tgt_group.get("group_hash_sum") or ""),
+                                    }
+
                         results_map["Row Hash Validation"] = all(row["status"] == "MATCH" for row in category_rows)
+
+                        if debug_category_mismatch is not None:
+                            try:
+                                mismatch_key = [debug_category_mismatch["category_values"][c] for c in categorical_columns]
+                                src_sample_query = build_categorical_hash_samples_query(
+                                    engine,
+                                    src["catalog"],
+                                    src["schema"],
+                                    src["table"],
+                                    schema_rows=src_schema_for_hash,
+                                    categorical_columns=categorical_columns,
+                                    group_key_values=mismatch_key,
+                                    include_timestamp=include_ts,
+                                    where_clause=normalize_where_input(src_where),
+                                    limit=5,
+                                )
+                                tgt_sample_query = build_categorical_hash_samples_query(
+                                    "Databricks",
+                                    tgt["catalog"],
+                                    tgt["schema"],
+                                    tgt["table"],
+                                    schema_rows=tgt_schema_for_hash,
+                                    categorical_columns=categorical_columns,
+                                    group_key_values=mismatch_key,
+                                    include_timestamp=include_ts,
+                                    where_clause=normalize_where_input(tgt_where),
+                                    limit=5,
+                                )
+                                debug_category_mismatch["source_samples"] = execute_query(engine, source_conn, src_sample_query)
+                                debug_category_mismatch["target_samples"] = execute_query("Databricks", target_conn, tgt_sample_query)
+                            except Exception as e:
+                                debug_category_mismatch["error"] = str(e)
                         if not settings.get("colDiffEnabled", False):
                             src_columns = []
 
@@ -1165,6 +1223,7 @@ def run_validation(req: RunValidationRequest):
                         "columns": hash_columns,
                         "categorical_columns": categorical_columns,
                         "categories": category_rows,
+                        "category_debug": debug_category_mismatch,
                         "mismatched_columns": mismatched_columns,
                         "source_hash_count": source_hash_count,
                         "target_hash_count": target_hash_count,

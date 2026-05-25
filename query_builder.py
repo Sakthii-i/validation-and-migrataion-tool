@@ -483,6 +483,46 @@ def _numeric_expr_v2(engine: str, col_ref: str) -> str:
     )
 
 
+def _is_string_type(dtype_upper: str) -> bool:
+    return any(x in (dtype_upper or "") for x in ("STRING", "VARCHAR", "CHAR", "TEXT"))
+
+
+def _is_date_like_string(col_name: str, dtype_upper: str) -> bool:
+    if not _is_string_type(dtype_upper):
+        return False
+    return "date" in str(col_name or "").lower()
+
+
+def _string_date_expr(engine: str, col_ref: str) -> str:
+    engine = engine.lower()
+    if engine == "snowflake":
+        return (
+            "COALESCE("
+            "TO_VARCHAR(TRY_TO_DATE(" + col_ref + ", 'YYYY-MM-DD'),'YYYY-MM-DD'),"
+            "TO_VARCHAR(TRY_TO_DATE(" + col_ref + ", 'DD-MM-YYYY'),'YYYY-MM-DD'),"
+            "TRIM(" + col_ref + "::STRING),"
+            "''"
+            ")"
+        )
+    if engine == "bigquery":
+        return (
+            "COALESCE("
+            "FORMAT_DATE('%F', SAFE.PARSE_DATE('%F', " + col_ref + ")) ,"
+            "FORMAT_DATE('%F', SAFE.PARSE_DATE('%d-%m-%Y', " + col_ref + ")) ,"
+            "TRIM(CAST(" + col_ref + " AS STRING)),"
+            "''"
+            ")"
+        )
+    # databricks
+    return (
+        "COALESCE("
+        "date_format(coalesce(to_date(" + col_ref + ", 'yyyy-MM-dd'), to_date(" + col_ref + ", 'dd-MM-yyyy')), 'yyyy-MM-dd'),"
+        "TRIM(CAST(" + col_ref + " AS STRING)),"
+        "''"
+        ")"
+    )
+
+
 def _timestamp_expr_v2(engine: str, col_ref: str, dtype_upper: str, timestamp_mode: str | None):
     engine = engine.lower()
     use_date_only = timestamp_mode == "Use Date Only (Recommended)"
@@ -584,7 +624,9 @@ def build_row_hash_query_v2(
 
         # STRING / OTHER SIMPLE TYPES
         else:
-            if engine == "snowflake":
+            if _is_date_like_string(col, dtype_upper):
+                expr = _string_date_expr(engine, col_ref)
+            elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
@@ -714,7 +756,9 @@ def build_categorical_hash_query(
         elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
-            if engine == "snowflake":
+            if _is_date_like_string(col, dtype_upper):
+                expr = _string_date_expr(engine, col_ref)
+            elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
@@ -724,14 +768,62 @@ def build_categorical_hash_query(
     if not concat_parts:
         raise ValueError("No columns available for hashing")
 
-    # Group Key Selection
+    def _null_to_token(expr: str) -> str:
+        return f"COALESCE(NULLIF({expr}, ''), '<NULL>')"
+
+    def _group_key_expr(engine_name: str, col_name: str, dtype_upper: str, raw_type: str) -> str:
+        col_ref = _quote_col_v2(engine_name, col_name)
+
+        if "BINARY" in dtype_upper:
+            if engine_name == "snowflake":
+                return f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '<NULL>')"
+            if engine_name == "databricks":
+                return f"COALESCE(UPPER(HEX({col_ref})), '<NULL>')"
+            return f"COALESCE(UPPER(TO_HEX({col_ref})), '<NULL>')"
+
+        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+            return _null_to_token(_timestamp_expr_v2(engine_name, col_ref, dtype_upper, timestamp_mode))
+
+        if "DATE" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')")
+            if engine_name == "bigquery":
+                return _null_to_token(f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')")
+            return _null_to_token(f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')")
+
+        if "TIME" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')")
+            if engine_name == "bigquery":
+                return _null_to_token(f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')")
+            return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')")
+
+        if "BOOLEAN" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(LOWER({col_ref}::STRING),'')")
+            return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')")
+
+        if any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
+            return _null_to_token(_numeric_expr_v2(engine_name, col_ref))
+
+        if _is_date_like_string(col_name, dtype_upper):
+            return _null_to_token(_string_date_expr(engine_name, col_ref))
+
+        if engine_name == "snowflake":
+            return _null_to_token(f"COALESCE(TRIM({col_ref}::STRING),'')")
+
+        return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')")
+
+    schema_type_map = {str(r.get("column_name", "")).lower(): r for r in (schema_rows or [])}
+
+    # Group Key Selection (type-aware normalization to avoid false mismatches)
     group_select_parts = []
     for i, cat_col in enumerate(categorical_columns):
-        col_ref = _quote_col_v2(engine, cat_col)
-        if engine == "snowflake":
-            group_select_parts.append(f"COALESCE(TRIM({col_ref}::STRING), '<NULL>') AS group_key_{i+1}")
-        else:
-            group_select_parts.append(f"COALESCE(TRIM(CAST({col_ref} AS STRING)), '<NULL>') AS group_key_{i+1}")
+        schema_row = schema_type_map.get(str(cat_col).lower())
+        dtype_upper = str(schema_row.get("data_type") or "").upper() if schema_row else ""
+        raw_type = str(schema_row.get("data_type") or "") if schema_row else ""
+        expr = _group_key_expr(engine, cat_col, dtype_upper, raw_type)
+        group_select_parts.append(f"{expr} AS group_key_{i+1}")
     
     group_select_expr = ", ".join(group_select_parts)
     group_by_clause = ", ".join(str(i+1) for i in range(len(categorical_columns)))
@@ -777,6 +869,193 @@ def build_categorical_hash_query(
     FROM row_hashes
     GROUP BY {outer_group_by_clause}
     ORDER BY {order_by_clause}
+    """.strip()
+
+
+def build_categorical_hash_samples_query(
+    engine,
+    catalog,
+    schema,
+    table,
+    schema_rows,
+    categorical_columns,
+    group_key_values,
+    include_timestamp=True,
+    timestamp_mode=None,
+    where_clause="1=1",
+    limit: int = 5,
+):
+    engine = engine.lower()
+    table_fqn = qualify_table(engine, catalog, schema, table)
+
+    if not categorical_columns:
+        raise ValueError("categorical_columns is required for categorical hash validation")
+
+    concat_parts = []
+    schema_rows = sorted(schema_rows or [], key=lambda x: str(x.get("column_name", "")).lower())
+
+    for row in schema_rows:
+        col = row.get("column_name")
+        if not col:
+            continue
+        dtype_upper = str(row.get("data_type") or "").upper()
+        col_ref = _quote_col_v2(engine, col)
+
+        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
+            continue
+
+        if "BINARY" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
+            elif engine == "databricks":
+                expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            else:  # bigquery
+                expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
+            concat_parts.append(str(expr).strip())
+            continue
+
+        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+            if not include_timestamp:
+                continue
+            expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
+        elif "DATE" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
+            else:
+                expr = f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')"
+        elif "TIME" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
+            else:
+                expr = f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')"
+        elif "BOOLEAN" in dtype_upper:
+            if engine == "snowflake":
+                expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "bigquery":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
+            else:
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
+        elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
+            expr = _numeric_expr_v2(engine, col_ref)
+        else:
+            if _is_date_like_string(col, dtype_upper):
+                expr = _string_date_expr(engine, col_ref)
+            elif engine == "snowflake":
+                expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            else:
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
+
+        concat_parts.append(str(expr).strip())
+
+    if not concat_parts:
+        raise ValueError("No columns available for hashing")
+
+    def _null_to_token(expr: str) -> str:
+        return f"COALESCE(NULLIF({expr}, ''), '<NULL>')"
+
+    def _group_key_expr(engine_name: str, col_name: str, dtype_upper: str, raw_type: str) -> str:
+        col_ref = _quote_col_v2(engine_name, col_name)
+
+        if "BINARY" in dtype_upper:
+            if engine_name == "snowflake":
+                return f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '<NULL>')"
+            if engine_name == "databricks":
+                return f"COALESCE(UPPER(HEX({col_ref})), '<NULL>')"
+            return f"COALESCE(UPPER(TO_HEX({col_ref})), '<NULL>')"
+
+        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+            return _null_to_token(_timestamp_expr_v2(engine_name, col_ref, dtype_upper, timestamp_mode))
+
+        if "DATE" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')")
+            if engine_name == "bigquery":
+                return _null_to_token(f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')")
+            return _null_to_token(f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')")
+
+        if "TIME" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')")
+            if engine_name == "bigquery":
+                return _null_to_token(f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')")
+            return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')")
+
+        if "BOOLEAN" in dtype_upper:
+            if engine_name == "snowflake":
+                return _null_to_token(f"COALESCE(LOWER({col_ref}::STRING),'')")
+            return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')")
+
+        if any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
+            return _null_to_token(_numeric_expr_v2(engine_name, col_ref))
+
+        if _is_date_like_string(col_name, dtype_upper):
+            return _null_to_token(_string_date_expr(engine_name, col_ref))
+
+        if engine_name == "snowflake":
+            return _null_to_token(f"COALESCE(TRIM({col_ref}::STRING),'')")
+
+        return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')")
+
+    schema_type_map = {str(r.get("column_name", "")).lower(): r for r in (schema_rows or [])}
+    group_select_parts = []
+    for i, cat_col in enumerate(categorical_columns):
+        schema_row = schema_type_map.get(str(cat_col).lower())
+        dtype_upper = str(schema_row.get("data_type") or "").upper() if schema_row else ""
+        raw_type = str(schema_row.get("data_type") or "") if schema_row else ""
+        expr = _group_key_expr(engine, cat_col, dtype_upper, raw_type)
+        group_select_parts.append(f"{expr} AS group_key_{i+1}")
+
+    group_select_expr = ", ".join(group_select_parts)
+    group_key_names = [f"group_key_{i+1}" for i in range(len(categorical_columns))]
+    where_sql = (str(where_clause).strip() or "1=1")
+
+    if engine == "snowflake":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"CONCAT_WS('|',\n                        {concat_expr}\n                    )"
+        row_hash_expr = f"UPPER(MD5_HEX({signature_expr}))"
+    elif engine == "databricks":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
+        row_hash_expr = f"UPPER(md5({signature_expr}))"
+    elif engine == "bigquery":
+        if len(concat_parts) == 1:
+            signature_expr = concat_parts[0]
+        else:
+            signature_expr = "CONCAT(" + ", '|' , ".join(concat_parts) + ")"
+        row_hash_expr = f"UPPER(TO_HEX(MD5({signature_expr})))"
+    else:
+        raise ValueError(f"Categorical hash not supported for engine: {engine}")
+
+    def _escape_literal(value: str) -> str:
+        return str(value).replace("'", "''")
+
+    filters = []
+    for i, raw in enumerate(group_key_values or []):
+        col_name = f"group_key_{i+1}"
+        filters.append(f"{col_name} = '{_escape_literal(raw)}'")
+    filter_sql = " AND ".join(filters) if filters else "1=1"
+
+    return f"""
+    WITH row_hashes AS (
+        SELECT
+            {group_select_expr},
+            {signature_expr} AS row_signature,
+            {row_hash_expr} AS row_hash
+        FROM {table_fqn}
+        WHERE {where_sql}
+    )
+    SELECT
+        row_hash,
+        row_signature,
+        {', '.join(group_key_names)}
+    FROM row_hashes
+    WHERE {filter_sql}
+    ORDER BY row_hash
+    LIMIT {int(limit)}
     """.strip()
 
 
