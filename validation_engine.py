@@ -28,6 +28,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+class ValidationGuardError(Exception):
+    pass
+
 # ══════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════
@@ -372,7 +376,10 @@ def run_row_hash_validation(
     cat_cols = normalize_column_list(categorical_columns)
 
     if source_row_count > 1000000 and not cat_cols:
-        raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
+        raise ValidationGuardError(
+            "Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. "
+            "Please select 1 or 2 categorical columns."
+        )
 
     if cat_cols:
         from validation_tool.validation_core import validate_categorical_hash
@@ -524,6 +531,8 @@ def run_checks_in_order(checks: list[tuple]) -> dict:
     for name, fn in checks:
         try:
             results[name] = fn()
+        except ValidationGuardError:
+            raise
         except Exception as e:
             logger.error(f"Check '{name}' failed: {e}")
             results[name] = False

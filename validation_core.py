@@ -22,9 +22,15 @@ from .query_builder import (
     get_numeric_columns,
 )
 try:
-    from .datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from .datatype_utils import (
+        normalize_datatype as canonical_normalize_datatype,
+        canonicalize_compatible_type,
+    )
 except ImportError:
-    from datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from datatype_utils import (
+        normalize_datatype as canonical_normalize_datatype,
+        canonicalize_compatible_type,
+    )
 
 # ---------- Logging setup ----------
 logging.basicConfig(level=logging.INFO)
@@ -418,10 +424,18 @@ def validate_row_hash(engine: str, source_conn, target_conn, src: dict, tgt: dic
         s = src_map[k]
         t = tgt_map[k]
 
-        # Decide canonical type (simplified here; use more robust logic if needed)
-        canon = s["type"] if s["type"] == t["type"] else "STRING"  # fallback
+        canon = canonicalize_compatible_type(s.get("raw_type"), t.get("raw_type"), s.get("name"))
+        if canon == "COMPLEX":
+            continue
+
         s["type"] = canon
         t["type"] = canon
+        if canon == "STRING":
+            s["raw_type"] = "STRING"
+            t["raw_type"] = "STRING"
+        else:
+            s["raw_type"] = canon
+            t["raw_type"] = canon
 
         if (not include_timestamp) and (canon == "TIMESTAMP"):
             continue
@@ -511,16 +525,21 @@ def validate_categorical_hash(
         s = src_map[k]
         t = tgt_map[k]
 
-        canon = s["type"] if s["type"] == t["type"] else "STRING"
-        s["type"] = canon
-        t["type"] = canon
-
-        if (not include_timestamp) and (canon == "TIMESTAMP"):
+        canon = canonicalize_compatible_type(s.get("raw_type"), t.get("raw_type"), s.get("name"))
+        if canon == "COMPLEX":
             continue
 
+        s["type"] = canon
+        t["type"] = canon
         if canon == "STRING":
             s = {**s, "raw_type": "STRING"}
             t = {**t, "raw_type": "STRING"}
+        else:
+            s = {**s, "raw_type": canon}
+            t = {**t, "raw_type": canon}
+
+        if (not include_timestamp) and (canon == "TIMESTAMP"):
+            continue
 
         src_columns.append(s)
         tgt_columns.append(t)
