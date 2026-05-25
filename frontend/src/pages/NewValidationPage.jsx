@@ -21,6 +21,23 @@ const toPayloadSettings = (settings) => {
 
 const MAX_ROW_HASH_ROWS = 1000000;
 
+const parseMetricList = (value) => String(value || '')
+  .split(',')
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+
+const isRowHashEnabled = (row, fallbackSettings = {}) => {
+  const validationType = String(row?.validation_type || 'shallow').trim().toLowerCase();
+  if (validationType === 'shallow') return false;
+
+  const metrics = parseMetricList(row?.metrics);
+  if (metrics.length > 0) {
+    return metrics.includes('hash');
+  }
+
+  return Boolean(fallbackSettings.hash);
+};
+
 const getCategoricalColumnsList = (value) => {
   if (Array.isArray(value)) {
     return value.map((item) => String(item).trim()).filter(Boolean);
@@ -1483,8 +1500,14 @@ function CSVTab({ settings, setSettings }) {
     const meta = csvPreviewMeta[index] || {};
     const rowCount = Number(meta.rowCount || 0);
     const selected = getCategoricalColumnsList(row.categorical_columns);
-    return rowCount > MAX_ROW_HASH_ROWS && selected.length === 0;
+    return rowCount > MAX_ROW_HASH_ROWS && selected.length === 0 && isRowHashEnabled(row, settings);
   });
+
+  const csvNeedsPrimaryKeys = csvRows.some((row) => (
+    settings.colDiffEnabled
+    && isRowHashEnabled(row, settings)
+    && getCategoricalColumnsList(row.primary_keys).length === 0
+  ));
 
   const handleFileChange = (e) => {
     const f = e.target.files[0];
@@ -1503,7 +1526,11 @@ function CSVTab({ settings, setSettings }) {
     reader.onload = async (ev) => {
       try {
         const parsed = parseCsvText(ev.target.result);
-        const rows = parsed.rows.map((row) => ({ ...row, categorical_columns: row.categorical_columns || '' }));
+        const rows = parsed.rows.map((row) => ({
+          ...row,
+          categorical_columns: row.categorical_columns || '',
+          primary_keys: row.primary_keys || '',
+        }));
         setCsvHeaders(parsed.headers);
         setCsvRows(rows);
 
@@ -1550,17 +1577,21 @@ function CSVTab({ settings, setSettings }) {
       return;
     }
 
-    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
-      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+    if (csvNeedsPrimaryKeys) {
+      setResults({ error: 'Primary key is required for rows using hash validation with column-level mismatch enabled.' });
       return;
     }
 
     setRunning(true);
     try {
       const form = new FormData();
-      const uploadHeaders = csvRows.some((row) => getCategoricalColumnsList(row.categorical_columns).length > 0)
-        ? [...csvHeaders.filter((header) => header !== 'categorical_columns'), 'categorical_columns']
-        : csvHeaders;
+      const shouldIncludeCategorical = csvRows.some((row) => getCategoricalColumnsList(row.categorical_columns).length > 0);
+      const shouldIncludePrimaryKeys = csvRows.some((row) => getCategoricalColumnsList(row.primary_keys).length > 0);
+      const uploadHeaders = [
+        ...csvHeaders.filter((header) => !['categorical_columns', 'primary_keys'].includes(header)),
+        ...(shouldIncludeCategorical ? ['categorical_columns'] : []),
+        ...(shouldIncludePrimaryKeys ? ['primary_keys'] : []),
+      ];
       const fileToUpload = file && csvRows.length
         ? new File([serializeCsvRows(uploadHeaders, csvRows)], file.name, { type: 'text/csv' })
         : file;
@@ -1622,6 +1653,7 @@ function CSVTab({ settings, setSettings }) {
                     {csvHeaders.map((header) => <th key={header}>{header}</th>)}
                     <th>row_count</th>
                     <th>categorical_columns</th>
+                    {settings.colDiffEnabled && <th>primary_keys</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -1630,6 +1662,8 @@ function CSVTab({ settings, setSettings }) {
                     const rowCount = Number(meta.rowCount || 0);
                     const rowColumns = meta.columns || [];
                     const selectedCategorical = getCategoricalColumnsList(row.categorical_columns);
+                    const selectedPrimaryKeys = getCategoricalColumnsList(row.primary_keys);
+                    const rowHashEnabled = isRowHashEnabled(row, settings);
                     return (
                       <tr key={idx}>
                         {csvHeaders.map((header) => (
@@ -1637,7 +1671,7 @@ function CSVTab({ settings, setSettings }) {
                         ))}
                         <td className="text-xs">{rowCount ? rowCount.toLocaleString() : ''}</td>
                         <td className="text-xs min-w-64">
-                          {rowCount > MAX_ROW_HASH_ROWS ? (
+                          {rowCount > MAX_ROW_HASH_ROWS && rowHashEnabled ? (
                             <div className="space-y-1">
                               <select
                                 multiple
@@ -1660,6 +1694,27 @@ function CSVTab({ settings, setSettings }) {
                             <span className="text-gray-400">Not required</span>
                           )}
                         </td>
+                        {settings.colDiffEnabled && (
+                          <td className="text-xs min-w-64">
+                            {rowHashEnabled ? (
+                              <select
+                                multiple
+                                className="form-select min-h-24"
+                                value={selectedPrimaryKeys}
+                                onChange={(e) => {
+                                  const selected = Array.from(e.target.selectedOptions).map((option) => option.value);
+                                  setCsvRows((prev) => prev.map((item, itemIndex) => (
+                                    itemIndex === idx ? { ...item, primary_keys: selected.join(', ') } : item
+                                  )));
+                                }}
+                              >
+                                {rowColumns.map((col) => <option key={col} value={col}>{col}</option>)}
+                              </select>
+                            ) : (
+                              <span className="text-gray-400">Not required</span>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -1681,19 +1736,14 @@ function CSVTab({ settings, setSettings }) {
           />
           <span className="text-sm">Perform column-level mismatch</span>
         </label>
-        <div className="form-group pt-2 border-t border-gray-100">
-          <label className="form-label">Primary Key Column(s)</label>
-          <input
-            className="form-input"
-            value={settings.primaryKeys || ''}
-            onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
-            placeholder="id or id,sub_id"
-          />
-          <span className="form-hint">Used for hash column-level comparison when hash metric is in file.</span>
-        </div>
+        {settings.colDiffEnabled && (
+          <div className="form-hint text-sm text-gray-500">
+            Choose primary keys per row in the preview table.
+          </div>
+        )}
       </div>
 
-      <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running || !file || csvNeedsCategoricalColumns}>
+      <button className="btn btn-primary btn-full btn-lg" onClick={handleRun} disabled={running || !file || csvNeedsCategoricalColumns || csvNeedsPrimaryKeys}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running CSV Validations...</> : <><Play size={18} /> Run CSV Validations</>}
       </button>
 
@@ -1806,8 +1856,16 @@ function ConfigTab({ settings, setSettings }) {
   const configNeedsCategoricalColumns = (preview || []).some((row, index) => {
     const meta = previewColumns[index] || {};
     const rowCount = Number(meta.rowCount || 0);
-    return rowCount > MAX_ROW_HASH_ROWS && getCategoricalColumns(row?.categorical_columns).length === 0;
+    return rowCount > MAX_ROW_HASH_ROWS
+      && getCategoricalColumns(row?.categorical_columns).length === 0
+      && isRowHashEnabled(row, settings);
   });
+
+  const configNeedsPrimaryKeys = (preview || []).some((row) => (
+    settings.colDiffEnabled
+    && isRowHashEnabled(row, settings)
+    && getCategoricalColumns(row?.primary_keys).length === 0
+  ));
 
   const loadPreviewColumns = async (rows) => {
     if (!sourceEngine || !Array.isArray(rows) || !rows.length) {
@@ -1860,9 +1918,9 @@ function ConfigTab({ settings, setSettings }) {
         const parsed = JSON.parse(ev.target.result);
         const rows = Array.isArray(parsed?.tables) ? parsed.tables : [];
         setConfig(parsed);
-        setPreview(rows.slice(0, 5));
+        setPreview(rows);
         setPreviewColumns({});
-        loadPreviewColumns(rows.slice(0, 5));
+        loadPreviewColumns(rows);
       } catch (err) {
         setConfig(null);
         setPreview(null);
@@ -1875,8 +1933,8 @@ function ConfigTab({ settings, setSettings }) {
 
   const handleSubmit = async () => {
     setParseError(null);
-    if (settings.colDiffEnabled && !(settings.primaryKeys || '').trim()) {
-      setResults({ error: 'Primary key is required when column-level diff is enabled for hash validation.' });
+    if (configNeedsPrimaryKeys) {
+      setResults({ error: 'Primary key is required for rows using hash validation with column-level mismatch enabled.' });
       return;
     }
     if (configNeedsCategoricalColumns) {
@@ -1896,6 +1954,7 @@ function ConfigTab({ settings, setSettings }) {
           ? config.tables.map((row, index) => ({
             ...row,
             categorical_columns: preview?.[index]?.categorical_columns || row.categorical_columns || '',
+            primary_keys: preview?.[index]?.primary_keys || row.primary_keys || '',
           }))
           : [],
       };
@@ -1952,16 +2011,23 @@ function ConfigTab({ settings, setSettings }) {
           <input type="file" accept=".json,application/json" onChange={handleFileChange} className="form-input" />
           {preview && (
             <div className="mt-4 overflow-x-auto">
-              <p className="text-sm text-gray-500 mb-2">Preview (first 5 tables):</p>
+              <p className="text-sm text-gray-500 mb-2">Preview:</p>
               <table className="data-table">
                 <thead>
-                  <tr>{templateFields.map(field => <th key={field}>{field}</th>)}</tr>
+                  <tr>
+                    {templateFields.map(field => <th key={field}>{field}</th>)}
+                    <th>row_count</th>
+                    <th>categorical_columns</th>
+                    {settings.colDiffEnabled && <th>primary_keys</th>}
+                  </tr>
                 </thead>
                 <tbody>
                   {preview.map((row, idx) => {
                     const meta = previewColumns[idx] || {};
                     const rowCount = Number(meta.rowCount || 0);
                     const selected = getCategoricalColumns(row?.categorical_columns);
+                    const selectedPrimaryKeys = getCategoricalColumns(row?.primary_keys);
+                    const rowHashEnabled = isRowHashEnabled(row, settings);
 
                     return (
                       <tr key={idx}>
@@ -1970,8 +2036,9 @@ function ConfigTab({ settings, setSettings }) {
                             {Array.isArray(row?.[field]) ? row[field].join(',') : String(row?.[field] ?? '')}
                           </td>
                         ))}
+                        <td className="text-xs">{rowCount ? rowCount.toLocaleString() : ''}</td>
                         <td className="text-xs min-w-64">
-                          {rowCount > MAX_ROW_HASH_ROWS ? (
+                          {rowCount > MAX_ROW_HASH_ROWS && rowHashEnabled ? (
                             <div className="space-y-1">
                               <select
                                 multiple
@@ -1994,6 +2061,40 @@ function ConfigTab({ settings, setSettings }) {
                             <span className="text-gray-400">Not required</span>
                           )}
                         </td>
+                        {settings.colDiffEnabled && (
+                          <td className="text-xs min-w-64">
+                            {rowHashEnabled ? (
+                              <select
+                                multiple
+                                className="form-select min-h-24"
+                                value={selectedPrimaryKeys}
+                                onChange={(e) => {
+                                  const next = Array.from(e.target.selectedOptions).map((option) => option.value);
+                                  setConfig((prev) => {
+                                    if (!prev || !Array.isArray(prev.tables)) return prev;
+                                    return {
+                                      ...prev,
+                                      tables: prev.tables.map((item, itemIndex) => (
+                                        itemIndex === idx ? { ...item, primary_keys: next.join(', ') } : item
+                                      )),
+                                    };
+                                  });
+                                  setPreview((prev) => (Array.isArray(prev)
+                                    ? prev.map((item, itemIndex) => (
+                                      itemIndex === idx ? { ...item, primary_keys: next.join(', ') } : item
+                                    ))
+                                    : prev));
+                                }}
+                              >
+                                {(meta.columns || []).map((col) => (
+                                  <option key={col} value={col}>{col}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-gray-400">Not required</span>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -2014,16 +2115,11 @@ function ConfigTab({ settings, setSettings }) {
           />
           <span className="text-sm">Perform column-level mismatch</span>
         </label>
-        <div className="form-group pt-2 border-t border-gray-100">
-          <label className="form-label">Primary Key Column(s)</label>
-          <input
-            className="form-input"
-            value={settings.primaryKeys || ''}
-            onChange={e => setSettings(p => ({ ...p, primaryKeys: e.target.value }))}
-            placeholder="id or id,sub_id"
-          />
-          <span className="form-hint">Used for hash column-level comparison when hash metric is in file.</span>
-        </div>
+        {settings.colDiffEnabled && (
+          <div className="form-hint text-sm text-gray-500">
+            Choose primary keys per row in the preview table.
+          </div>
+        )}
       </div>
 
       {parseError && <div className="alert alert-error">{parseError}</div>}
@@ -2032,8 +2128,13 @@ function ConfigTab({ settings, setSettings }) {
           One or more preview rows need categorical columns because their source table has more than 1,000,000 rows.
         </div>
       )}
+      {configNeedsPrimaryKeys && (
+        <div className="alert alert-warning">
+          One or more preview rows need primary keys because column-level mismatch is enabled for hash validation.
+        </div>
+      )}
 
-      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running || !file || !config || configNeedsCategoricalColumns}>
+      <button className="btn btn-primary btn-full btn-lg" onClick={handleSubmit} disabled={running || !file || !config || configNeedsCategoricalColumns || configNeedsPrimaryKeys}>
         {running ? <><Loader2 size={18} className="animate-spin" /> Running Config Validations...</> : <><Play size={18} /> Run Config Validations</>}
       </button>
 

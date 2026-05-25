@@ -92,6 +92,10 @@ def _normalize_categorical_columns(value) -> list[str]:
     return [str(item).strip() for item in items if str(item).strip()]
 
 
+def _normalize_primary_keys(value) -> list[str]:
+    return _normalize_categorical_columns(value)
+
+
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
     if normalized_engine not in ("bigquery", "snowflake"):
@@ -1361,7 +1365,9 @@ async def run_csv_validation(
     settings: str = Form("{}"),
     file: UploadFile = File(...),
 ):
-    _get_session(session_id)
+    sess = _get_session(session_id)
+    engine = sess.get("engine")
+    source_conn = sess.get("source_conn")
     contents = await file.read()
     df = pd.read_csv(io.BytesIO(contents), comment="#")
 
@@ -1432,6 +1438,18 @@ async def run_csv_validation(
                 "hash": "hash" in metrics,
             })
 
+        categorical_columns = _normalize_categorical_columns(
+            _val(row, "categorical_columns", "") or _val(row, "categoricalColumns", "")
+        )
+        if categorical_columns:
+            table_settings["categoricalColumns"] = categorical_columns
+
+        primary_keys = _normalize_primary_keys(
+            _val(row, "primary_keys", "") or _val(row, "primaryKeys", "")
+        )
+        if primary_keys:
+            table_settings["primaryKeys"] = ",".join(primary_keys)
+
         row_threshold = _val(row, "row_threshold", "")
         if row_threshold not in ("", None):
             try:
@@ -1442,6 +1460,18 @@ async def run_csv_validation(
                 table_settings["threshold"] = threshold_val
             except Exception:
                 pass
+
+        if table_settings.get("hash"):
+            source_catalog, source_schema, source_table = src.split(".", 2)
+            source_row_count = _row_count_for_table(engine, source_conn, source_catalog, source_schema, source_table)
+            if source_row_count > 1_000_000 and not categorical_columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Source table {_table_fqn(source_catalog, source_schema, source_table)} has {source_row_count:,} rows. "
+                        "Please select categorical columns before running row hash validation."
+                    ),
+                )
 
         run_req = RunValidationRequest(
             session_id=session_id,
@@ -1534,6 +1564,9 @@ class ConfigValidationRequest(BaseModel):
 @router.post("/validate/config")
 def run_config_validation(req: ConfigValidationRequest):
     """Accept JSON config and run validations for each table entry."""
+    sess = _get_session(req.session_id)
+    engine = sess.get("engine")
+    source_conn = sess.get("source_conn")
     tables = req.config.get("tables", [])
     if not tables:
         raise HTTPException(status_code=400, detail="No tables defined in config")
@@ -1598,6 +1631,12 @@ def run_config_validation(req: ConfigValidationRequest):
         )
         if categorical_columns:
             table_settings["categoricalColumns"] = categorical_columns
+
+        primary_keys = _normalize_primary_keys(
+            t.get("primary_keys") or t.get("primaryKeys") or table_settings.get("primaryKeys")
+        )
+        if primary_keys:
+            table_settings["primaryKeys"] = ",".join(primary_keys)
 
         row_threshold = t.get("row_threshold")
         if row_threshold not in (None, ""):
