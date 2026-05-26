@@ -28,6 +28,7 @@ from validation_tool.query_builder import (
     build_shallow_query,
     build_numeric_stats_query,
     build_row_hash_query,
+    build_row_value_query_v2,
     build_categorical_hash_query,
     build_categorical_hash_samples_query,
     build_row_hash_mismatch_rows_query_v2,
@@ -35,7 +36,7 @@ from validation_tool.query_builder import (
 from validation_tool.backend import supabase_store
 from validation_tool.backend.session_store import update_query_stats
 from validation_tool.migration.sql_processor import SQLPreprocessor
-from validation_tool.validation_engine import ValidationGuardError
+from validation_tool.validation_engine import ValidationGuardError, _normalize_hash_scalar, _row_hash_from_values
 from validation_tool.datatype_utils import canonicalize_compatible_type
 
 logger = logging.getLogger(__name__)
@@ -1133,19 +1134,43 @@ def run_validation(req: RunValidationRequest):
                     tgt_hashes = []
                     matched_hashes = []
                     if src_columns:
-                        src_query = build_row_hash_query(
+                        src_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in src_columns]
+                        tgt_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in tgt_columns]
+
+                        src_query = build_row_value_query_v2(
                             engine, src["catalog"], src["schema"], src["table"],
-                            columns=src_columns, where_clause=normalize_where_input(src_where),
+                            schema_rows=src_schema_for_hash,
+                            include_timestamp=include_ts,
+                            where_clause=normalize_where_input(src_where),
                         )
-                        tgt_query = build_row_hash_query(
+                        tgt_query = build_row_value_query_v2(
                             "Databricks", tgt["catalog"], tgt["schema"], tgt["table"],
-                            columns=tgt_columns, where_clause=normalize_where_input(tgt_where),
+                            schema_rows=tgt_schema_for_hash,
+                            include_timestamp=include_ts,
+                            where_clause=normalize_where_input(tgt_where),
                         )
 
-                        src_rows = execute_query(engine, source_conn, src_query)
-                        tgt_rows = execute_query("Databricks", target_conn, tgt_query)
-                        src_hashes = sorted({h for r in src_rows if (h := normalize_hash_value(get_hash(r))) is not None})
-                        tgt_hashes = sorted({h for r in tgt_rows if (h := normalize_hash_value(get_hash(r))) is not None})
+                        src_value_rows = [normalize_result(r) for r in execute_query(engine, source_conn, src_query)]
+                        tgt_value_rows = [normalize_result(r) for r in execute_query("Databricks", target_conn, tgt_query)]
+                        value_columns = [f"col_{i + 1}" for i in range(len(src_columns))]
+
+                        def _hash_row(row):
+                            return normalize_hash_value(_row_hash_from_values(row, value_columns))
+
+                        # Keep the same included-column order used in hash signature generation.
+                        hash_columns = [str(c.get("name")) for c in src_columns if c.get("name")]
+
+                        def _display_row(row):
+                            item = {}
+                            for i, col_name in enumerate(hash_columns):
+                                value = row.get(value_columns[i]) if i < len(value_columns) else None
+                                item[col_name] = _normalize_hash_scalar(value)
+                            return item
+
+                        src_row_hashes = [(r, _hash_row(r)) for r in src_value_rows]
+                        tgt_row_hashes = [(r, _hash_row(r)) for r in tgt_value_rows]
+                        src_hashes = sorted({h for _, h in src_row_hashes if h is not None})
+                        tgt_hashes = sorted({h for _, h in tgt_row_hashes if h is not None})
 
                         tgt_set = set(tgt_hashes)
                         src_set = set(src_hashes)
@@ -1158,66 +1183,10 @@ def run_validation(req: RunValidationRequest):
                         source_not_in_target_count = len(src_only_hashes)
                         target_not_in_source_count = len(tgt_only_hashes)
 
-                        # Keep the same included-column order used in hash signature generation.
-                        hash_columns = [str(c.get("name")) for c in src_columns if c.get("name")]
-
-                        def _rows_from_mismatch_hashes(
-                            q_engine,
-                            q_catalog,
-                            q_schema,
-                            q_table,
-                            q_schema_rows,
-                            mismatch_hashes,
-                            q_where,
-                            q_conn,
-                        ):
-                            if not mismatch_hashes:
-                                return []
-
-                            q = build_row_hash_mismatch_rows_query_v2(
-                                q_engine,
-                                q_catalog,
-                                q_schema,
-                                q_table,
-                                schema_rows=q_schema_rows,
-                                hash_values=[str(h).upper() for h in mismatch_hashes[:50] if h],
-                                include_timestamp=include_ts,
-                                timestamp_mode=None,
-                                limit=50,
-                                where_clause=normalize_where_input(q_where),
-                            )
-                            rows = execute_query(q_engine if q_engine.lower() != "databricks" else "Databricks", q_conn, q)
-                            normalized = [normalize_result(r) for r in rows]
-                            parsed_rows = []
-                            for r in normalized:
-                                sig = r.get("row_signature") or r.get("ROW_SIGNATURE") or ""
-                                parts = str(sig).split("|") if sig is not None else []
-                                item = {}
-                                for i, col_name in enumerate(hash_columns):
-                                    item[col_name] = parts[i] if i < len(parts) else None
-                                parsed_rows.append(item)
-                            return parsed_rows
-
-                        src_only_rows = _rows_from_mismatch_hashes(
-                            engine,
-                            src["catalog"],
-                            src["schema"],
-                            src["table"],
-                            src_schema_rows,
-                            src_only_hashes,
-                            src_where,
-                            source_conn,
-                        )
-                        tgt_only_rows = _rows_from_mismatch_hashes(
-                            "databricks",
-                            tgt["catalog"],
-                            tgt["schema"],
-                            tgt["table"],
-                            tgt_schema_rows,
-                            tgt_only_hashes,
-                            tgt_where,
-                            target_conn,
-                        )
+                        src_only_set = set(src_only_hashes)
+                        tgt_only_set = set(tgt_only_hashes)
+                        src_only_rows = [_display_row(r) for r, h in src_row_hashes if h in src_only_set][:50]
+                        tgt_only_rows = [_display_row(r) for r, h in tgt_row_hashes if h in tgt_only_set][:50]
 
                         # ─── Improved Mismatch Identification ───
                         pks_input = settings.get("primaryKeys", "")

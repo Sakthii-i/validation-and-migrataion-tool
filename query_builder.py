@@ -134,19 +134,19 @@ def build_numeric_stats_query(
 
 def _col_name(col):
     if isinstance(col, dict):
-        return col.get("name")
+        return col.get("name") or col.get("column_name")
     return col
 
 
 def _col_type(col):
     if isinstance(col, dict):
-        return (col.get("type") or "").upper()
+        return (col.get("type") or col.get("data_type") or "").upper()
     return ""
 
 
 def _col_raw_type(col) -> str:
     if isinstance(col, dict):
-        raw = col.get("raw_type")
+        raw = col.get("raw_type") or col.get("data_type")
         return str(raw).lower().strip() if raw is not None else ""
     return ""
 
@@ -185,7 +185,11 @@ def _normalize_numeric_expr(engine: str, expr: str) -> str:
             "'\\.$', ''"
             ")"
         )
-        return fr"regexp_replace({stripped}, '^-0(\.0+)?$', '0')"
+        return (
+            "CASE WHEN instr(TRIM(" + expr + "), '.') > 0 "
+            "THEN " + fr"regexp_replace({stripped}, '^-0(\.0+)?$', '0')" + " "
+            "ELSE TRIM(" + expr + ") END"
+        )
 
     if engine == "snowflake":
         stripped = (
@@ -471,13 +475,15 @@ def _numeric_expr_v2(engine: str, col_ref: str) -> str:
     # databricks
     return (
         "COALESCE("
+        "CASE WHEN instr(TRIM(CAST(" + col_ref + " AS STRING)), '.') > 0 THEN "
         "regexp_replace("
         "regexp_replace("
         "TRIM(CAST(CAST(" + col_ref + " AS DECIMAL(38,8)) AS STRING)),"
         "'(\\\\.\\\\d*?)0+$', '$1'"
         "),"
         "'\\\\.$', ''"
-        "),"
+        ") "
+        "ELSE TRIM(CAST(" + col_ref + " AS STRING)) END,"
         "''"
         ")"
     )
@@ -729,7 +735,8 @@ def build_row_value_query_v2(
     catalog,
     schema,
     table,
-    schema_rows,
+    schema_rows=None,
+    columns=None,
     include_timestamp=True,
     timestamp_mode=None,
     where_clause="1=1",
@@ -737,10 +744,14 @@ def build_row_value_query_v2(
     engine = engine.lower()
     table_fqn = qualify_table(engine, catalog, schema, table)
 
+    if schema_rows is None:
+        schema_rows = _columns_to_schema_rows(columns)
+
     schema_rows = sorted(schema_rows or [], key=lambda x: str(x.get("column_name", "")).lower())
     select_parts = []
+    select_index = 0
 
-    for index, row in enumerate(schema_rows, start=1):
+    for row in schema_rows:
         col = row.get("column_name")
         if not col:
             continue
@@ -750,7 +761,8 @@ def build_row_value_query_v2(
             if not include_timestamp:
                 continue
         expr = _value_expr(engine, row)
-        select_parts.append(f"{expr} AS col_{index}")
+        select_index += 1
+        select_parts.append(f"{expr} AS col_{select_index}")
 
     if not select_parts:
         raise ValueError("No columns available for hashing")
