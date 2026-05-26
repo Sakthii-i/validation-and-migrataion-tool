@@ -1,6 +1,8 @@
 import logging
 import uuid
 import re
+import hashlib
+import json
 import pandas as pd
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -18,6 +20,7 @@ from .query_builder import (
     build_shallow_query,
     build_schema_query,
     build_numeric_stats_query,
+    build_row_value_query_v2,
     build_row_hash_query_v2,
     get_numeric_columns,
 )
@@ -447,23 +450,61 @@ def validate_row_hash(engine: str, source_conn, target_conn, src: dict, tgt: dic
         logger.error("No columns left after filtering")
         return False
 
-    # Build hash queries – convert column dicts to expected format (column_name, data_type)
+    # Build normalized row-value queries so key order and array order can be canonicalized in Python.
     src_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in src_columns]
     tgt_schema_for_hash = [{"column_name": c["name"], "data_type": c["raw_type"] or c["type"]} for c in tgt_columns]
 
-    src_query = build_row_hash_query_v2(
+    src_query = build_row_value_query_v2(
         engine, src["catalog"], src["schema"], src["table"],
         schema_rows=src_schema_for_hash, include_timestamp=include_timestamp
     )
-    tgt_query = build_row_hash_query_v2(
+    tgt_query = build_row_value_query_v2(
         "databricks", tgt["catalog"], tgt["schema"], tgt["table"],
         schema_rows=tgt_schema_for_hash, include_timestamp=include_timestamp
     )
 
-    src_hashes = {str(row.get("hash_value") or row.get("HASH_VALUE")).strip().lower()
-                  for row in execute_query(engine, source_conn, src_query)}
-    tgt_hashes = {str(row.get("hash_value") or row.get("HASH_VALUE")).strip().lower()
-                  for row in execute_query("databricks", target_conn, tgt_query)}
+    def _normalize_hash_scalar(value):
+        if value is None:
+            return "<NULL>"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float, Decimal)):
+            return str(value).strip()
+        if isinstance(value, (list, tuple, set)):
+            items = sorted((_normalize_hash_scalar(item) for item in value), key=lambda item: item.lower())
+            return f"[{','.join(items)}]"
+        if isinstance(value, dict):
+            parts = []
+            for key in sorted(value.keys(), key=lambda item: str(item).strip().lower()):
+                normalized_key = str(key).strip()
+                normalized_value = _normalize_hash_scalar(value[key])
+                parts.append(f"{json.dumps(normalized_key, ensure_ascii=False, separators=(',', ':'))}:{normalized_value}")
+            return f"{{{','.join(parts)}}}"
+
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            if "," in text:
+                items = [item.strip() for item in text.split(",") if item.strip()]
+                if len(items) > 1:
+                    return ",".join(sorted(items, key=lambda item: item.lower()))
+            return text
+
+        return _normalize_hash_scalar(parsed)
+
+    def _row_hash_from_values(row: dict, value_columns: list[str]) -> str:
+        signature_parts = [_normalize_hash_scalar(row.get(column)) for column in value_columns]
+        signature = "|".join(signature_parts)
+        return hashlib.md5(signature.encode("utf-8")).hexdigest().upper()
+
+    value_columns = [f"col_{i + 1}" for i in range(len(src_columns))]
+
+    src_hashes = {_row_hash_from_values(row, value_columns) for row in execute_query(engine, source_conn, src_query)}
+    tgt_hashes = {_row_hash_from_values(row, value_columns) for row in execute_query("databricks", target_conn, tgt_query)}
 
     return src_hashes == tgt_hashes
 

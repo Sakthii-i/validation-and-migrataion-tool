@@ -989,20 +989,18 @@ def run_validation(req: RunValidationRequest):
                         canon = canonicalize_compatible_type(s_raw, t_raw, s.get("column_name"))
 
                         dtype = str(canon or "").upper()
-                        if dtype == "COMPLEX" or any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-                            continue
                         if not include_ts and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
                             continue
 
                         src_columns.append({
                             "name": s["column_name"],
                             "type": dtype,
-                            "raw_type": "STRING" if canon == "STRING" else dtype,
+                            "raw_type": s_raw,
                         })
                         tgt_columns.append({
                             "name": t["column_name"],
                             "type": dtype,
-                            "raw_type": "STRING" if canon == "STRING" else dtype,
+                            "raw_type": t_raw,
                         })
 
                     hash_mode = "row"

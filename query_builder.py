@@ -347,13 +347,13 @@ def _value_expr(engine: str, col: dict | str) -> str:
         return f"COALESCE(TRIM({_normalize_numeric_expr(engine, numeric_str)}), {null_token})"
 
     # Complex types: prefer JSON when available
-    if col_type in {"STRUCT", "ARRAY"}:
+    if col_type in {"STRUCT", "ARRAY", "COMPLEX"} or any(k in col_raw_type for k in ["struct", "array", "map", "object", "variant", "json"]):
         if engine == "bigquery":
             return f"COALESCE(TRIM(TO_JSON_STRING({col_ref})), {null_token})"
         if engine == "databricks":
             # If underlying type is MAP, sort keys for deterministic JSON.
             if col_raw_type.startswith("map<"):
-                return f"COALESCE(TRIM(to_json(map_sort({col_ref}))), {null_token})"
+                return f"COALESCE(TRIM(to_json(map_from_entries(sort_array(map_entries({col_ref}))))), {null_token})"
             return f"COALESCE(TRIM(to_json({col_ref})), {null_token})"
         if engine == "snowflake":
             return f"COALESCE(TRIM(TO_JSON({col_ref})), {null_token})"
@@ -493,6 +493,41 @@ def _is_date_like_string(col_name: str, dtype_upper: str) -> bool:
     return "date" in str(col_name or "").lower()
 
 
+def _is_complex_type_v2(dtype_upper: str) -> bool:
+    return any(x in (dtype_upper or "") for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP", "JSON", "COMPLEX"])
+
+
+def _canonical_complex_expr_v2(engine: str, col_ref: str, dtype_upper: str) -> str:
+    engine = engine.lower()
+    if engine == "snowflake":
+        return f"COALESCE(TO_JSON({col_ref}), '')"
+
+    if engine == "bigquery":
+        return f"COALESCE(TO_JSON_STRING({col_ref}), '')"
+
+    if "MAP" in dtype_upper:
+        return f"COALESCE(to_json(map_from_entries(sort_array(map_entries({col_ref})))), '')"
+
+    return f"COALESCE(to_json({col_ref}), '')"
+
+
+def _maybe_canonical_json_string_expr_v2(engine: str, col_ref: str) -> str:
+    engine = engine.lower()
+    if engine == "snowflake":
+        return f"COALESCE(TO_JSON(TRY_PARSE_JSON({col_ref}::STRING)), TRIM({col_ref}::STRING), '')"
+
+    if engine == "bigquery":
+        return f"COALESCE(TO_JSON_STRING(SAFE.PARSE_JSON(CAST({col_ref} AS STRING))), TRIM(CAST({col_ref} AS STRING)), '')"
+
+    return (
+        "COALESCE("
+        f"to_json(map_from_entries(sort_array(map_entries(from_json(CAST({col_ref} AS STRING), 'map<string,string>'))))),"
+        f"TRIM(CAST({col_ref} AS STRING)),"
+        "''"
+        ")"
+    )
+
+
 def _string_date_expr(engine: str, col_ref: str) -> str:
     engine = engine.lower()
     if engine == "snowflake":
@@ -569,10 +604,6 @@ def build_row_hash_query_v2(
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        # Skip unsupported complex types (per user-provided logic)
-        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
-
         # BINARY: include as deterministic HEX string
         if "BINARY" in dtype_upper:
             if engine == "snowflake":
@@ -586,7 +617,10 @@ def build_row_hash_query_v2(
             continue
 
         # TIMESTAMP / DATETIME
-        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+        if _is_complex_type_v2(dtype_upper):
+            expr = _canonical_complex_expr_v2(engine, col_ref, dtype_upper)
+
+        elif ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             if not include_timestamp:
                 continue
             expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
@@ -626,6 +660,8 @@ def build_row_hash_query_v2(
         else:
             if _is_date_like_string(col, dtype_upper):
                 expr = _string_date_expr(engine, col_ref)
+            elif _is_string_type(dtype_upper):
+                expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
@@ -688,6 +724,46 @@ def build_row_hash_query_v2(
     raise ValueError(f"Row hash not supported for engine: {engine}")
 
 
+def build_row_value_query_v2(
+    engine,
+    catalog,
+    schema,
+    table,
+    schema_rows,
+    include_timestamp=True,
+    timestamp_mode=None,
+    where_clause="1=1",
+):
+    engine = engine.lower()
+    table_fqn = qualify_table(engine, catalog, schema, table)
+
+    schema_rows = sorted(schema_rows or [], key=lambda x: str(x.get("column_name", "")).lower())
+    select_parts = []
+
+    for index, row in enumerate(schema_rows, start=1):
+        col = row.get("column_name")
+        if not col:
+            continue
+
+        dtype_upper = str(row.get("data_type") or "").upper()
+        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+            if not include_timestamp:
+                continue
+        expr = _value_expr(engine, row)
+        select_parts.append(f"{expr} AS col_{index}")
+
+    if not select_parts:
+        raise ValueError("No columns available for hashing")
+
+    where_sql = (str(where_clause).strip() or "1=1")
+    return f"""
+    SELECT
+        {', '.join(select_parts)}
+    FROM {table_fqn}
+    WHERE {where_sql}
+    """.strip()
+
+
 def build_categorical_hash_query(
     engine,
     catalog,
@@ -715,9 +791,6 @@ def build_categorical_hash_query(
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
-
         if "BINARY" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
@@ -728,7 +801,9 @@ def build_categorical_hash_query(
             concat_parts.append(str(expr).strip())
             continue
 
-        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+        if _is_complex_type_v2(dtype_upper):
+            expr = _canonical_complex_expr_v2(engine, col_ref, dtype_upper)
+        elif ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             if not include_timestamp:
                 continue
             expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
@@ -758,6 +833,8 @@ def build_categorical_hash_query(
         else:
             if _is_date_like_string(col, dtype_upper):
                 expr = _string_date_expr(engine, col_ref)
+            elif _is_string_type(dtype_upper):
+                expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
@@ -780,6 +857,9 @@ def build_categorical_hash_query(
             if engine_name == "databricks":
                 return f"COALESCE(UPPER(HEX({col_ref})), '<NULL>')"
             return f"COALESCE(UPPER(TO_HEX({col_ref})), '<NULL>')"
+
+        if _is_complex_type_v2(dtype_upper):
+            return _null_to_token(_canonical_complex_expr_v2(engine_name, col_ref, dtype_upper))
 
         if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             return _null_to_token(_timestamp_expr_v2(engine_name, col_ref, dtype_upper, timestamp_mode))
@@ -808,6 +888,9 @@ def build_categorical_hash_query(
 
         if _is_date_like_string(col_name, dtype_upper):
             return _null_to_token(_string_date_expr(engine_name, col_ref))
+
+        if _is_string_type(dtype_upper):
+            return _null_to_token(_maybe_canonical_json_string_expr_v2(engine_name, col_ref))
 
         if engine_name == "snowflake":
             return _null_to_token(f"COALESCE(TRIM({col_ref}::STRING),'')")
@@ -838,19 +921,22 @@ def build_categorical_hash_query(
         concat_expr = ",\n                        ".join(concat_parts)
         signature_expr = f"CONCAT_WS('|',\n                        {concat_expr}\n                    )"
         row_hash_expr = f"UPPER(MD5_HEX({signature_expr}))"
-        group_hash_expr = "UPPER(MD5_HEX(LISTAGG(row_hash, '|') WITHIN GROUP (ORDER BY row_hash)))"
+        row_hash_count_expr = "row_hash || ':' || row_hash_count"
+        group_hash_expr = f"UPPER(MD5_HEX(LISTAGG({row_hash_count_expr}, '|') WITHIN GROUP (ORDER BY row_hash)))"
     elif engine == "databricks":
         concat_expr = ",\n                        ".join(concat_parts)
         signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
         row_hash_expr = f"UPPER(md5({signature_expr}))"
-        group_hash_expr = "UPPER(md5(concat_ws('|', sort_array(collect_list(row_hash)))))"
+        row_hash_count_expr = "concat(row_hash, ':', CAST(row_hash_count AS STRING))"
+        group_hash_expr = f"UPPER(md5(concat_ws('|', sort_array(collect_list({row_hash_count_expr})))))"
     elif engine == "bigquery":
         if len(concat_parts) == 1:
             signature_expr = concat_parts[0]
         else:
             signature_expr = "CONCAT(" + ", '|' , ".join(concat_parts) + ")"
         row_hash_expr = f"UPPER(TO_HEX(MD5({signature_expr})))"
-        group_hash_expr = "UPPER(TO_HEX(MD5(STRING_AGG(row_hash, '|' ORDER BY row_hash))))"
+        row_hash_count_expr = "CONCAT(row_hash, ':', CAST(row_hash_count AS STRING))"
+        group_hash_expr = f"UPPER(TO_HEX(MD5(STRING_AGG({row_hash_count_expr}, '|' ORDER BY row_hash))))"
     else:
         raise ValueError(f"Categorical hash not supported for engine: {engine}")
 
@@ -861,12 +947,20 @@ def build_categorical_hash_query(
             {row_hash_expr} AS row_hash
         FROM {table_fqn}
         WHERE {where_sql}
+    ),
+    hash_counts AS (
+        SELECT
+            {outer_group_by_clause},
+            row_hash,
+            COUNT(*) AS row_hash_count
+        FROM row_hashes
+        GROUP BY {outer_group_by_clause}, row_hash
     )
     SELECT
         {outer_group_by_clause},
-        COUNT(*) AS row_count,
+        SUM(row_hash_count) AS row_count,
         {group_hash_expr} AS group_hash_sum
-    FROM row_hashes
+    FROM hash_counts
     GROUP BY {outer_group_by_clause}
     ORDER BY {order_by_clause}
     """.strip()
@@ -901,9 +995,6 @@ def build_categorical_hash_samples_query(
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
-
         if "BINARY" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
@@ -914,7 +1005,9 @@ def build_categorical_hash_samples_query(
             concat_parts.append(str(expr).strip())
             continue
 
-        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+        if _is_complex_type_v2(dtype_upper):
+            expr = _canonical_complex_expr_v2(engine, col_ref, dtype_upper)
+        elif ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             if not include_timestamp:
                 continue
             expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
@@ -944,6 +1037,8 @@ def build_categorical_hash_samples_query(
         else:
             if _is_date_like_string(col, dtype_upper):
                 expr = _string_date_expr(engine, col_ref)
+            elif _is_string_type(dtype_upper):
+                expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
@@ -1090,9 +1185,6 @@ def build_row_hash_mismatch_rows_query_v2(
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
-
         if "BINARY" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
@@ -1104,7 +1196,9 @@ def build_row_hash_mismatch_rows_query_v2(
             parts.append(str(expr).strip())
             continue
 
-        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+        if _is_complex_type_v2(dtype_upper):
+            expr = _canonical_complex_expr_v2(engine, col_ref, dtype_upper)
+        elif ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             if not include_timestamp:
                 continue
             expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode)
@@ -1130,7 +1224,11 @@ def build_row_hash_mismatch_rows_query_v2(
         elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
-            if engine == "snowflake":
+            if _is_date_like_string(col, dtype_upper):
+                expr = _string_date_expr(engine, col_ref)
+            elif _is_string_type(dtype_upper):
+                expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
+            elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
@@ -1187,9 +1285,6 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         dtype_upper = str(row.get("data_type") or "").upper()
         col_ref = _quote_col_v2(engine, col)
 
-        if any(x in dtype_upper for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
-
         if "BINARY" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
@@ -1201,7 +1296,9 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
             parts.append(str(expr).strip())
             continue
 
-        if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
+        if _is_complex_type_v2(dtype_upper):
+            expr = _canonical_complex_expr_v2(engine, col_ref, dtype_upper)
+        elif ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
             expr = _timestamp_expr_v2(engine, col_ref, dtype_upper, timestamp_mode=None)
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
@@ -1225,7 +1322,11 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
             expr = _numeric_expr_v2(engine, col_ref)
         else:
-            if engine == "snowflake":
+            if _is_date_like_string(col, dtype_upper):
+                expr = _string_date_expr(engine, col_ref)
+            elif _is_string_type(dtype_upper):
+                expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
+            elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"

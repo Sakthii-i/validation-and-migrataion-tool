@@ -4,6 +4,8 @@ No Streamlit dependencies. Used by the React API backend.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 import logging
@@ -18,7 +20,7 @@ from validation_tool.query_builder import (
     build_shallow_query,
     build_schema_query,
     build_numeric_stats_query,
-    build_row_hash_query,
+    build_row_value_query_v2,
     get_numeric_columns,
 )
 try:
@@ -90,6 +92,46 @@ def normalize_hash_value(value):
     if value is None:
         return None
     return str(value).strip().lower()
+
+
+def _normalize_hash_scalar(value):
+    if value is None:
+        return "<NULL>"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, Decimal)):
+        return str(value).strip()
+    if isinstance(value, (list, tuple, set)):
+        items = sorted((_normalize_hash_scalar(item) for item in value), key=lambda item: item.lower())
+        return f"[{','.join(items)}]"
+    if isinstance(value, dict):
+        parts = []
+        for key in sorted(value.keys(), key=lambda item: str(item).strip().lower()):
+            normalized_key = str(key).strip()
+            normalized_value = _normalize_hash_scalar(value[key])
+            parts.append(f"{json.dumps(normalized_key, ensure_ascii=False, separators=(',', ':'))}:{normalized_value}")
+        return f"{{{','.join(parts)}}}"
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        if "," in text:
+            items = [item.strip() for item in text.split(",") if item.strip()]
+            if len(items) > 1:
+                return ",".join(sorted(items, key=lambda item: item.lower()))
+        return text
+
+    return _normalize_hash_scalar(parsed)
+
+
+def _row_hash_from_values(row: dict, value_columns: list[str]) -> str:
+    signature_parts = [_normalize_hash_scalar(row.get(column)) for column in value_columns]
+    signature = "|".join(signature_parts)
+    return hashlib.md5(signature.encode("utf-8")).hexdigest().upper()
 
 
 def numeric_values_equal(left, right):
@@ -418,8 +460,6 @@ def run_row_hash_validation(
         s = src_map[k]
         t = tgt_map[k]
         dtype = str(s.get("data_type", "")).upper()
-        if any(x in dtype for x in ["VARIANT", "STRUCT", "ARRAY", "OBJECT", "MAP"]):
-            continue
         if not include_timestamp_columns and ("TIMESTAMP" in dtype or "DATETIME" in dtype):
             continue
         src_columns.append({"name": s["column_name"], "type": dtype, "raw_type": s.get("data_type", "")})
@@ -428,11 +468,11 @@ def run_row_hash_validation(
     if not src_columns:
         return False
 
-    src_query = build_row_hash_query(
+    src_query = build_row_value_query_v2(
         engine, src["catalog"], src["schema"], src["table"],
         columns=src_columns, where_clause=normalize_where_input(source_where),
     )
-    tgt_query = build_row_hash_query(
+    tgt_query = build_row_value_query_v2(
         "Databricks", tgt["catalog"], tgt["schema"], tgt["table"],
         columns=tgt_columns, where_clause=normalize_where_input(target_where),
     )
@@ -440,8 +480,10 @@ def run_row_hash_validation(
     src_rows = execute_query(engine, source_conn, src_query)
     tgt_rows = execute_query("Databricks", target_conn, tgt_query)
 
-    src_hashes = {h for r in src_rows if (h := normalize_hash_value(get_hash(r))) is not None}
-    tgt_hashes = {h for r in tgt_rows if (h := normalize_hash_value(get_hash(r))) is not None}
+    value_columns = [f"col_{i + 1}" for i in range(len(src_columns))]
+
+    src_hashes = {_row_hash_from_values(r, value_columns) for r in src_rows}
+    tgt_hashes = {_row_hash_from_values(r, value_columns) for r in tgt_rows}
 
     if src_hashes == tgt_hashes:
         return True
