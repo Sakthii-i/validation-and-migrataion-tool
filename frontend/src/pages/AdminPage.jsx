@@ -8,8 +8,11 @@ export default function AdminPage() {
   const { isAdmin } = useAuth();
   const [users, setUsers] = useState([]);
   const [newUser, setNewUser] = useState('');
+  const [newEmail, setNewEmail] = useState('');
   const [newPass, setNewPass] = useState('');
+  const [smtpPassword, setSmtpPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
+  const [showSmtpPass, setShowSmtpPass] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
 
@@ -25,12 +28,20 @@ export default function AdminPage() {
   };
 
   const handleGrant = async () => {
-    if (!newUser.trim() || !newPass.trim()) return;
+    if (!newUser.trim() || !newPass.trim() || !newEmail.trim() || !smtpPassword.trim()) return;
     setLoading(true);
     try {
-      await authAPI.grantAccess(newUser.trim(), newPass.trim());
+      await authAPI.grantAccess({
+        username: newUser.trim(),
+        password: newPass,
+        email: newEmail.trim(),
+        smtp_password: smtpPassword,
+      });
       setMessage({ type: 'success', text: `Access granted to "${newUser.trim()}"` });
-      setNewUser(''); setNewPass('');
+      setNewUser('');
+      setNewEmail('');
+      setNewPass('');
+      setSmtpPassword('');
       fetchUsers();
     } catch (e) {
       setMessage({ type: 'error', text: e.response?.data?.detail || 'Failed' });
@@ -40,7 +51,6 @@ export default function AdminPage() {
   };
 
   const handleRevoke = async (username) => {
-    if (!confirm(`Revoke access for "${username}"?`)) return;
     try {
       await authAPI.revokeAccess(username);
       setMessage({ type: 'success', text: `Access revoked for "${username}"` });
@@ -76,8 +86,12 @@ export default function AdminPage() {
         <CollapsibleSection title="Grant User Access" icon={<UserPlus size={16} />}>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="form-group">
-              <label className="form-label">Username</label>
+              <label className="form-label">Name</label>
               <input className="form-input" value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="johndoe" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">User Email</label>
+              <input className="form-input" type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="user@company.com" />
             </div>
             <div className="form-group">
               <label className="form-label">Password</label>
@@ -91,6 +105,21 @@ export default function AdminPage() {
                 />
                 <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
                   {showPass ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">SMTP App Password</label>
+              <div className="relative">
+                <input
+                  type={showSmtpPass ? 'text' : 'password'}
+                  className="form-input pr-10"
+                  value={smtpPassword}
+                  onChange={e => setSmtpPassword(e.target.value)}
+                  placeholder="SMTP app password"
+                />
+                <button type="button" onClick={() => setShowSmtpPass(!showSmtpPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                  {showSmtpPass ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
             </div>
@@ -112,22 +141,26 @@ export default function AdminPage() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Username</th>
+                    <th>Name</th>
+                    <th>User Email</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((u, i) => (
-                    <tr key={u}>
+                  {users.map((user, i) => {
+                    const username = typeof user === 'string' ? user : user.username;
+                    return (
+                    <tr key={username}>
                       <td className="text-gray-400">{i + 1}</td>
-                      <td className="font-medium">{u}</td>
+                      <td className="font-medium">{username}</td>
+                      <td>{typeof user === 'string' ? '-' : (user.email || '-')}</td>
                       <td>
-                        <button className="btn btn-danger btn-sm" onClick={() => handleRevoke(u)}>
+                        <button className="btn btn-danger btn-sm" onClick={() => handleRevoke(username)}>
                           <UserMinus size={14} /> Revoke
                         </button>
                       </td>
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </table>
             </div>

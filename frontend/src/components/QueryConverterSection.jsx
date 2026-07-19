@@ -1901,6 +1901,15 @@ function ResultsDisplay({ results }) {
   if (results.error) return <div className="alert alert-error mt-4">❌ {results.error}</div>;
 
   const records = results.results || results.validation_ids || [];
+  const isFailStatus = (status) => String(status || '').trim().toUpperCase() === 'FAIL';
+  const failedRecords = Array.isArray(records)
+    ? records.filter((r) => (
+        isFailStatus(r.row_count || r.count_validation)
+        || isFailStatus(r.schema_check)
+        || isFailStatus(r.numeric_check)
+        || isFailStatus(r.hash_validation)
+      ))
+    : [];
   const numericRows = detailRecord?.details?.numeric?.rows || [];
 
   const isNotSelected = (status) => {
@@ -1990,6 +1999,23 @@ function ResultsDisplay({ results }) {
           </table>
         </div>
       )}
+
+      {failedRecords.map((record, i) => {
+        const notice = record.email_notification || {};
+        const recipient = notice.recipient || record.email || 'the respective mail';
+        const message = notice.sent
+          ? `Validation failed. Validation report has been sent to ${recipient}.`
+          : (notice.message || `Validation failed. Validation report has been sent to ${recipient}.`);
+
+        return (
+          <div
+            key={`${record.validation_id || i}-email-notification`}
+            className={`alert mt-3 ${notice.sent === false ? 'alert-error' : 'alert-success'}`}
+          >
+            {message}
+          </div>
+        );
+      })}
 
       {detailRecord && (
         <div className="card mt-4">

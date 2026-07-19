@@ -179,15 +179,15 @@ def _normalize_numeric_expr(engine: str, expr: str) -> str:
 
     if engine == "databricks":
         stripped = (
-            "regexp_replace(" 
-            "regexp_replace(" 
-            f"{expr}, '(\\.\\d*?)0+$', '$1')," 
-            "'\\.$', ''"
+            "regexp_replace("
+            "regexp_replace("
+            f"{expr}, '(\\\\.\\\\d*?)0+$', '$1'),"
+            "'\\\\.$', ''"
             ")"
         )
         return (
             "CASE WHEN instr(TRIM(" + expr + "), '.') > 0 "
-            "THEN " + fr"regexp_replace({stripped}, '^-0(\.0+)?$', '0')" + " "
+            "THEN " + f"regexp_replace({stripped}, '^-0(\\\\.0+)?$', '0')" + " "
             "ELSE TRIM(" + expr + ") END"
         )
 
@@ -338,10 +338,7 @@ def _value_expr(engine: str, col: dict | str) -> str:
             else:
                 numeric_str = f"CAST({col_ref} AS STRING)"
         elif engine == "databricks":
-            if _is_float_type(col_type):
-                numeric_str = f"CAST(CAST({col_ref} AS DECIMAL(38,15)) AS STRING)"
-            else:
-                numeric_str = f"CAST({col_ref} AS STRING)"
+            numeric_str = f"format_string('%.15f', CAST({col_ref} AS DOUBLE))"
         else:  # snowflake
             if _is_float_type(col_type):
                 numeric_str = f"TO_VARCHAR(TO_DECIMAL({col_ref}, 38, 15))"

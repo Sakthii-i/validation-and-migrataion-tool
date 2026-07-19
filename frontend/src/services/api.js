@@ -17,8 +17,12 @@ export const authAPI = {
   login: (username, password, role = 'user') =>
     api.post('/auth/login', { username, password, role }),
   listUsers: () => api.get('/auth/users'),
-  grantAccess: (username, password) =>
-    api.post('/auth/grant', { username, password }),
+  grantAccess: (payloadOrUsername, password) => {
+    const payload = typeof payloadOrUsername === 'object'
+      ? payloadOrUsername
+      : { username: payloadOrUsername, password };
+    return api.post('/auth/grant', payload);
+  },
   revokeAccess: (username) =>
     api.post('/auth/revoke', { username }),
 };

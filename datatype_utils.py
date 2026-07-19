@@ -135,4 +135,14 @@ def canonicalize_compatible_type(source_dtype, target_dtype, column_name=None) -
     return "STRING"
 
 
+def datatypes_compatible(source_dtype, target_dtype, column_name=None) -> bool:
+    s_norm = normalize_datatype(source_dtype, column_name)
+    t_norm = normalize_datatype(target_dtype, column_name)
+
+    if s_norm == t_norm:
+        return True
+
+    return type_family(s_norm) == type_family(t_norm)
+
+
 DATA_TYPE_EQUIVALENCE = {}

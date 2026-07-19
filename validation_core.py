@@ -26,11 +26,13 @@ from .query_builder import (
 )
 try:
     from .datatype_utils import (
+        datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
         canonicalize_compatible_type,
     )
 except ImportError:
     from datatype_utils import (
+        datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
         canonicalize_compatible_type,
     )
@@ -341,9 +343,7 @@ def validate_schema(engine: str, source_conn, target_conn, src: dict, tgt: dict,
         else:
             names_match = str(row["column_name_src"]).lower() == str(row["column_name_tgt"]).lower()
         col_name = row.get("column_name_src") or row.get("join_col")
-        src_norm = normalize_datatype(row["source_type"], col_name)
-        tgt_norm = normalize_datatype(row["target_type"], col_name)
-        type_match = src_norm == tgt_norm
+        type_match = datatypes_compatible(row["source_type"], row["target_type"], col_name)
         return names_match and type_match
 
     cmp["match"] = cmp.apply(check_match, axis=1)

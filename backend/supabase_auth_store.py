@@ -58,7 +58,13 @@ def ensure_credentials_table(conn=None) -> None:
     pass
 
 
-def upsert_user(conn, username: str, password_hash: str) -> None:
+def upsert_user(
+    conn,
+    username: str,
+    password_hash: str,
+    email: str | None = None,
+    smtp_password: str | None = None,
+) -> None:
     if not is_enabled():
         raise RuntimeError("Supabase not configured")
 
@@ -73,6 +79,8 @@ def upsert_user(conn, username: str, password_hash: str) -> None:
     payload = {
         "username": username,
         "password_hash": password_hash,
+        "email": email,
+        "smtp_password": smtp_password,
     }
 
     try:
@@ -107,21 +115,46 @@ def get_password_hash(conn, username: str) -> str | None:
         return None
 
 
-def list_usernames(conn) -> list[str]:
+def get_user(conn, username: str) -> dict[str, Any] | None:
+    if not is_enabled():
+        return None
+
+    query = urlencode({
+        "select": "username,email,password_hash,smtp_password",
+        "username": f"eq.{username}",
+        "limit": "1",
+    })
+
+    try:
+        data = _request("GET", f"{_auth_endpoint()}?{query}", headers=_headers()) or []
+        return data[0] if data else None
+    except Exception as e:
+        logger.error("Supabase get_user failed: %s", e)
+        return None
+
+
+def list_users(conn) -> list[dict[str, Any]]:
     if not is_enabled():
         return []
 
     query = urlencode({
-        "select": "username",
+        "select": "username,email",
         "order": "username.asc",
     })
 
     try:
         data = _request("GET", f"{_auth_endpoint()}?{query}", headers=_headers()) or []
-        return [str(row.get("username")) for row in data if row and row.get("username")]
+        return [row for row in data if row and row.get("username")]
     except Exception as e:
-        logger.error("Supabase list_usernames failed: %s", e)
+        logger.error("Supabase list_users failed: %s", e)
         return []
+
+
+def list_usernames(conn) -> list[str]:
+    if not is_enabled():
+        return []
+
+    return [str(row.get("username")) for row in list_users(conn)]
 
 
 def delete_user(conn, username: str) -> bool:

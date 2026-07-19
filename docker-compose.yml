@@ -21,6 +21,10 @@ services:
       - SUPABASE_RESULTS_TABLE=${SUPABASE_RESULTS_TABLE:-validation_results}
       - SUPABASE_JOBS_TABLE=${SUPABASE_JOBS_TABLE:-validation_jobs}
       - SUPABASE_AUTH_TABLE=${SUPABASE_AUTH_TABLE:-auth_credentials}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - ADMIN_SMTP_PASSWORD=${ADMIN_SMTP_PASSWORD:-}
     ports:
       - "8000:8000"
     depends_on:

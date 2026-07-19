@@ -15,9 +15,15 @@ from validation_tool.query_builder import (
     get_numeric_columns,
 )
 try:
-    from validation_tool.datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from validation_tool.datatype_utils import (
+        datatypes_compatible,
+        normalize_datatype as canonical_normalize_datatype,
+    )
 except ImportError:
-    from datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from datatype_utils import (
+        datatypes_compatible,
+        normalize_datatype as canonical_normalize_datatype,
+    )
 
 
 # Keep schema/type normalization consistent with the core validation logic.
@@ -190,7 +196,7 @@ def validate_schema(source_engine: str, source_conn, target_conn, src, tgt, case
             if not col:
                 continue
             key = col if case_sensitive else str(col).lower()
-            m[key] = normalize_datatype(dtype, str(col))
+            m[key] = {"name": str(col), "type": dtype}
         return m
 
     s = index_schema(src_schema)
@@ -200,7 +206,7 @@ def validate_schema(source_engine: str, source_conn, target_conn, src, tgt, case
         return False
 
     for k in s.keys():
-        if s.get(k) != t.get(k):
+        if not datatypes_compatible(s.get(k, {}).get("type"), t.get(k, {}).get("type"), s.get(k, {}).get("name")):
             return False
 
     return True

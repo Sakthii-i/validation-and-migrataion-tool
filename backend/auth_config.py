@@ -4,6 +4,7 @@ from __future__ import annotations
 # as requested. Change these before deploying.
 
 ADMIN_USERNAME = "admin"
+ADMIN_EMAIL = "sakthid282004@gmail.com"
 
 # Default admin password is: admin123
 # Generated with PBKDF2-SHA256 (200k iterations).

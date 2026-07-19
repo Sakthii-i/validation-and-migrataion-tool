@@ -34,10 +34,11 @@ from validation_tool.query_builder import (
     build_row_hash_mismatch_rows_query_v2,
 )
 from validation_tool.backend import supabase_store
+from validation_tool.backend.email_service import send_validation_failure_email
 from validation_tool.backend.session_store import update_query_stats
 from validation_tool.migration.sql_processor import SQLPreprocessor
 from validation_tool.validation_engine import ValidationGuardError, _normalize_hash_scalar, _row_hash_from_values
-from validation_tool.datatype_utils import canonicalize_compatible_type
+from validation_tool.datatype_utils import canonicalize_compatible_type, datatypes_compatible
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -132,6 +133,8 @@ class LoginRequest(BaseModel):
 class GrantRequest(BaseModel):
     username: str
     password: str
+    email: Optional[str] = None
+    smtp_password: Optional[str] = None
 
 class RevokeRequest(BaseModel):
     username: str
@@ -161,9 +164,9 @@ def auth_login(req: LoginRequest):
 
 @router.get("/auth/users")
 def auth_list_users():
-    from validation_tool.backend.supabase_auth_store import list_usernames
+    from validation_tool.backend.auth_service import list_authorized_user_details
     try:
-        return {"users": list_usernames(None)}
+        return {"users": list_authorized_user_details()}
     except Exception:
         return {"users": []}
 
@@ -171,7 +174,12 @@ def auth_list_users():
 def auth_grant(req: GrantRequest):
     from validation_tool.backend.auth_service import grant_user_access
     try:
-        grant_user_access(req.username, req.password)
+        grant_user_access(
+            req.username,
+            req.password,
+            email=req.email,
+            smtp_password=req.smtp_password,
+        )
         return {"status": "ok", "message": f"Access granted to {req.username}"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -854,9 +862,8 @@ def run_validation(req: RunValidationRequest):
                         else:
                             names_match = str(row["column_name_src"]).lower() == str(row["column_name_tgt"]).lower()
                         col_name = row.get("column_name_src") or row.get("join_col")
-                        src_normalized = normalize_datatype(row["source_type"], col_name)
-                        tgt_normalized = normalize_datatype(row["target_type"], col_name)
-                        return "MATCH" if names_match and src_normalized == tgt_normalized else "NOT MATCH"
+                        type_match = datatypes_compatible(row["source_type"], row["target_type"], col_name)
+                        return "MATCH" if names_match and type_match else "NOT MATCH"
 
                     cmp["status"] = cmp.apply(check_match, axis=1)
                     schema_rows = []
@@ -1278,6 +1285,8 @@ def run_validation(req: RunValidationRequest):
 
     if results_list:
         supabase_store.upsert_results(results_list)
+        for result in results_list:
+            result["email_notification"] = send_validation_failure_email(result)
 
     return {"results": results_list}
 
@@ -1330,6 +1339,7 @@ def run_query_validation(req: QueryValidationRequest):
 async def run_csv_validation(
     session_id: str = Form(""),
     settings: str = Form("{}"),
+    run_by: str = Form(""),
     file: UploadFile = File(...),
 ):
     sess = _get_session(session_id)
@@ -1450,6 +1460,7 @@ async def run_csv_validation(
                 "target_where": target_where,
             }],
             settings=table_settings,
+            run_by=(run_by or "").strip() or None,
         )
 
         response = run_validation(run_req)

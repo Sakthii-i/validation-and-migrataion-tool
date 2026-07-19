@@ -24,9 +24,15 @@ from validation_tool.query_builder import (
     get_numeric_columns,
 )
 try:
-    from validation_tool.datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from validation_tool.datatype_utils import (
+        datatypes_compatible,
+        normalize_datatype as canonical_normalize_datatype,
+    )
 except ImportError:
-    from datatype_utils import normalize_datatype as canonical_normalize_datatype
+    from datatype_utils import (
+        datatypes_compatible,
+        normalize_datatype as canonical_normalize_datatype,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +100,24 @@ def normalize_hash_value(value):
     return str(value).strip().lower()
 
 
+def _normalize_numeric_str(value) -> str:
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(value).strip()
+    text = format(dec, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _normalize_hash_scalar(value):
     if value is None:
         return "<NULL>"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float, Decimal)):
-        return str(value).strip()
+        return _normalize_numeric_str(value)
     if isinstance(value, (list, tuple, set)):
         items = sorted((_normalize_hash_scalar(item) for item in value), key=lambda item: item.lower())
         return f"[{','.join(items)}]"
@@ -327,9 +344,7 @@ def run_schema_validation(
         else:
             names_match = str(row["column_name_src"]).lower() == str(row["column_name_tgt"]).lower()
         col_name = row.get("column_name_src") or row.get("join_col")
-        src_normalized = normalize_datatype(row["source_type"], col_name)
-        tgt_normalized = normalize_datatype(row["target_type"], col_name)
-        type_match = src_normalized == tgt_normalized
+        type_match = datatypes_compatible(row["source_type"], row["target_type"], col_name)
         return "MATCH" if names_match and type_match else "NOT MATCH"
 
     cmp["status"] = cmp.apply(check_match, axis=1)
