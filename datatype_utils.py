@@ -6,9 +6,13 @@ def _base_type(dtype: str) -> str:
 
 
 def _decimal_signature(base: str, dtype: str) -> str:
+    """Return INT when scale is 0 (integer-like), else DECIMAL (no precision/scale)."""
     match = re.search(r"\((\d+)\s*,\s*(\d+)\)", dtype)
     if match:
-        return f"DECIMAL({match.group(1)},{match.group(2)})"
+        scale = int(match.group(2))
+        if scale == 0:
+            return "INT"
+        return "DECIMAL"
     return "DECIMAL"
 
 
@@ -31,16 +35,9 @@ def normalize_datatype(dtype, column_name=None):
     if base in {"number", "decimal", "dec", "numeric", "bignumeric"}:
         return _decimal_signature(base, t)
 
-    if base in {"int64"}:
-        return "BIGINT"
-    if base in {"int", "integer"}:
+    # Collapse all integer sub-types into a single INT canonical type
+    if base in {"int64", "int", "integer", "bigint", "long", "smallint", "tinyint", "byteint"}:
         return "INT"
-    if base in {"bigint", "long"}:
-        return "BIGINT"
-    if base == "smallint":
-        return "SMALLINT"
-    if base in {"tinyint", "byteint"}:
-        return "TINYINT"
 
     if base in {"float", "float4"}:
         return "DOUBLE"
@@ -65,8 +62,9 @@ def normalize_datatype(dtype, column_name=None):
     if base == "time":
         return "STRING"
 
+    # VARIANT (Snowflake) has no Databricks equivalent; treat as STRING
     if base == "variant":
-        return "VARIANT"
+        return "STRING"
     if base == "object":
         return "STRUCT"
     if base == "array":

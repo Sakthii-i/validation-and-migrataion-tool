@@ -1488,6 +1488,7 @@ function ManualTab({ settings, setSettings }) {
 // ═══════════════════════════════════════
 function CSVTab({ settings, setSettings }) {
   const { isConnected, sessionId, sourceEngine } = useConnection();
+  const { user } = useAuth();
   const [file, setFile] = useState(null);
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRows, setCsvRows] = useState([]);

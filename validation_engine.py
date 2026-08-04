@@ -100,6 +100,23 @@ def normalize_hash_value(value):
     return str(value).strip().lower()
 
 
+_DATE_YMD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_DMY_RE = re.compile(r"^(\d{2})-(\d{2})-(\d{4})$")
+
+
+def _normalize_date_str(text: str):
+    if _DATE_YMD_RE.match(text):
+        return text
+    match = _DATE_DMY_RE.match(text)
+    if match:
+        day, month, year = match.groups()
+        try:
+            return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    return None
+
+
 def _normalize_numeric_str(value) -> str:
     try:
         dec = Decimal(str(value))
@@ -132,6 +149,10 @@ def _normalize_hash_scalar(value):
     text = str(value).strip()
     if not text:
         return ""
+
+    date_normalized = _normalize_date_str(text)
+    if date_normalized is not None:
+        return date_normalized
 
     try:
         parsed = json.loads(text)
