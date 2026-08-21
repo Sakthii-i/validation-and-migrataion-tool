@@ -16,9 +16,11 @@ from ..validation_core import (
     bool_to_status,
     create_bigquery_connection,
     create_snowflake_connection,
+    create_trino_connection,
     create_databricks_connection,
 )
 from ..query_builder import build_shallow_query
+from ..backend.email_service import send_validation_failure_email
 
 # Use your existing auth function (same directory)
 from .auth import require_api_key
@@ -42,8 +44,11 @@ def _row_count_for_table(engine: str, conn, src: dict) -> int:
     res = normalize_result(rows[0])
     return int(res.get("row_count") or 0)
 
-    def _table_fqn(src: dict) -> str:
-        return ".".join([str(src.get("catalog", "")).strip(), str(src.get("schema", "")).strip(), str(src.get("table", "")).strip()]).strip(".")
+
+def _table_fqn(src: dict) -> str:
+    return ".".join([str(src.get("catalog", "")).strip(), str(src.get("schema", "")).strip(), str(src.get("table", "")).strip()]).strip(".")
+
+
 @router.get("/results/{validation_id}")
 async def get_validation_result(validation_id: str, _ = Depends(require_api_key)):
     from validation_tool.backend import supabase_store
@@ -61,6 +66,7 @@ async def get_validation_result(validation_id: str, _ = Depends(require_api_key)
 async def validate(
     credentials: str = Form(...),
     file: UploadFile = File(...),
+    run_by: str | None = Form(None),
     _ = Depends(require_api_key)  # authentication only
 ):
     """
@@ -87,6 +93,8 @@ async def validate(
             if not required.issubset(source_config):
                 raise ValueError(f"Missing Snowflake fields: {required - set(source_config)}")
             source_conn = create_snowflake_connection(**source_config)
+        elif source_engine == "trino":
+            source_conn = create_trino_connection(**source_config)
         else:
             raise ValueError(f"Unsupported source engine: {source_engine}")
 
@@ -112,6 +120,7 @@ async def validate(
         raise HTTPException(status_code=400, detail=f"Missing columns: {missing}")
 
     validation_ids = []
+    email_notifications = []
     errors = []
 
     # 5. Process each row
@@ -173,9 +182,18 @@ async def validate(
                 bool_to_status(results.get("schema")),
                 bool_to_status(results.get("numeric")),
                 bool_to_status(results.get("hash")),
+                run_by,
             )
             vid = insert_validation_result(record)
             validation_ids.append(vid)
+            record["source_engine"] = source_engine
+            record["source_table_name"] = record.get("src_table_name")
+            record["target_table_name"] = record.get("tgt_table_name")
+            record["email_notification"] = send_validation_failure_email(record)
+            email_notifications.append({
+                "validation_id": vid,
+                **record["email_notification"],
+            })
 
         except Exception as e:
             logger.error(f"Row {idx} failed: {e}")
@@ -188,4 +206,4 @@ async def validate(
     except:
         pass
 
-    return {"validation_ids": validation_ids, "errors": errors}
+    return {"validation_ids": validation_ids, "email_notifications": email_notifications, "errors": errors}

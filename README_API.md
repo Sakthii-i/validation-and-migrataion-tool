@@ -59,6 +59,8 @@ From repo root:
 UI: http://localhost:3000
 API: http://localhost:8000
 
+On Windows, you can also run `validation_tool/start_tool.ps1`. It starts the Docker stack in the background and prints the UI/API links after the services are ready, so the localhost links remain visible at the end.
+
 Postgres (local): `localhost:5433` (container runs on 5432; db/user/password all `validation`)
 
 Note: `0.0.0.0` is a bind address used by servers. In a browser, use `http://localhost:8000` (or the machine's IP) rather than `http://0.0.0.0:8000`.

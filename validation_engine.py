@@ -9,6 +9,7 @@ import json
 import re
 import uuid
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -49,7 +50,7 @@ def execute_query(engine, conn, query):
     if engine == "bigquery":
         job = conn.query(query)
         return [dict(row) for row in job.result()]
-    elif engine in ["databricks", "snowflake"]:
+    elif engine in ["databricks", "snowflake", "trino"]:
         cur = conn.cursor()
         cur.execute(query)
         cols = [c[0] for c in cur.description]
@@ -394,7 +395,7 @@ def run_numeric_validation(
 
     if not common:
         logger.info("No common numeric columns found")
-        return True
+        return None
 
     all_pass = True
     for col_key in common:
@@ -518,15 +519,15 @@ def run_row_hash_validation(
 
     value_columns = [f"col_{i + 1}" for i in range(len(src_columns))]
 
-    src_hashes = {_row_hash_from_values(r, value_columns) for r in src_rows}
-    tgt_hashes = {_row_hash_from_values(r, value_columns) for r in tgt_rows}
+    src_hashes = Counter(_row_hash_from_values(r, value_columns) for r in src_rows)
+    tgt_hashes = Counter(_row_hash_from_values(r, value_columns) for r in tgt_rows)
 
-    if src_hashes == tgt_hashes:
+    if src_hashes and tgt_hashes and src_hashes == tgt_hashes:
         return True
     elif threshold is not None and threshold > 0:
-        total_unique = len(src_hashes | tgt_hashes)
-        matching = len(src_hashes & tgt_hashes)
-        match_ratio = matching / total_unique if total_unique > 0 else 1.0
+        total_rows = sum((src_hashes | tgt_hashes).values())
+        matching = sum((src_hashes & tgt_hashes).values())
+        match_ratio = matching / total_rows if total_rows > 0 else 0.0
         return match_ratio >= threshold
     return False
 

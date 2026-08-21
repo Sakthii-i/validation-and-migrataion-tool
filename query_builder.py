@@ -4,7 +4,7 @@ def qualify_table(engine, catalog, schema, table):
     if engine == "bigquery":
         return f"`{catalog}.{schema}.{table}`"
 
-    if engine in ["databricks", "snowflake"]:
+    if engine in ["databricks", "snowflake", "trino"]:
         return f"{catalog}.{schema}.{table}"
 
     raise ValueError(f"Unsupported engine: {engine}")
@@ -74,6 +74,18 @@ def build_schema_query(engine, catalog, schema, table):
                     THEN data_type || '(' || numeric_precision || ',' || numeric_scale || ')'
                 ELSE data_type
             END AS data_type,
+            is_nullable
+        FROM {catalog}.information_schema.columns
+                WHERE lower(table_schema) = lower('{schema}')
+                    AND lower(table_name) = lower('{table}')
+        ORDER BY ordinal_position
+        """
+
+    if engine == "trino":
+        return f"""
+        SELECT
+            column_name,
+            data_type,
             is_nullable
         FROM {catalog}.information_schema.columns
                 WHERE lower(table_schema) = lower('{schema}')
@@ -155,6 +167,8 @@ def _quote_col(engine: str, col_name: str) -> str:
     engine = engine.lower()
     if engine in ["bigquery", "databricks"]:
         return f"`{col_name}`"
+    if engine == "trino":
+        return f'"{str(col_name).replace(chr(34), chr(34) + chr(34))}"'
     # Snowflake identifiers are case-sensitive when quoted.
     # We preserve source case from INFORMATION_SCHEMA, so unquoted refs
     # keep compatibility with standard uppercase object names.
@@ -200,6 +214,16 @@ def _normalize_numeric_expr(engine: str, expr: str) -> str:
             ")"
         )
         return f"REGEXP_REPLACE({stripped}, '^-0(\\\\.0+)?$', '0')"
+
+    if engine == "trino":
+        stripped = (
+            "regexp_replace("
+            "regexp_replace("
+            f"{expr}, '(\\\\.[0-9]*?)0+$', '$1'),"
+            "'\\\\.$', ''"
+            ")"
+        )
+        return f"regexp_replace({stripped}, '^-0(\\\\.0+)?$', '0')"
 
     return expr
 
@@ -250,6 +274,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
             return f"COALESCE(TRIM(upper(hex({col_ref}))), {null_token})"
         if engine == "snowflake":
             return f"COALESCE(TRIM(upper(TO_VARCHAR({col_ref}, 'HEX'))), {null_token})"
+        if engine == "trino":
+            return f"COALESCE(TRIM(upper(to_hex({col_ref}))), {null_token})"
 
     # Booleans
     if col_type == "BOOLEAN":
@@ -267,6 +293,11 @@ def _value_expr(engine: str, col: dict | str) -> str:
             return (
                 f"TRIM((IFF({col_ref} IS NULL, {null_token}, IFF({col_ref}, 'true', 'false'))))"
             )
+        if engine == "trino":
+            return (
+                f"TRIM((CASE WHEN {col_ref} IS NULL THEN {null_token} "
+                f"WHEN {col_ref} THEN 'true' ELSE 'false' END))"
+            )
 
     # Dates
     if col_type == "DATE":
@@ -276,6 +307,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
             return f"COALESCE(TRIM(date_format({col_ref}, 'yyyy-MM-dd')), {null_token})"
         if engine == "snowflake":
             return f"COALESCE(TRIM(TO_VARCHAR({col_ref}, 'YYYY-MM-DD')), {null_token})"
+        if engine == "trino":
+            return f"COALESCE(TRIM(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d')), {null_token})"
 
     # Timestamps
     if col_type == "TIMESTAMP":
@@ -329,6 +362,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
                 f"TRIM(TO_VARCHAR(CONVERT_TIMEZONE('UTC', {col_ref}::TIMESTAMP_TZ), 'YYYY-MM-DD HH24:MI:SS.FF3'))," 
                 f"{null_token})"
             )
+        if engine == "trino":
+            return f"COALESCE(TRIM(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d %H:%i:%s.%f')), {null_token})"
 
     # Numeric types
     if _is_numeric_type(col_type):
@@ -339,11 +374,13 @@ def _value_expr(engine: str, col: dict | str) -> str:
                 numeric_str = f"CAST({col_ref} AS STRING)"
         elif engine == "databricks":
             numeric_str = f"format_string('%.15f', CAST({col_ref} AS DOUBLE))"
-        else:  # snowflake
+        elif engine == "snowflake":
             if _is_float_type(col_type):
                 numeric_str = f"TO_VARCHAR(TO_DECIMAL({col_ref}, 38, 15))"
             else:
                 numeric_str = f"TO_VARCHAR({col_ref})"
+        else:
+            numeric_str = f"CAST({col_ref} AS VARCHAR)"
 
         return f"COALESCE(TRIM({_normalize_numeric_expr(engine, numeric_str)}), {null_token})"
 
@@ -358,6 +395,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
             return f"COALESCE(TRIM(to_json({col_ref})), {null_token})"
         if engine == "snowflake":
             return f"COALESCE(TRIM(TO_JSON({col_ref})), {null_token})"
+        if engine == "trino":
+            return f"COALESCE(TRIM(json_format(CAST({col_ref} AS JSON))), {null_token})"
 
     # Default: string cast
     if engine == "bigquery":
@@ -366,6 +405,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
         return f"COALESCE(TRIM(CAST({col_ref} AS STRING)), {null_token})"
     if engine == "snowflake":
         return f"COALESCE(TRIM(TO_VARCHAR({col_ref})), {null_token})"
+    if engine == "trino":
+        return f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)), {null_token})"
 
     return f"COALESCE(TRIM(CAST({col_ref} AS STRING)), {null_token})"
 
@@ -395,6 +436,8 @@ def _row_signature_expr(engine: str, columns) -> str:
         for p in parts[1:]:
             expr = f"({expr} || '|' || {p})"
         return expr
+    if engine == "trino":
+        return concat_with_delim("CONCAT")
 
     return "CONCAT(" + ", '||', ".join(parts) + ")"
 
@@ -440,6 +483,8 @@ def _quote_col_v2(engine: str, col_name: str) -> str:
     engine = engine.lower()
     if engine in {"bigquery", "databricks"}:
         return f"`{col_name}`"
+    if engine == "trino":
+        return f'"{str(col_name).replace(chr(34), chr(34) + chr(34))}"'
     # follow user-requested approach: Snowflake uses uppercased, unquoted identifiers
     return str(col_name).upper()
 
@@ -456,6 +501,21 @@ def _numeric_expr_v2(engine: str, col_ref: str) -> str:
             "RTRIM(RTRIM(TRIM(" + col_ref + "::STRING), '0'), '.'),"
             "TRIM(" + col_ref + "::STRING)"
             "),"
+            "''"
+            ")"
+        )
+    if engine == "trino":
+        return (
+            "COALESCE("
+            "CASE WHEN strpos(TRIM(CAST(" + col_ref + " AS VARCHAR)), '.') > 0 THEN "
+            "regexp_replace("
+            "regexp_replace("
+            "TRIM(CAST(" + col_ref + " AS VARCHAR)),"
+            "'(\\\\.\\\\d*?)0+$', '$1'"
+            "),"
+            "'\\\\.$', ''"
+            ") "
+            "ELSE TRIM(CAST(" + col_ref + " AS VARCHAR)) END,"
             "''"
             ")"
         )
@@ -508,6 +568,9 @@ def _canonical_complex_expr_v2(engine: str, col_ref: str, dtype_upper: str) -> s
     if engine == "bigquery":
         return f"COALESCE(TO_JSON_STRING({col_ref}), '')"
 
+    if engine == "trino":
+        return f"COALESCE(json_format(CAST({col_ref} AS JSON)), '')"
+
     if "MAP" in dtype_upper:
         return f"COALESCE(to_json(map_from_entries(sort_array(map_entries({col_ref})))), '')"
 
@@ -521,6 +584,15 @@ def _maybe_canonical_json_string_expr_v2(engine: str, col_ref: str) -> str:
 
     if engine == "bigquery":
         return f"COALESCE(TO_JSON_STRING(SAFE.PARSE_JSON(CAST({col_ref} AS STRING))), TRIM(CAST({col_ref} AS STRING)), '')"
+
+    if engine == "trino":
+        return (
+            "COALESCE("
+            f"json_format(TRY_CAST({col_ref} AS JSON)),"
+            f"TRIM(CAST({col_ref} AS VARCHAR)),"
+            "''"
+            ")"
+        )
 
     return (
         "COALESCE("
@@ -551,6 +623,14 @@ def _string_date_expr(engine: str, col_ref: str) -> str:
             "''"
             ")"
         )
+    if engine == "trino":
+        return (
+            "COALESCE("
+            "date_format(coalesce(try_cast(" + col_ref + " AS date), try(date_parse(" + col_ref + ", '%d-%m-%Y'))), '%Y-%m-%d'),"
+            "TRIM(CAST(" + col_ref + " AS VARCHAR)),"
+            "''"
+            ")"
+        )
     # databricks
     return (
         "COALESCE("
@@ -568,6 +648,10 @@ def _timestamp_expr_v2(engine: str, col_ref: str, dtype_upper: str, timestamp_mo
     if engine == "snowflake":
         fmt = "YYYY-MM-DD" if use_date_only else "YYYY-MM-DD HH24:MI:SS.FF3"
         return f"COALESCE(TO_CHAR({col_ref}, '{fmt}'),'')"
+
+    if engine == "trino":
+        fmt = "%Y-%m-%d" if use_date_only else "%Y-%m-%d %H:%i:%s.%f"
+        return f"COALESCE(date_format(CAST({col_ref} AS timestamp), '{fmt}'),'')"
 
     if engine == "bigquery":
         if "DATETIME" in dtype_upper:
@@ -613,6 +697,8 @@ def build_row_hash_query_v2(
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
             elif engine == "databricks":
                 expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(UPPER(to_hex({col_ref})), '')"
             else:  # bigquery
                 expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
 
@@ -632,6 +718,8 @@ def build_row_hash_query_v2(
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'DD-MM-YYYY'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%d-%m-%Y'), '')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_DATE('%d-%m-%Y', CAST({col_ref} AS DATE)), '')"
             else:
@@ -641,6 +729,8 @@ def build_row_hash_query_v2(
         elif "TIME" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
             else:
@@ -650,6 +740,8 @@ def build_row_hash_query_v2(
         elif "BOOLEAN" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
             else:
@@ -667,6 +759,8 @@ def build_row_hash_query_v2(
                 expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
 
@@ -700,6 +794,19 @@ def build_row_hash_query_v2(
                     {concat_expr}
                 )
             )) AS hash_value
+        FROM {table_fqn}
+        WHERE {where_sql}
+        ORDER BY hash_value
+        """.strip()
+
+    if engine == "trino":
+        return f"""
+        SELECT
+            UPPER(to_hex(md5(to_utf8(
+                concat_ws('|',
+                    {concat_expr}
+                )
+            )))) AS hash_value
         FROM {table_fqn}
         WHERE {where_sql}
         ORDER BY hash_value
@@ -805,6 +912,8 @@ def build_categorical_hash_query(
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
             elif engine == "databricks":
                 expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(UPPER(to_hex({col_ref})), '')"
             else:  # bigquery
                 expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
             concat_parts.append(str(expr).strip())
@@ -819,6 +928,8 @@ def build_categorical_hash_query(
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'), '')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
             else:
@@ -826,6 +937,8 @@ def build_categorical_hash_query(
         elif "TIME" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
             else:
@@ -833,6 +946,8 @@ def build_categorical_hash_query(
         elif "BOOLEAN" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
             else:
@@ -846,6 +961,8 @@ def build_categorical_hash_query(
                 expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
         
@@ -865,6 +982,8 @@ def build_categorical_hash_query(
                 return f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '<NULL>')"
             if engine_name == "databricks":
                 return f"COALESCE(UPPER(HEX({col_ref})), '<NULL>')"
+            if engine_name == "trino":
+                return f"COALESCE(UPPER(to_hex({col_ref})), '<NULL>')"
             return f"COALESCE(UPPER(TO_HEX({col_ref})), '<NULL>')"
 
         if _is_complex_type_v2(dtype_upper):
@@ -876,6 +995,8 @@ def build_categorical_hash_query(
         if "DATE" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'),'')")
             if engine_name == "bigquery":
                 return _null_to_token(f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')")
             return _null_to_token(f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')")
@@ -883,6 +1004,8 @@ def build_categorical_hash_query(
         if "TIME" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')")
             if engine_name == "bigquery":
                 return _null_to_token(f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')")
             return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')")
@@ -890,6 +1013,8 @@ def build_categorical_hash_query(
         if "BOOLEAN" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(LOWER({col_ref}::STRING),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)), '')")
             return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')")
 
         if any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
@@ -903,6 +1028,9 @@ def build_categorical_hash_query(
 
         if engine_name == "snowflake":
             return _null_to_token(f"COALESCE(TRIM({col_ref}::STRING),'')")
+
+        if engine_name == "trino":
+            return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')")
 
         return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')")
 
@@ -946,6 +1074,12 @@ def build_categorical_hash_query(
         row_hash_expr = f"UPPER(TO_HEX(MD5({signature_expr})))"
         row_hash_count_expr = "CONCAT(row_hash, ':', CAST(row_hash_count AS STRING))"
         group_hash_expr = f"UPPER(TO_HEX(MD5(STRING_AGG({row_hash_count_expr}, '|' ORDER BY row_hash))))"
+    elif engine == "trino":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
+        row_hash_expr = f"UPPER(to_hex(md5(to_utf8({signature_expr}))))"
+        row_hash_count_expr = "concat(row_hash, ':', CAST(row_hash_count AS VARCHAR))"
+        group_hash_expr = f"UPPER(to_hex(md5(to_utf8(array_join(array_sort(array_agg({row_hash_count_expr})), '|')))))"
     else:
         raise ValueError(f"Categorical hash not supported for engine: {engine}")
 
@@ -1009,6 +1143,8 @@ def build_categorical_hash_samples_query(
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
             elif engine == "databricks":
                 expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(UPPER(to_hex({col_ref})), '')"
             else:  # bigquery
                 expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
             concat_parts.append(str(expr).strip())
@@ -1023,6 +1159,8 @@ def build_categorical_hash_samples_query(
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'), '')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
             else:
@@ -1030,6 +1168,8 @@ def build_categorical_hash_samples_query(
         elif "TIME" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
             else:
@@ -1037,6 +1177,8 @@ def build_categorical_hash_samples_query(
         elif "BOOLEAN" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')"
             else:
@@ -1050,6 +1192,8 @@ def build_categorical_hash_samples_query(
                 expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
 
@@ -1069,6 +1213,8 @@ def build_categorical_hash_samples_query(
                 return f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '<NULL>')"
             if engine_name == "databricks":
                 return f"COALESCE(UPPER(HEX({col_ref})), '<NULL>')"
+            if engine_name == "trino":
+                return f"COALESCE(UPPER(to_hex({col_ref})), '<NULL>')"
             return f"COALESCE(UPPER(TO_HEX({col_ref})), '<NULL>')"
 
         if ("TIMESTAMP" in dtype_upper) or ("DATETIME" in dtype_upper):
@@ -1077,6 +1223,8 @@ def build_categorical_hash_samples_query(
         if "DATE" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'),'')")
             if engine_name == "bigquery":
                 return _null_to_token(f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')")
             return _null_to_token(f"COALESCE(date_format({col_ref}, 'yyyy-MM-dd'),'')")
@@ -1084,6 +1232,8 @@ def build_categorical_hash_samples_query(
         if "TIME" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')")
             if engine_name == "bigquery":
                 return _null_to_token(f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')")
             return _null_to_token(f"COALESCE(substr(CAST({col_ref} AS STRING),1,8),'')")
@@ -1091,6 +1241,8 @@ def build_categorical_hash_samples_query(
         if "BOOLEAN" in dtype_upper:
             if engine_name == "snowflake":
                 return _null_to_token(f"COALESCE(LOWER({col_ref}::STRING),'')")
+            if engine_name == "trino":
+                return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)), '')")
             return _null_to_token(f"COALESCE(LOWER(CAST({col_ref} AS STRING)), '')")
 
         if any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
@@ -1101,6 +1253,9 @@ def build_categorical_hash_samples_query(
 
         if engine_name == "snowflake":
             return _null_to_token(f"COALESCE(TRIM({col_ref}::STRING),'')")
+
+        if engine_name == "trino":
+            return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')")
 
         return _null_to_token(f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')")
 
@@ -1131,6 +1286,10 @@ def build_categorical_hash_samples_query(
         else:
             signature_expr = "CONCAT(" + ", '|' , ".join(concat_parts) + ")"
         row_hash_expr = f"UPPER(TO_HEX(MD5({signature_expr})))"
+    elif engine == "trino":
+        concat_expr = ",\n                        ".join(concat_parts)
+        signature_expr = f"concat_ws('|',\n                        {concat_expr}\n                    )"
+        row_hash_expr = f"UPPER(to_hex(md5(to_utf8({signature_expr}))))"
     else:
         raise ValueError(f"Categorical hash not supported for engine: {engine}")
 
@@ -1199,6 +1358,8 @@ def build_row_hash_mismatch_rows_query_v2(
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
             elif engine == "databricks":
                 expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(UPPER(to_hex({col_ref})), '')"
             else:  # bigquery
                 expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
 
@@ -1214,6 +1375,8 @@ def build_row_hash_mismatch_rows_query_v2(
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'), '')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
             else:
@@ -1221,6 +1384,8 @@ def build_row_hash_mismatch_rows_query_v2(
         elif "TIME" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
             else:
@@ -1228,6 +1393,8 @@ def build_row_hash_mismatch_rows_query_v2(
         elif "BOOLEAN" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
         elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
@@ -1239,6 +1406,8 @@ def build_row_hash_mismatch_rows_query_v2(
                 expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
 
@@ -1250,6 +1419,9 @@ def build_row_hash_mismatch_rows_query_v2(
     if engine == "bigquery":
         signature_expr = parts[0] if len(parts) == 1 else "CONCAT(" + ", '|' , ".join(parts) + ")"
         hash_expr = "UPPER(TO_HEX(MD5(row_signature)))"
+    elif engine == "trino":
+        signature_expr = "concat_ws('|',\n                    " + ",\n                    ".join(parts) + "\n                )"
+        hash_expr = "UPPER(to_hex(md5(to_utf8(row_signature))))"
     else:
         signature_expr = "CONCAT_WS('|',\n                    " + ",\n                    ".join(parts) + "\n                )"
         hash_expr = "UPPER(MD5_HEX(row_signature))" if engine == "snowflake" else "UPPER(md5(row_signature))"
@@ -1299,6 +1471,8 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
                 expr = f"COALESCE(UPPER(TO_VARCHAR({col_ref}, 'HEX')), '')"
             elif engine == "databricks":
                 expr = f"COALESCE(UPPER(HEX({col_ref})),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(UPPER(to_hex({col_ref})), '')"
             else:  # bigquery
                 expr = f"COALESCE(UPPER(TO_HEX({col_ref})), '')"
 
@@ -1312,6 +1486,8 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         elif "DATE" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'YYYY-MM-DD'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(date_format(CAST({col_ref} AS timestamp), '%Y-%m-%d'), '')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_DATE('%F', CAST({col_ref} AS DATE)), '')"
             else:
@@ -1319,6 +1495,8 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         elif "TIME" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(TO_CHAR({col_ref}, 'HH24:MI:SS'),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(substr(CAST({col_ref} AS VARCHAR),1,8),'')"
             elif engine == "bigquery":
                 expr = f"COALESCE(FORMAT_TIME('%H:%M:%S', CAST({col_ref} AS TIME)), '')"
             else:
@@ -1326,6 +1504,8 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
         elif "BOOLEAN" in dtype_upper:
             if engine == "snowflake":
                 expr = f"COALESCE(LOWER({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(LOWER(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(LOWER(CAST({col_ref} AS STRING)),'')"
         elif any(x in dtype_upper for x in ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT", "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "FLOAT", "DOUBLE", "REAL", "LONG"]):
@@ -1337,6 +1517,8 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
                 expr = _maybe_canonical_json_string_expr_v2(engine, col_ref)
             elif engine == "snowflake":
                 expr = f"COALESCE(TRIM({col_ref}::STRING),'')"
+            elif engine == "trino":
+                expr = f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)),'')"
             else:
                 expr = f"COALESCE(TRIM(CAST({col_ref} AS STRING)),'')"
 
@@ -1349,7 +1531,7 @@ def build_row_signature_sample_query(engine, catalog, schema, table, columns=Non
             signature_expr = parts[0]
         else:
             signature_expr = "CONCAT(" + ", '|' , ".join(parts) + ")"
-    elif engine in {"databricks", "snowflake"}:
+    elif engine in {"databricks", "snowflake", "trino"}:
         signature_expr = "CONCAT_WS('|',\n                    " + ",\n                    ".join(parts) + "\n                )"
     else:
         signature_expr = parts[0]
@@ -1383,7 +1565,7 @@ def build_column_diff_query(
 
     Parameters
     ----------
-    engine            : 'snowflake' | 'databricks' | 'bigquery'
+    engine            : 'snowflake' | 'databricks' | 'bigquery' | 'trino'
     catalog / schema / table : table coordinates
     key_columns       : ordered list of PK column names
     all_columns       : all column names to SELECT (including key columns)
@@ -1400,6 +1582,8 @@ def build_column_diff_query(
     def quote(col: str) -> str:
         if engine in {"bigquery", "databricks"}:
             return f"`{col}`"
+        if engine == "trino":
+            return f'"{str(col).replace(chr(34), chr(34) + chr(34))}"'
         return col  # Snowflake: unquoted (schema query lowercases names)
 
     select_cols = ", ".join(quote(c) for c in all_columns)

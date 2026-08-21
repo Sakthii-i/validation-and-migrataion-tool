@@ -4,6 +4,7 @@ import re
 import hashlib
 import json
 import pandas as pd
+from collections import Counter
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, Any, List
@@ -65,6 +66,12 @@ def create_databricks_connection(server_hostname: str, http_path: str, access_to
         http_path=http_path,
         access_token=access_token
     )
+
+def create_trino_connection(host=None, port=None, user=None, catalog=None, schema=None, http_scheme=None, password=None):
+    """Create Trino DB-API connection."""
+    from validation_tool.connections.trino import connect_trino
+
+    return connect_trino(host, port, user, catalog, schema, http_scheme, password)
 
 def get_dashboard_postgres_conn() -> PgConnection:
     """Return a psycopg2 connection to the Postgres dashboard DB."""
@@ -128,7 +135,7 @@ def bool_to_status(val: Optional[bool]) -> Optional[str]:
         return "FAIL"
     return None
 
-def generate_validation_record(validation_type, src, tgt, row_status, schema_status, numeric_status, hash_status):
+def generate_validation_record(validation_type, src, tgt, row_status, schema_status, numeric_status, hash_status, run_by=None):
     """Return a dict ready for insert."""
     return {
         "validation_id": str(uuid.uuid4()),
@@ -136,6 +143,7 @@ def generate_validation_record(validation_type, src, tgt, row_status, schema_sta
         "src_table_name": f"{src['catalog']}.{src['schema']}.{src['table']}",
         "tgt_table_name": f"{tgt['catalog']}.{tgt['schema']}.{tgt['table']}",
         "validation_type": validation_type,
+        "run_by": run_by,
         "row_count": row_status,
         "schema_check": schema_status,
         "numeric_check": numeric_status,
@@ -176,7 +184,7 @@ def execute_query(engine: str, conn, query: str) -> List[dict]:
             job = conn.query(query)
             rows = list(job.result())
             return [dict(row) for row in rows]
-        elif engine in ["databricks", "snowflake"]:
+        elif engine in ["databricks", "snowflake", "trino"]:
             cur = conn.cursor()
             cur.execute(query)
             cols = [c[0] for c in cur.description]
@@ -354,13 +362,13 @@ def approx_equal(a, b, tol=1e-6):
         return False
     return abs(a - b) <= tol
 
-def validate_numeric(engine: str, source_conn, target_conn, src: dict, tgt: dict) -> bool:
+def validate_numeric(engine: str, source_conn, target_conn, src: dict, tgt: dict) -> bool | None:
     # Fetch source schema to identify numeric columns
     src_schema = fetch_schema(engine, source_conn, src["catalog"], src["schema"], src["table"])
     numeric_cols = get_numeric_columns(src_schema)   # from query_builder
 
     if not numeric_cols:
-        return True  # nothing to validate
+        return None
 
     all_pass = True
     for col in numeric_cols:
@@ -503,10 +511,10 @@ def validate_row_hash(engine: str, source_conn, target_conn, src: dict, tgt: dic
 
     value_columns = [f"col_{i + 1}" for i in range(len(src_columns))]
 
-    src_hashes = {_row_hash_from_values(row, value_columns) for row in execute_query(engine, source_conn, src_query)}
-    tgt_hashes = {_row_hash_from_values(row, value_columns) for row in execute_query("databricks", target_conn, tgt_query)}
+    src_hashes = Counter(_row_hash_from_values(row, value_columns) for row in execute_query(engine, source_conn, src_query))
+    tgt_hashes = Counter(_row_hash_from_values(row, value_columns) for row in execute_query("databricks", target_conn, tgt_query))
 
-    return src_hashes == tgt_hashes
+    return bool(src_hashes) and bool(tgt_hashes) and src_hashes == tgt_hashes
 
 
 def _normalize_where_clause(where_value, default="1=1"):
@@ -624,6 +632,8 @@ def validate_categorical_hash(
 
     src_norm = normalize_results(src_res)
     tgt_norm = normalize_results(tgt_res)
+    if not src_norm or not tgt_norm:
+        return False
 
     match = True
     for key, src_val in src_norm.items():

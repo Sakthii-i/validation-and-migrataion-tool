@@ -21,6 +21,8 @@ SUPABASE_BQ_RESULTS_TABLE = (os.getenv("SUPABASE_BQ_RESULTS_TABLE") or "validati
 SUPABASE_QUERY_STATS_TABLE = (os.getenv("SUPABASE_QUERY_STATS_TABLE") or "query_dashboard_stats").strip()
 SUPABASE_BQ_QUERY_TABLE = (os.getenv("SUPABASE_BQ_QUERY_TABLE") or "query_history_bigquery").strip()
 SUPABASE_SNOWFLAKE_QUERY_TABLE = (os.getenv("SUPABASE_SNOWFLAKE_QUERY_TABLE") or "query_history_snowflake").strip()
+SUPABASE_TRINO_QUERY_TABLE = (os.getenv("SUPABASE_TRINO_QUERY_TABLE") or "query_history_trino").strip()
+SUPABASE_TRINO_RESULTS_TABLE = (os.getenv("SUPABASE_TRINO_RESULTS_TABLE") or "validation_results_trino").strip()
 
 
 def is_enabled() -> bool:
@@ -46,12 +48,18 @@ def _results_table_for_engine(source_engine: str | None) -> str:
     engine = (source_engine or "").strip().lower()
     if engine == "bigquery":
         return SUPABASE_BQ_RESULTS_TABLE
+    if engine == "trino":
+        return SUPABASE_TRINO_RESULTS_TABLE
     return SUPABASE_TABLE
 
 
 def _query_table_for_engine(source_engine: str | None) -> str:
     engine = (source_engine or "").strip().lower()
-    return SUPABASE_BQ_QUERY_TABLE if engine == "bigquery" else SUPABASE_SNOWFLAKE_QUERY_TABLE
+    if engine == "bigquery":
+        return SUPABASE_BQ_QUERY_TABLE
+    if engine == "trino":
+        return SUPABASE_TRINO_QUERY_TABLE
+    return SUPABASE_SNOWFLAKE_QUERY_TABLE
 
 
 def make_query_id() -> str:
@@ -237,7 +245,7 @@ def get_result_by_id(validation_id: str) -> dict[str, Any] | None:
         "limit": "1",
     })
     data = []
-    for table in (SUPABASE_BQ_RESULTS_TABLE, SUPABASE_TABLE):
+    for table in (SUPABASE_BQ_RESULTS_TABLE, SUPABASE_TRINO_RESULTS_TABLE, SUPABASE_TABLE):
         try:
             data = _request("GET", f"{_endpoint(table)}?{query}", headers=_headers()) or []
         except Exception as e:
@@ -344,15 +352,26 @@ def upsert_query_history(row: dict[str, Any]) -> None:
         "translated_sql": _json_safe(row.get("translated_sql")),
         "details": details,
     }
+    table = _query_table_for_engine(source_engine)
     try:
         _request(
             "POST",
-            _endpoint(_query_table_for_engine(source_engine)),
+            _endpoint(table),
             headers=_headers("resolution=merge-duplicates,return=minimal"),
             json=payload,
         )
     except Exception as e:
         logger.error("Supabase query history upsert failed: %s", e)
+        if table != SUPABASE_SNOWFLAKE_QUERY_TABLE:
+            try:
+                _request(
+                    "POST",
+                    _endpoint(SUPABASE_SNOWFLAKE_QUERY_TABLE),
+                    headers=_headers("resolution=merge-duplicates,return=minimal"),
+                    json=payload,
+                )
+            except Exception as fallback_e:
+                logger.error("Supabase query history fallback upsert failed: %s", fallback_e)
 
 
 def update_query_history(query_id: str, source_engine: str | None, updates: dict[str, Any]) -> None:
@@ -361,15 +380,26 @@ def update_query_history(query_id: str, source_engine: str | None, updates: dict
     payload = {k: _json_safe(v) for k, v in updates.items() if v is not None}
     if not payload:
         return
+    table = _query_table_for_engine(source_engine)
     try:
         _request(
             "PATCH",
-            f"{_endpoint(_query_table_for_engine(source_engine))}?query_id=eq.{query_id}",
+            f"{_endpoint(table)}?query_id=eq.{query_id}",
             headers=_headers("return=minimal"),
             json=payload,
         )
     except Exception as e:
         logger.error("Supabase query history update failed: %s", e)
+        if table != SUPABASE_SNOWFLAKE_QUERY_TABLE:
+            try:
+                _request(
+                    "PATCH",
+                    f"{_endpoint(SUPABASE_SNOWFLAKE_QUERY_TABLE)}?query_id=eq.{query_id}",
+                    headers=_headers("return=minimal"),
+                    json=payload,
+                )
+            except Exception as fallback_e:
+                logger.error("Supabase query history fallback update failed: %s", fallback_e)
 
 
 def list_query_history(source_engine: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
@@ -385,7 +415,15 @@ def list_query_history(source_engine: str | None = None, limit: int = 500) -> li
         return _request("GET", f"{_endpoint(table)}?{query}", headers=_headers()) or []
     except Exception as e:
         logger.error("Supabase query history list failed: %s", e)
-        return []
+        if table == SUPABASE_SNOWFLAKE_QUERY_TABLE:
+            return []
+        try:
+            rows = _request("GET", f"{_endpoint(SUPABASE_SNOWFLAKE_QUERY_TABLE)}?{query}", headers=_headers()) or []
+            wanted = (source_engine or "").strip().lower()
+            return [row for row in rows if not wanted or str(row.get("source_engine") or "").strip().lower() == wanted]
+        except Exception as fallback_e:
+            logger.error("Supabase query history fallback list failed: %s", fallback_e)
+            return []
 
 
 def dashboard_stats(

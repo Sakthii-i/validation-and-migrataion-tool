@@ -101,8 +101,9 @@ export default function Sidebar() {
         >
           <option className="text-gray-900">BigQuery</option>
           <option className="text-gray-900">Snowflake</option>
+          <option className="text-gray-900">Trino</option>
         </select>
-        {sourceEngine === 'Snowflake' ? (
+        {['Snowflake', 'Trino'].includes(sourceEngine) ? (
           <button
             type="button"
             className={`flex w-full items-center justify-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold transition ${

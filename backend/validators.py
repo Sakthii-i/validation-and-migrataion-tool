@@ -7,6 +7,7 @@ from decimal import Decimal
 from validation_tool.connections.bigquery import connect_bigquery
 from validation_tool.connections.databricks import connect_databricks
 from validation_tool.connections.snowflake import connect_snowflake
+from validation_tool.connections.trino import connect_trino
 from validation_tool.query_builder import (
     build_numeric_stats_query,
     build_row_hash_query,
@@ -212,11 +213,11 @@ def validate_schema(source_engine: str, source_conn, target_conn, src, tgt, case
     return True
 
 
-def validate_numeric(source_engine: str, source_conn, target_conn, src, tgt) -> bool:
+def validate_numeric(source_engine: str, source_conn, target_conn, src, tgt) -> bool | None:
     src_schema = fetch_schema(source_engine, source_conn, src[0], src[1], src[2])
     numeric_cols = get_numeric_columns(src_schema)
     if not numeric_cols:
-        return True
+        return None
 
     for col in numeric_cols:
         s_q = build_numeric_stats_query(source_engine, src[0], src[1], src[2], col)
@@ -303,7 +304,7 @@ def validate_hash(
 
 def run_validation_job(session_payload: dict, row: dict) -> dict:
     source_engine = str(session_payload.get("source_engine") or "").lower()
-    if source_engine not in {"bigquery", "snowflake"}:
+    if source_engine not in {"bigquery", "snowflake", "trino"}:
         raise ValueError("Unsupported source_engine in session")
 
     target = session_payload.get("target") or {}
@@ -319,13 +320,23 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
                 source.get("service_account_key_path"),
                 source.get("dataset_location", "US"),
             )
-        else:
+        elif source_engine == "snowflake":
             source_conn = connect_snowflake(
                 source.get("account"),
                 source.get("user"),
                 source.get("password"),
                 source.get("warehouse"),
                 source.get("role"),
+            )
+        else:
+            source_conn = connect_trino(
+                source.get("host"),
+                source.get("port"),
+                source.get("user"),
+                source.get("catalog"),
+                source.get("schema"),
+                source.get("http_scheme"),
+                source.get("password"),
             )
 
         target_conn = connect_databricks(
@@ -447,7 +458,7 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
             pass
 
         try:
-            if source_engine == "snowflake" and source_conn is not None:
+            if source_engine in {"snowflake", "trino"} and source_conn is not None:
                 source_conn.close()
         except Exception:
             pass

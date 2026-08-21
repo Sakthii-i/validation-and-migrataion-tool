@@ -13,6 +13,13 @@ def get_catalogs(engine, conn):
         cur.execute("SHOW CATALOGS")
         return [row[0] for row in cur.fetchall()]
 
+    elif engine == "Trino":
+        cur = conn.cursor()
+        cur.execute("SHOW CATALOGS")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows
+
 
 def get_schemas(engine, conn, catalog):
     if engine == "BigQuery":
@@ -27,6 +34,13 @@ def get_schemas(engine, conn, catalog):
         cur = conn.cursor()
         cur.execute(f"SHOW SCHEMAS IN {catalog}")
         return [row[0] for row in cur.fetchall()]
+
+    elif engine == "Trino":
+        cur = conn.cursor()
+        cur.execute(f"SHOW SCHEMAS FROM {catalog}")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows
 
 
 def get_tables(engine, conn, catalog, schema):
@@ -43,3 +57,10 @@ def get_tables(engine, conn, catalog, schema):
         cur = conn.cursor()
         cur.execute(f"SHOW TABLES IN {catalog}.{schema}")
         return [row[1] for row in cur.fetchall()]
+
+    elif engine == "Trino":
+        cur = conn.cursor()
+        cur.execute(f"SHOW TABLES FROM {catalog}.{schema}")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows

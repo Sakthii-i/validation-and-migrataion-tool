@@ -104,16 +104,16 @@ def _normalize_query(sql: str) -> str:
 
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
-    if normalized_engine not in ("bigquery", "snowflake"):
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+    if normalized_engine not in ("bigquery", "snowflake", "trino"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
 
     detected = SQLPreprocessor.detect_source_engine(sql)
-    expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+    expected = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}[normalized_engine]
     if detected in ("unknown", "ambiguous"):
         return
 
     if detected != normalized_engine:
-        actual = "Snowflake" if detected == "snowflake" else "BigQuery"
+        actual = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}.get(detected, detected)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -124,7 +124,8 @@ def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
 
 
 def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
-    if (source_engine or "").strip().lower() != "snowflake" or not (source_sql or "").strip():
+    normalized_engine = (source_engine or "").strip().lower()
+    if normalized_engine not in {"snowflake", "trino"} or not (source_sql or "").strip():
         return None
 
     cursor = None
@@ -137,10 +138,11 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
         conn = session["source_conn"]
 
         cursor = conn.cursor()
-        try:
-            cursor.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE")
-        except Exception:
-            pass
+        if normalized_engine == "snowflake":
+            try:
+                cursor.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE")
+            except Exception:
+                pass
         cursor.execute(_normalize_query(source_sql))
         statement_id = getattr(cursor, "sfqid", None)
         columns = [col[0] for col in cursor.description] if cursor.description else []
@@ -683,7 +685,7 @@ def clear_cache() -> CacheClearResponse:
 @router.post("/translate", response_model=TranslateResponse)
 def translate(payload: TranslateRequest) -> TranslateResponse:
     if not payload.bq_sql.strip():
-        source_label = "Snowflake" if payload.source_engine.lower() == "snowflake" else "BigQuery"
+        source_label = {"snowflake": "Snowflake", "trino": "Trino"}.get(payload.source_engine.lower(), "BigQuery")
         raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
     _enforce_source_engine_match(payload.source_engine, payload.bq_sql)
@@ -723,7 +725,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             raise HTTPException(status_code=400, detail="Databricks config is required when run_in_databricks is true.")
         try:
             target_started = time.perf_counter()
-            execution = service.execute_databricks_sql(payload.bq_sql, payload.databricks.model_dump())
+            execution = service.execute_databricks_sql(translated_sql, payload.databricks.model_dump())
             target_latency_ms = int((time.perf_counter() - target_started) * 1000)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
@@ -893,7 +895,7 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
             engines: list[str] = []
             if payload.source_engine:
                 engines.append(payload.source_engine)
-            for engine in ("bigquery", "snowflake"):
+            for engine in ("bigquery", "snowflake", "trino"):
                 if engine not in engines:
                     engines.append(engine)
             for engine in engines:

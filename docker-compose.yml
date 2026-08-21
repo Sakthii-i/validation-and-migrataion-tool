@@ -4,6 +4,13 @@ services:
     ports:
       - "6379:6379"
 
+  trino:
+    image: trinodb/trino:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/etc/catalog:/etc/trino/catalog
+
   api:
     build:
       context: ..
@@ -25,10 +32,15 @@ services:
       - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
       - ADMIN_SMTP_PASSWORD=${ADMIN_SMTP_PASSWORD:-}
+      - TRINO_HOST=${TRINO_HOST:-trino}
+      - TRINO_PORT=${TRINO_PORT:-8080}
+      - TRINO_USER=${TRINO_USER:-admin}
+      - TRINO_HTTP_SCHEME=${TRINO_HTTP_SCHEME:-http}
     ports:
       - "8000:8000"
     depends_on:
       - redis
+      - trino
     volumes:
       - ..:/app
 
@@ -48,8 +60,13 @@ services:
       - SUPABASE_RESULTS_TABLE=${SUPABASE_RESULTS_TABLE:-validation_results}
       - SUPABASE_JOBS_TABLE=${SUPABASE_JOBS_TABLE:-validation_jobs}
       - SUPABASE_AUTH_TABLE=${SUPABASE_AUTH_TABLE:-auth_credentials}
+      - TRINO_HOST=${TRINO_HOST:-trino}
+      - TRINO_PORT=${TRINO_PORT:-8080}
+      - TRINO_USER=${TRINO_USER:-admin}
+      - TRINO_HTTP_SCHEME=${TRINO_HTTP_SCHEME:-http}
     depends_on:
       - redis
+      - trino
 
   frontend:
     build:

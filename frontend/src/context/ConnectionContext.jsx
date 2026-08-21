@@ -15,6 +15,8 @@ export function ConnectionProvider({ children }) {
     project_id: '', dataset_location: 'US', bq_key_path: '',
     // Snowflake
     sf_account: '', sf_user: '', sf_password: '', sf_warehouse: '', sf_role: '',
+    // Trino
+    trino_host: '', trino_port: '8080', trino_user: 'admin', trino_catalog: '', trino_schema: '', trino_http_scheme: 'http', trino_password: '',
   });
 
   // Target credentials (Databricks)
@@ -38,7 +40,17 @@ export function ConnectionProvider({ children }) {
               dataset_location: sourceCreds.dataset_location,
               bq_key_path: sourceCreds.bq_key_path,
             }
-          : {},
+          : sourceEngine === 'Trino'
+            ? {
+                host: sourceCreds.trino_host,
+                port: sourceCreds.trino_port,
+                user: sourceCreds.trino_user,
+                catalog: sourceCreds.trino_catalog,
+                schema: sourceCreds.trino_schema,
+                http_scheme: sourceCreds.trino_http_scheme,
+                password: sourceCreds.trino_password,
+              }
+            : {},
         target: {},
       };
       const res = await connectionAPI.connect(payload);

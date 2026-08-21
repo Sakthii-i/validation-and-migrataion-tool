@@ -1,6 +1,7 @@
 databricks-sql-connector
 snowflake-connector-python
 google-cloud-bigquery
+trino
 packaging<25
 plotly>=5.18.0
 psycopg2-binary

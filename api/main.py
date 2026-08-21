@@ -69,8 +69,16 @@ def create_session_endpoint(req: CreateSessionRequest):
         else:
             target_payload = req.target.model_dump() if req.target else {}
         source_payload = req.source
+    elif source_engine == "trino":
+        if req.credential_password:
+            locked = load_locked_credentials(req.credential_password)
+            source_payload = locked.get("trino", req.source)
+            target_payload = locked["databricks"]
+        else:
+            source_payload = req.source
+            target_payload = req.target.model_dump() if req.target else {}
     else:
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
 
     payload = {
         "source_engine": source_engine,

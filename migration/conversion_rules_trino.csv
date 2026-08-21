@@ -1,0 +1,47 @@
+mapping_id,category,trino_syntax,databricks_sql_syntax,notes
+4,Data Types,INTEGER,INT,32-bit integer
+6,Data Types,REAL,FLOAT,Single precision
+9,Data Types,"NUMERIC(p,s)","DECIMAL(p,s)",Equivalent
+11,Data Types,VARCHAR(n),STRING,Preferred in DBX
+12,Data Types,VARCHAR,STRING,Variable length
+13,Data Types,VARBINARY,BINARY,Binary data
+15,Data Types,TIME,STRING,Standalone TIME
+16,Data Types,TIME(p),STRING,
+19,Data Types,TIMESTAMP WITH TIME ZONE,TIMESTAMP,Timezone handling requires review
+20,Data Types,JSON,STRING,Use from_json
+21,Data Types,UUID,STRING,
+22,Data Types,IPADDRESS,STRING,
+23,Data Types,HYPERLOGLOG,BINARY,Serialized blob
+24,Data Types,P4HYPERLOGLOG,BINARY,Serialized blob
+25,Data Types,QDIGEST<T>,BINARY,Serialized blob
+26,Data Types,TDIGEST,BINARY,Serialized blob
+29,Complex Types,ARRAY(INTEGER),ARRAY<INT>,
+31,Complex Types,ARRAY(VARCHAR),ARRAY<STRING>,
+37,Complex Types,"MAP(VARCHAR, INTEGER)","MAP<STRING, INT>",
+39,Complex Types,"MAP(VARCHAR, VARCHAR)","MAP<STRING, STRING>",
+51,Error Handling,TRY(expr),"TRY_CAST(expr AS type)",Use specific Databricks try function
+52,Error Handling,TRY_CAST(col AS INTEGER),TRY_CAST(col AS INT),
+53,Array Functions,CARDINALITY(array),SIZE(array),
+59,Explode / Lateral View,UNNEST(array_col),EXPLODE(array_col),
+60,Explode / Lateral View,CROSS JOIN UNNEST(array_col),LATERAL VIEW EXPLODE(array_col),
+61,Explode / Lateral View,CROSS JOIN UNNEST(arr) AS t(item),LATERAL VIEW EXPLODE(arr) t AS item,
+62,Explode / Lateral View,UNNEST(arr) WITH ORDINALITY,POSEXPLODE(arr),
+63,Explode / Lateral View,CROSS JOIN UNNEST(arr) WITH ORDINALITY,LATERAL VIEW POSEXPLODE(arr),
+69,Date/Time Functions,EXTRACT(YEAR FROM dt),YEAR(dt),
+70,Date/Time Functions,EXTRACT(QUARTER FROM dt),QUARTER(dt),
+71,Date/Time Functions,EXTRACT(MONTH FROM dt),MONTH(dt),
+72,Date/Time Functions,EXTRACT(WEEK FROM dt),WEEKOFYEAR(dt),
+73,Date/Time Functions,EXTRACT(DAY FROM dt),DAY(dt),
+74,Date/Time Functions,EXTRACT(DAY_OF_WEEK FROM dt),EXTRACT(DAYOFWEEK_ISO FROM dt),
+75,Date/Time Functions,EXTRACT(DAY_OF_YEAR FROM dt),DAYOFYEAR(dt),
+76,Date/Time Functions,EXTRACT(HOUR FROM ts),HOUR(ts),
+77,Date/Time Functions,EXTRACT(MINUTE FROM ts),MINUTE(ts),
+78,Date/Time Functions,EXTRACT(SECOND FROM ts),SECOND(ts),
+82,Date/Time Functions,"DATE_ADD('day', 7, dt)","DATE_ADD(dt, 7)",
+83,Date/Time Functions,"DATE_ADD('month', 1, dt)","ADD_MONTHS(dt, 1)",
+84,Date/Time Functions,"DATE_DIFF('day', d1, d2)","DATEDIFF(d2, d1)",
+85,Date/Time Functions,"DATE_DIFF('month', d1, d2)","CAST(MONTHS_BETWEEN(d2, d1) AS INT)",
+86,Date/Time Functions,CURRENT_DATE,CURRENT_DATE(),
+87,Date/Time Functions,CURRENT_TIME,CURRENT_TIMESTAMP(),
+88,Date/Time Functions,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP(),
+89,Date/Time Functions,FROM_UNIXTIME(epoch),TIMESTAMP_SECONDS(epoch),

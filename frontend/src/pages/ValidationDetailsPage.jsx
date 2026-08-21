@@ -190,7 +190,9 @@ export default function ValidationDetailsPage() {
 
                 <h4 className="text-sm font-semibold mb-2">Numeric Column Statistics</h4>
                 {isNotSelected(detailRow.numeric_check) ? (
-                  <div className="text-sm text-gray-500">Not selected.</div>
+                  <div className="text-sm text-gray-500">
+                    {detailRow.details?.numeric?.error || 'Not selected.'}
+                  </div>
                 ) : detailRow.details?.numeric?.rows?.length ? (
                   <div className="overflow-x-auto">
                     <table className="data-table">
@@ -220,7 +222,7 @@ export default function ValidationDetailsPage() {
                       </tbody>
                     </table>
                   </div>
-                ) : <div className="text-sm text-gray-500">{detailRow.details?.numeric?.error ? `No numeric details available: ${detailRow.details.numeric.error}` : 'No numeric details available.'}</div>}
+                ) : <div className="text-sm text-gray-500">{detailRow.details?.numeric?.error || 'No numeric details available.'}</div>}
               </div>
 
               <div>

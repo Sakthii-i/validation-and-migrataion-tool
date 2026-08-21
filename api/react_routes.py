@@ -11,6 +11,7 @@ import os
 import io
 import re
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 from validation_tool.connections.bigquery import connect_bigquery
 from validation_tool.connections.databricks import connect_databricks
 from validation_tool.connections.snowflake import connect_snowflake
+from validation_tool.connections.trino import connect_trino
 from validation_tool.metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
 from validation_tool.query_builder import (
     build_schema_query,
@@ -100,15 +102,15 @@ def _normalize_primary_keys(value) -> list[str]:
 
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
-    if normalized_engine not in ("bigquery", "snowflake"):
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery or snowflake")
+    if normalized_engine not in ("bigquery", "snowflake", "trino"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
 
     detected = SQLPreprocessor.detect_source_engine(sql)
-    expected = "Snowflake" if normalized_engine == "snowflake" else "BigQuery"
+    expected = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}[normalized_engine]
     if detected in ("unknown", "ambiguous"):
         return
     if detected != normalized_engine:
-        actual = "Snowflake" if detected == "snowflake" else "BigQuery"
+        actual = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}.get(detected, detected)
         raise HTTPException(
             status_code=400,
             detail=f"Selected source engine is {expected}, but the SQL looks like {actual}.",
@@ -315,6 +317,17 @@ def establish_connection(req: ConnectRequest):
                     sf_creds.get("database") or os.getenv("SNOWFLAKE_DATABASE"),
                     sf_creds.get("schema") or os.getenv("SNOWFLAKE_SCHEMA"),
                 )
+            elif engine == "Trino":
+                trino_creds = creds.get("trino", {}) if isinstance(creds, dict) else {}
+                source_conn = connect_trino(
+                    trino_creds.get("host"),
+                    trino_creds.get("port"),
+                    trino_creds.get("user"),
+                    trino_creds.get("catalog"),
+                    trino_creds.get("schema"),
+                    trino_creds.get("http_scheme"),
+                    trino_creds.get("password"),
+                )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
 
@@ -334,6 +347,16 @@ def establish_connection(req: ConnectRequest):
                     req.source.get("role"),
                     req.source.get("database") or os.getenv("SNOWFLAKE_DATABASE"),
                     req.source.get("schema") or os.getenv("SNOWFLAKE_SCHEMA"),
+                )
+            elif engine == "Trino":
+                source_conn = connect_trino(
+                    req.source.get("host"),
+                    req.source.get("port"),
+                    req.source.get("user"),
+                    req.source.get("catalog"),
+                    req.source.get("schema"),
+                    req.source.get("http_scheme"),
+                    req.source.get("password"),
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
@@ -392,6 +415,10 @@ def close_connection(session_id: Optional[str] = None):
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 cur.close()
             elif eng == "snowflake":
+                cur = sess["source_conn"].cursor()
+                cur.execute(f"DROP TABLE IF EXISTS {table}")
+                cur.close()
+            elif eng == "trino":
                 cur = sess["source_conn"].cursor()
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 cur.close()
@@ -571,6 +598,48 @@ def _materialize_source_query_to_table(sess: dict, session_id: str, sql_text: st
             raise HTTPException(status_code=400, detail=f"Failed to materialize Snowflake source query: {exc}") from exc
 
         _ensure_session_temp_list(sess).append({"engine": "snowflake", "table": fqn})
+        return fqn
+
+    if engine == "trino":
+        catalog = os.getenv("TRINO_TEMP_CATALOG") or None
+        schema = os.getenv("TRINO_TEMP_SCHEMA") or None
+        try:
+            cur = source_conn.cursor()
+            if not catalog or not schema:
+                cur.execute("SELECT current_catalog, current_schema")
+                row = cur.fetchone()
+                catalog = catalog or (row[0] if row else None)
+                schema = schema or (row[1] if row else None)
+            cur.close()
+        except Exception:
+            pass
+
+        if not catalog or not schema:
+            match = re.search(r"\b([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\b", sql_text)
+            if match:
+                catalog = catalog or match.group(1)
+                schema = schema or match.group(2)
+
+        if not catalog or not schema:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Trino session has no current catalog/schema for query validation temp tables. "
+                    "Set TRINO_TEMP_CATALOG and TRINO_TEMP_SCHEMA or use fully-qualified source tables."
+                ),
+            )
+
+        fqn = f"{catalog}.{schema}.{table_name}"
+        ddl = f"CREATE TABLE {fqn} AS {sql_text}"
+        try:
+            cur = source_conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS {fqn}")
+            cur.execute(ddl)
+            cur.close()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to materialize Trino source query: {exc}") from exc
+
+        _ensure_session_temp_list(sess).append({"engine": "trino", "table": fqn})
         return fqn
 
     raise HTTPException(status_code=400, detail=f"Unsupported session source engine: {engine}")
@@ -892,6 +961,13 @@ def run_validation(req: RunValidationRequest):
                     tgt_numeric_map = {str(c).lower(): str(c) for c in tgt_numeric}
                     common = sorted(set(src_numeric_map.keys()) & set(tgt_numeric_map.keys()))
 
+                    if not common:
+                        details["numeric"] = {
+                            "rows": [],
+                            "null_rows": [],
+                            "error": "No numeric columns are present in the source and target tables.",
+                        }
+
                     def _quote_ident(q_engine: str, name: str) -> str:
                         value = str(name or "")
                         if q_engine.lower() in {"bigquery", "databricks"}:
@@ -912,7 +988,7 @@ def run_validation(req: RunValidationRequest):
                     common_all = sorted(set(src_all_map.keys()) & set(tgt_all_map.keys()))
 
                     null_rows_dict = {}
-                    if common_all:
+                    if common and common_all:
                         # Build bulk query for source
                         src_null_cols_sql = [
                             f"SUM(CASE WHEN {_quote_ident(engine, src_all_map[c])} IS NULL THEN 1 ELSE 0 END) AS {_quote_ident(engine, c + '_nulls')}"
@@ -968,10 +1044,11 @@ def run_validation(req: RunValidationRequest):
                             "target_avg": tgt_res.get("avg_val"),
                         })
 
-                    details["numeric"] = {
-                        "rows": numeric_rows,
-                        "null_rows": list(null_rows_dict.values())
-                    }
+                    if common:
+                        details["numeric"] = {
+                            "rows": numeric_rows,
+                            "null_rows": list(null_rows_dict.values())
+                        }
                 except Exception as e:
                     details["numeric"] = {"rows": [], "error": str(e)}
 
@@ -1176,24 +1253,33 @@ def run_validation(req: RunValidationRequest):
 
                         src_row_hashes = [(r, _hash_row(r)) for r in src_value_rows]
                         tgt_row_hashes = [(r, _hash_row(r)) for r in tgt_value_rows]
-                        src_hashes = sorted({h for _, h in src_row_hashes if h is not None})
-                        tgt_hashes = sorted({h for _, h in tgt_row_hashes if h is not None})
+                        src_hash_counter = Counter(h for _, h in src_row_hashes if h is not None)
+                        tgt_hash_counter = Counter(h for _, h in tgt_row_hashes if h is not None)
+                        matched_hash_count = sum((src_hash_counter & tgt_hash_counter).values())
+                        src_only_counter = src_hash_counter - tgt_hash_counter
+                        tgt_only_counter = tgt_hash_counter - src_hash_counter
+                        source_hash_count = sum(src_hash_counter.values())
+                        target_hash_count = sum(tgt_hash_counter.values())
+                        source_not_in_target_count = sum(src_only_counter.values())
+                        target_not_in_source_count = sum(tgt_only_counter.values())
 
-                        tgt_set = set(tgt_hashes)
-                        src_set = set(src_hashes)
-                        src_only_hashes = [h for h in src_hashes if h not in tgt_set]
-                        tgt_only_hashes = [h for h in tgt_hashes if h not in src_set]
-                        matched_hashes = sorted(src_set & tgt_set)
-                        source_hash_count = len(src_hashes)
-                        target_hash_count = len(tgt_hashes)
-                        matched_hash_count = len(matched_hashes)
-                        source_not_in_target_count = len(src_only_hashes)
-                        target_not_in_source_count = len(tgt_only_hashes)
+                        src_remaining = Counter(src_only_counter)
+                        src_only_rows = []
+                        for row, row_hash in src_row_hashes:
+                            if src_remaining[row_hash] > 0:
+                                src_only_rows.append(_display_row(row))
+                                src_remaining[row_hash] -= 1
+                            if len(src_only_rows) >= 50:
+                                break
 
-                        src_only_set = set(src_only_hashes)
-                        tgt_only_set = set(tgt_only_hashes)
-                        src_only_rows = [_display_row(r) for r, h in src_row_hashes if h in src_only_set][:50]
-                        tgt_only_rows = [_display_row(r) for r, h in tgt_row_hashes if h in tgt_only_set][:50]
+                        tgt_remaining = Counter(tgt_only_counter)
+                        tgt_only_rows = []
+                        for row, row_hash in tgt_row_hashes:
+                            if tgt_remaining[row_hash] > 0:
+                                tgt_only_rows.append(_display_row(row))
+                                tgt_remaining[row_hash] -= 1
+                            if len(tgt_only_rows) >= 50:
+                                break
 
                         # ─── Improved Mismatch Identification ───
                         pks_input = settings.get("primaryKeys", "")
@@ -1244,7 +1330,9 @@ def run_validation(req: RunValidationRequest):
                     }
 
                     if (
-                        details["row_hash"]["source_hash_count"] == details["row_hash"]["target_hash_count"]
+                        details["row_hash"]["source_hash_count"] > 0
+                        and details["row_hash"]["target_hash_count"] > 0
+                        and details["row_hash"]["source_hash_count"] == details["row_hash"]["target_hash_count"]
                         and details["row_hash"]["source_hash_count"] == details["row_hash"]["matched_hash_count"]
                         and details["row_hash"]["source_not_in_target_count"] == 0
                         and details["row_hash"]["target_not_in_source_count"] == 0
@@ -1473,7 +1561,7 @@ async def run_csv_validation(
 # ══════════════════════════════════════
 
 class SchemaViewRequest(BaseModel):
-    engine: str = "bigquery" # bigquery or snowflake
+    engine: str = "bigquery" # bigquery, snowflake, or trino
     table_path: str
     file_password: str = "" # for auto-connect
 
@@ -1484,6 +1572,8 @@ def view_schema(req: SchemaViewRequest):
         raise HTTPException(status_code=400, detail="BigQuery Table path must be project.dataset.table")
     if req.engine.lower() == "snowflake" and len(parts) != 3:
         raise HTTPException(status_code=400, detail="Snowflake Table path must be catalog.schema.table")
+    if req.engine.lower() == "trino" and len(parts) != 3:
+        raise HTTPException(status_code=400, detail="Trino Table path must be catalog.schema.table")
 
     catalog, schema, table = parts
     engine = req.engine.lower()
@@ -1514,6 +1604,8 @@ def view_schema(req: SchemaViewRequest):
                     sf_creds["warehouse"],
                     sf_creds.get("role"),
                 )
+            elif engine == "trino":
+                conn = connect_trino(catalog=catalog, schema=schema)
         except Exception as e:
             pass
 

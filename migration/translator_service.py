@@ -28,6 +28,7 @@ except Exception:
 from .ast_transformer import BigQueryToDatabricksTransformer, ExpressionOptimizer
 from .rule_engine import RuleEngine
 from .snowflake_rule_loader import SnowflakeRuleEngine, build_engine_from_csv
+from .trino_rule_loader import build_trino_engine
 from .sql_processor import ExpressionCache, QueryChunker, SQLPreprocessor
 from .translation_cache import TranslationCache
 from .complexity_analyzer import QueryComplexityAnalyzer
@@ -171,12 +172,14 @@ class TranslatorService:
                 snowflake_engine = None
         if snowflake_engine is None:
             snowflake_engine = SnowflakeRuleEngine([], [])
+        trino_engine = build_trino_engine()
         return {
             "preprocessor": SQLPreprocessor(),
             "chunker": QueryChunker(max_chunk_size=500),
             "transformer": BigQueryToDatabricksTransformer(),
             "rule_engine": RuleEngine(rules_list, edge_cases),
             "snowflake_rule_engine": snowflake_engine,
+            "trino_rule_engine": trino_engine,
             "cache": TranslationCache(db_path=cache_db_path),
             "validator": SQLValidator(),
             "expr_cache": ExpressionCache(),
@@ -235,7 +238,13 @@ class TranslatorService:
     @staticmethod
     def _transpile_to_databricks(sql_text: str, source_dialect: str = "bigquery") -> Tuple[str, Optional[str]]:
         """Deterministic sqlglot transpile: source SQL AST -> Databricks SQL."""
-        dialect = "snowflake" if (source_dialect or "").strip().lower() == "snowflake" else "bigquery"
+        source_key = (source_dialect or "").strip().lower()
+        if source_key == "snowflake":
+            dialect = "snowflake"
+        elif source_key == "trino":
+            dialect = "trino"
+        else:
+            dialect = "bigquery"
         try:
             trees = [t for t in sqlglot.parse(sql_text, read=dialect) if t is not None]
             if not trees:
@@ -606,8 +615,15 @@ class TranslatorService:
     ) -> Tuple[str, str, Dict[str, Any], Optional[str]]:
         components = self.components
         client = self.get_llm_client(provider, api_key) if use_llm else None
-        is_snowflake = (source_engine or "").strip().lower() == "snowflake"
-        rule_engine = components["snowflake_rule_engine"] if is_snowflake else components["rule_engine"]
+        source_key = (source_engine or "").strip().lower()
+        is_snowflake = source_key == "snowflake"
+        is_trino = source_key == "trino"
+        if is_snowflake:
+            rule_engine = components["snowflake_rule_engine"]
+        elif is_trino:
+            rule_engine = components["trino_rule_engine"]
+        else:
+            rule_engine = components["rule_engine"]
 
         stats: Dict[str, Any] = {
             "steps": [],
@@ -783,15 +799,15 @@ class TranslatorService:
                 translated_map[chunk_id] = cached_expr
                 continue
 
-            input_sql = rule_engine.apply_pre_ast_translation(chunk.sql) if is_snowflake else chunk.sql
+            input_sql = rule_engine.apply_pre_ast_translation(chunk.sql) if (is_snowflake or is_trino) else chunk.sql
             t, transpile_err = self._transpile_to_databricks(input_sql, source_engine)
             if transpile_err:
                 # Keep deterministic behavior robust for noisy/Jinja-heavy inputs:
                 # if direct sqlglot transpile fails, fall back to legacy AST/regex path.
-                if is_snowflake:
+                if is_snowflake or is_trino:
                     t = rule_engine.apply_pre_ast_translation(chunk.sql)
                     stats["steps"].append(
-                        f"Chunk {chunk_id}: sqlglot transpile failed -> snowflake rules fallback applied"
+                        f"Chunk {chunk_id}: sqlglot transpile failed -> {source_key} rules fallback applied"
                     )
                 else:
                     pre_ast_sql = RuleEngine.apply_pre_ast_translation(chunk.sql)
@@ -851,7 +867,7 @@ class TranslatorService:
             components["expr_cache"].set(cache_key, t)
             translated_map[chunk_id] = t
 
-        source_dialect = "snowflake" if (source_engine or "").strip().lower() == "snowflake" else "bigquery"
+        source_dialect = "snowflake" if is_snowflake else ("trino" if is_trino else "bigquery")
         stats["steps"].append(f"Translated {len(order)} chunk(s) via sqlglot (read={source_dialect}, write=databricks); {stats['llm_calls']} LLM call(s)")
 
         assembled = components["chunker"].reassemble(chunks, translated_map)

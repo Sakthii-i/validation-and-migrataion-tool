@@ -267,11 +267,13 @@ export default function QueryConverterSection() {
   };
 
   const isSnowflake = sourceEngine === 'Snowflake';
-  const sourceLabel = isSnowflake ? 'Snowflake' : 'BigQuery';
+  const isTrino = sourceEngine === 'Trino';
+  const requiresSourceConnection = isSnowflake || isTrino;
+  const sourceLabel = isSnowflake ? 'Snowflake' : isTrino ? 'Trino' : 'BigQuery';
   const titleText = `${sourceLabel} to Databricks Query Converter`;
   const inputLabel = `Input SQL (${sourceLabel})`;
   const inputPlaceholder = `Paste your ${sourceLabel} SQL here...`;
-  const hasRequiredSnowflakeConnection = !isSnowflake || isConnected;
+  const hasRequiredSourceConnection = !requiresSourceConnection || isConnected;
 
   const buildPayload = () => ({
     source_engine: sourceEngine.toLowerCase(),
@@ -593,11 +595,11 @@ export default function QueryConverterSection() {
 
   const handleRunDatabricks = async () => {
     if (!translatedSql.trim()) return;
-    if (isSnowflake && !isConnected) {
+    if (requiresSourceConnection && !isConnected) {
       setExecution({
         databricks: {
           status: 'BLOCKED',
-          error: 'Please establish a Snowflake connection from the sidebar before running source and Databricks outputs.',
+          error: `Please establish a ${sourceLabel} connection from the sidebar before running source and Databricks outputs.`,
           rows: [],
           columns: [],
         },
@@ -651,8 +653,8 @@ export default function QueryConverterSection() {
       .filter(({ row }) => String(row.translated_sql || '').trim());
 
     if (!runnableRows.length || runningDatabricks) return;
-    if (isSnowflake && !isConnected) {
-      setCsvError('Please establish a Snowflake connection from the sidebar before running source and Databricks outputs.');
+    if (requiresSourceConnection && !isConnected) {
+      setCsvError(`Please establish a ${sourceLabel} connection from the sidebar before running source and Databricks outputs.`);
       return;
     }
 
@@ -709,8 +711,8 @@ export default function QueryConverterSection() {
       setQueryValidationError(`No active session. Load ${sourceLabel} credentials from Run Validation first.`);
       return;
     }
-    if (isSnowflake && !hasRequiredSnowflakeConnection) {
-      setQueryValidationError('Please establish a Snowflake connection from the sidebar first.');
+    if (requiresSourceConnection && !hasRequiredSourceConnection) {
+      setQueryValidationError(`Please establish a ${sourceLabel} connection from the sidebar first.`);
       return;
     }
 
@@ -776,8 +778,8 @@ export default function QueryConverterSection() {
       setQueryValidationError('Both source SQL and target SQL are required.');
       return;
     }
-    if (isSnowflake && !hasRequiredSnowflakeConnection) {
-      setQueryValidationError('Please establish a Snowflake connection from the sidebar first.');
+    if (requiresSourceConnection && !hasRequiredSourceConnection) {
+      setQueryValidationError(`Please establish a ${sourceLabel} connection from the sidebar first.`);
       return;
     }
 
@@ -906,7 +908,7 @@ export default function QueryConverterSection() {
     if (requiresCategoricalColumns) {
       blockers.push('Categorical columns are required for hash validation when the source table has more than 1,000,000 rows.');
     }
-    if (isSnowflake && !hasRequiredSnowflakeConnection) blockers.push('Snowflake connection is required (use the sidebar to connect).');
+    if (requiresSourceConnection && !hasRequiredSourceConnection) blockers.push(`${sourceLabel} connection is required (use the sidebar to connect).`);
     return blockers;
   }, [
     showDataValidation,
@@ -921,8 +923,8 @@ export default function QueryConverterSection() {
     validationSettings.colDiffEnabled,
     validationSettings.primaryKeys,
     requiresCategoricalColumns,
-    isSnowflake,
-    hasRequiredSnowflakeConnection,
+    requiresSourceConnection,
+    hasRequiredSourceConnection,
     sourceLabel,
   ]);
   const canRunQueryValidation = Boolean(
@@ -932,7 +934,7 @@ export default function QueryConverterSection() {
     && dataValidationMetricsSelected
     && !(validationSettings.validationType === 'deep' && validationSettings.hash && validationSettings.colDiffEnabled && !(validationSettings.primaryKeys || '').trim())
     && !requiresCategoricalColumns
-    && (!isSnowflake || hasRequiredSnowflakeConnection)
+    && (!requiresSourceConnection || hasRequiredSourceConnection)
   );
 
   const guardRequiresCategoricalColumns = Boolean(
@@ -1136,7 +1138,7 @@ export default function QueryConverterSection() {
               </div>
             )}
 
-            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
+            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} sourceLabel={sourceLabel} />
             <QueryComplexityMetrics complexity={complexity} sourceLabel={sourceLabel} />
           </div>
         ) : inputMode === 'csv' ? (
@@ -1595,7 +1597,7 @@ export default function QueryConverterSection() {
               </div>
             )}
 
-            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} />
+            <ResultDetails validation={validation} suggestions={suggestions} finalError={finalError} execution={execution} explanation={explanation} cacheHit={cacheHit} sourceLabel={sourceLabel} />
             <QueryComplexityMetrics complexity={complexity} sourceLabel={sourceLabel} />
           </div>
         )}
@@ -2277,7 +2279,7 @@ function CacheMetric({ title, value }) {
   );
 }
 
-function ResultDetails({ validation, suggestions, finalError, execution, explanation, cacheHit }) {
+function ResultDetails({ validation, suggestions, finalError, execution, explanation, cacheHit, sourceLabel = 'Source' }) {
   if (!validation && !finalError && !execution && !explanation && !cacheHit) return null;
 
   return (
@@ -2299,7 +2301,7 @@ function ResultDetails({ validation, suggestions, finalError, execution, explana
           </div>
         </div>
       )}
-      {execution && <ExecutionResults execution={execution} />}
+      {execution && <ExecutionResults execution={execution} sourceLabel={sourceLabel} />}
       {explanation && (
         <details className="rounded-lg border border-gray-200 bg-white p-4">
           <summary className="cursor-pointer font-semibold text-gray-900">Translation Pipeline</summary>
@@ -2310,7 +2312,7 @@ function ResultDetails({ validation, suggestions, finalError, execution, explana
   );
 }
 
-function ExecutionResults({ execution }) {
+function ExecutionResults({ execution, sourceLabel = 'Source' }) {
   const databricks = execution.databricks || execution;
   const source = execution.source;
 
@@ -2319,7 +2321,7 @@ function ExecutionResults({ execution }) {
       {execution.repair_message && <div className="alert alert-info">{execution.repair_message}</div>}
       {source ? (
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-          <ResultTable title="Snowflake Output" result={source} />
+          <ResultTable title={`${sourceLabel} Output`} result={source} />
           <ResultTable title="Databricks Output" result={databricks} />
         </div>
       ) : (

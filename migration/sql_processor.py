@@ -73,6 +73,20 @@ class SQLPreprocessor:
         r"\bIFF\s*\(",
     ]
 
+    _TRINO_HINTS = [
+        r"\bCARDINALITY\s*\(",
+        r"\bDATE_ADD\s*\(\s*'(?:day|month|year|hour|minute|second)'",
+        r"\bDATE_DIFF\s*\(\s*'(?:day|month|year|hour|minute|second)'",
+        r"\bFROM_UNIXTIME\s*\(",
+        r"\bTO_UNIXTIME\s*\(",
+        r"\bUNNEST\s*\(",
+        r"\bWITH\s+ORDINALITY\b",
+        r"\bTRY\s*\(",
+        r"\bIPADDRESS\b",
+        r"\bUUID\b",
+        r"\bJSON_PARSE\s*\(",
+    ]
+
     @staticmethod
     def is_scripting_block(sql: str) -> bool:
         """Detect if SQL contains procedural scripting constructs."""
@@ -99,7 +113,7 @@ class SQLPreprocessor:
 
     @staticmethod
     def detect_source_engine(sql: str) -> str:
-        """Best-effort detection of BigQuery vs Snowflake input SQL."""
+        """Best-effort detection of BigQuery vs Snowflake vs Trino input SQL."""
         cleaned = SQLPreprocessor.clean_sql(sql or "")
         if not cleaned:
             return "unknown"
@@ -109,20 +123,24 @@ class SQLPreprocessor:
 
         bq_score = _score(SQLPreprocessor._BQ_HINTS)
         sf_score = _score(SQLPreprocessor._SNOWFLAKE_HINTS)
+        trino_score = _score(SQLPreprocessor._TRINO_HINTS)
 
         bq_parse = SQLPreprocessor._can_parse(cleaned, "bigquery")
         sf_parse = SQLPreprocessor._can_parse(cleaned, "snowflake")
+        trino_parse = SQLPreprocessor._can_parse(cleaned, "trino")
         if bq_parse and not sf_parse:
             bq_score += 1
         elif sf_parse and not bq_parse:
             sf_score += 1
+        if trino_parse and not bq_parse and not sf_parse:
+            trino_score += 1
 
-        if bq_score == 0 and sf_score == 0:
+        scores = {"bigquery": bq_score, "snowflake": sf_score, "trino": trino_score}
+        if max(scores.values()) == 0:
             return "unknown"
-        if bq_score > sf_score:
-            return "bigquery"
-        if sf_score > bq_score:
-            return "snowflake"
+        winners = [engine for engine, score in scores.items() if score == max(scores.values())]
+        if len(winners) == 1:
+            return winners[0]
         return "ambiguous"
 
     @staticmethod

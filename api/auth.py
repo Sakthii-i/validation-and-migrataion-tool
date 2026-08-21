@@ -118,17 +118,38 @@ def load_locked_credentials(file_password: str | None) -> dict:
     decrypted_content = _decrypt_content(encrypted_content, file_password.strip())
     values = _parse_credentials_text(decrypted_content)
 
-    return {
-        "snowflake": {
+    snowflake_required = ("snowflake.account", "snowflake.user", "snowflake.password", "snowflake.warehouse")
+    snowflake = None
+    if any((values.get(key) or "").strip() for key in snowflake_required):
+        snowflake = {
             "account": _required(values, "snowflake.account"),
             "user": _required(values, "snowflake.user"),
             "password": _required(values, "snowflake.password"),
             "warehouse": _required(values, "snowflake.warehouse"),
             "role": (values.get("snowflake.role") or "").strip() or None,
-        },
+            "database": (values.get("snowflake.database") or "").strip() or None,
+            "schema": (values.get("snowflake.schema") or "").strip() or None,
+        }
+
+    trino = {
+        "host": (values.get("trino.host") or "").strip() or None,
+        "port": (values.get("trino.port") or "").strip() or None,
+        "user": (values.get("trino.user") or "").strip() or None,
+        "catalog": (values.get("trino.catalog") or "").strip() or None,
+        "schema": (values.get("trino.schema") or "").strip() or None,
+        "http_scheme": (values.get("trino.http_scheme") or "").strip() or None,
+        "password": (values.get("trino.password") or "").strip() or None,
+    }
+
+    result = {
         "databricks": {
             "server_hostname": _required(values, "databricks.server_hostname"),
             "http_path": _required(values, "databricks.http_path"),
             "access_token": _required(values, "databricks.access_token"),
         },
     }
+    if snowflake:
+        result["snowflake"] = snowflake
+    if any(v for v in trino.values()):
+        result["trino"] = trino
+    return result

@@ -25,8 +25,8 @@ class TargetCredentialsDatabricks(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    source_engine: str = Field(..., description="bigquery or snowflake")
-    credential_password: str = Field(default="", description="password to unlock credential.txt (required for snowflake)")
+    source_engine: str = Field(..., description="bigquery, snowflake, or trino")
+    credential_password: str = Field(default="", description="password to unlock credential.txt")
     source: dict = Field(default_factory=dict)
     target: TargetCredentialsDatabricks | None = None
 

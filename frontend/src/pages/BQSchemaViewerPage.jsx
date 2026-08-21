@@ -124,6 +124,7 @@ export default function BQSchemaViewerPage() {
               <select className="form-select" value={engine} onChange={e => {setEngine(e.target.value); setSchema(null);}}>
                 <option value="bigquery">BigQuery</option>
                 <option value="snowflake">Snowflake</option>
+                <option value="trino">Trino</option>
               </select>
             </div>
           </div>
