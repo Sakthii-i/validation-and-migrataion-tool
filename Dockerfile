@@ -23,5 +23,3 @@ EXPOSE 8000
 
 # Default to running the API (docker-compose can override per service)
 CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
-
-
