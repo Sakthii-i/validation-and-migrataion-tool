@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application files to /app
 COPY . .
-RUN find /app -maxdepth 2 -type d
+RUN ls -la /app && find /app -iname "validation_tool*"
 
 EXPOSE 8000
 
