@@ -14,10 +14,10 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install dependencies
 COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application files to /app
 COPY . .
-RUN ls -la /app && find /app -iname "validation_tool*"
 
 EXPOSE 8000
 
