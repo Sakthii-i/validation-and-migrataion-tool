@@ -2,21 +2,24 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Ensure Python can import modules from the project root (/app)
+# Prevent Python output buffering and set module search path
+ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-
+# Copy requirements and install dependencies
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy all application files to /app
 COPY . .
 
 EXPOSE 8000
 
-# Use shell mode to dynamically accept Render's $PORT environment variable
+# Run Uvicorn pointing directly to api.main:app
 CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
