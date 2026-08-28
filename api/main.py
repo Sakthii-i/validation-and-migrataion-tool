@@ -42,7 +42,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",      # local frontend dev
-        "https://your-frontend-name.onrender.com",  # update this once frontend is deployed (Step 4)
+        "https://validation-and-migrataion-tool-1.onrender.com",  # update this once frontend is deployed (Step 4)
     ],
     allow_credentials=True,
     allow_methods=["*"],
