@@ -5,8 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from rq import Retry
-
-from validation_tool.api.auth import load_locked_credentials, require_api_key
+from api.auth import load_locked_credentials, require_api_key
 from validation_tool.api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
