@@ -16,8 +16,8 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 import psycopg2
 
-from validation_tool.connections.postgres import POSTGRES_CONFIG
-from validation_tool.query_builder import (
+from connections.postgres import POSTGRES_CONFIG
+from query_builder import (
     build_shallow_query,
     build_schema_query,
     build_numeric_stats_query,
@@ -25,7 +25,7 @@ from validation_tool.query_builder import (
     get_numeric_columns,
 )
 try:
-    from validation_tool.datatype_utils import (
+    from datatype_utils import (
         datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
     )
@@ -445,7 +445,7 @@ def run_row_hash_validation(
     source_where="1=1", target_where="1=1",
     categorical_columns=None
 ):
-    from validation_tool.query_builder import build_shallow_query
+    from query_builder import build_shallow_query
     # 1. Enforce 1M row limit
     metrics_shallow = {"row_count": True}
     src_count_query = build_shallow_query(engine, src["catalog"], src["schema"], src["table"], metrics_shallow, where_clause=normalize_where_input(source_where))
@@ -461,7 +461,7 @@ def run_row_hash_validation(
         )
 
     if cat_cols:
-        from validation_tool.validation_core import validate_categorical_hash
+        from validation_core import validate_categorical_hash
         return validate_categorical_hash(
             engine,
             source_conn,

@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 import httpx
 
-from validation_tool.migration.schemas import (
+from migration.schemas import (
     CacheClearResponse,
     ConfigResponse,
     CsvQueryResult,
@@ -40,12 +40,12 @@ from validation_tool.migration.schemas import (
     TranslateRequest,
     TranslateResponse,
 )
-from validation_tool.migration.complexity_analyzer import QueryComplexityAnalyzer
-from validation_tool.migration.sql_processor import SQLPreprocessor
-from validation_tool.migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
-from validation_tool.api.auth import load_locked_credentials
-from validation_tool.backend import supabase_store
-from validation_tool.backend.session_store import get_query_stats, update_query_stats
+from migration.complexity_analyzer import QueryComplexityAnalyzer
+from migration.sql_processor import SQLPreprocessor
+from migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
+from api.auth import load_locked_credentials
+from backend import supabase_store
+from backend.session_store import get_query_stats, update_query_stats
 
 router = APIRouter(prefix="/api/migration")
 service = TranslatorService()
@@ -131,8 +131,8 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
     cursor = None
     started = time.perf_counter()
     try:
-        from validation_tool.api.react_routes import _get_session
-        from validation_tool.validation_engine import normalize_result
+        from api.react_routes import _get_session
+        from validation_engine import normalize_result
 
         session = _get_session(session_id)
         conn = session["source_conn"]

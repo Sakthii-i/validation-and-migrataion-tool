@@ -4,19 +4,19 @@ from datetime import datetime, timezone
 
 import redis
 
-from validation_tool.backend.supabase_jobs_store import (
+from backend.supabase_jobs_store import (
     ensure_jobs_table,
     get_pg_conn,
     insert_validation_result,
     upsert_job_state,
 )
-from validation_tool.backend.settings import (
+from backend.settings import (
     max_concurrent_jobs_per_session,
     redis_url,
     session_concurrency_slot_ttl_seconds,
 )
-from validation_tool.backend.session_store import get_session
-from validation_tool.backend.validators import run_validation_job
+from backend.session_store import get_session
+from backend.validators import run_validation_job
 
 
 class SessionConcurrencyLimit(Exception):

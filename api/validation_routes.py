@@ -51,7 +51,7 @@ def _table_fqn(src: dict) -> str:
 
 @router.get("/results/{validation_id}")
 async def get_validation_result(validation_id: str, _ = Depends(require_api_key)):
-    from validation_tool.backend import supabase_store
+    from backend import supabase_store
     try:
         row = supabase_store.get_result_by_id(validation_id)
         if not row:
