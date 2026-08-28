@@ -17,7 +17,7 @@ import psycopg2
 from psycopg2.extensions import connection as PgConnection
 
 # Import query builders from existing file
-from .query_builder import (
+from query_builder import (
     build_shallow_query,
     build_schema_query,
     build_numeric_stats_query,
@@ -535,7 +535,7 @@ def validate_categorical_hash(
     source_where: str = "1=1",
     target_where: str = "1=1",
 ) -> bool:
-    from .query_builder import build_categorical_hash_query
+    from query_builder import build_categorical_hash_query
 
     categorical_columns = normalize_column_list(categorical_columns)
     if not categorical_columns:
