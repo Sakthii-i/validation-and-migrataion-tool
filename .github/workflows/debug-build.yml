@@ -1,0 +1,30 @@
+name: Debug Docker Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t debug-image .
+
+      - name: Check for validation_tool in image
+        run: docker run --rm debug-image find /app -iname "validation_tool*"
+
+      - name: Show full /app tree
+        run: docker run --rm debug-image find /app -maxdepth 2
+
+      - name: Try the actual import
+        run: docker run --rm debug-image python -c "import validation_tool" || true
+
+      - name: Check .gitignore and .dockerignore
+        run: |
+          echo "--- .gitignore ---"
+          cat .gitignore 2>/dev/null || echo "(no .gitignore)"
+          echo "--- .dockerignore ---"
+          cat .dockerignore 2>/dev/null || echo "(no .dockerignore)"
