@@ -36,10 +36,14 @@ from .migration_routes import router as migration_router
 
 app = FastAPI(title="Validation API", version="1.0")
 
-# CORS for React dev server
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://frontend:3000", "*"],
+    allow_origins=[
+        "http://localhost:3000",      # local frontend dev
+        "https://your-frontend-name.onrender.com",  # update this once frontend is deployed (Step 4)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
