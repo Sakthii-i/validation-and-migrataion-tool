@@ -19,8 +19,8 @@ from validation_core import (
     create_trino_connection,
     create_databricks_connection,
 )
-from ..query_builder import build_shallow_query
-from ..backend.email_service import send_validation_failure_email
+from query_builder import build_shallow_query
+from backend.email_service import send_validation_failure_email
 
 # Use your existing auth function (same directory)
 from .auth import require_api_key
@@ -33,7 +33,7 @@ def _row_count_for_table(engine: str, conn, src: dict) -> int:
     query = build_shallow_query(engine, src["catalog"], src["schema"], src["table"], {"row_count": True})
     rows = []
     try:
-        from ..validation_core import execute_query, normalize_result
+        from validation_core import execute_query, normalize_result
 
         rows = execute_query(engine, conn, query)
     except Exception as exc:
@@ -160,7 +160,7 @@ async def validate(
             if selected["numeric"]:
                 results["numeric"] = validate_numeric(source_engine, source_conn, target_conn, src, tgt)
             if selected["hash"]:
-                from ..validation_core import execute_query, validate_categorical_hash
+                from validation_core import execute_query, validate_categorical_hash
                 source_row_count = _row_count_for_table(source_engine, source_conn, src)
 
                 cat_cols_str = str(row["categorical_columns"]).strip() if "categorical_columns" in row and pd.notna(row["categorical_columns"]) else ""
