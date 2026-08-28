@@ -5,7 +5,7 @@ import pandas as pd
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
 # Correct relative import: go up one level to import validation_core
-from ..validation_core import (
+from validation_core import (
     parse_table_path,
     validate_row_count,
     validate_schema,
