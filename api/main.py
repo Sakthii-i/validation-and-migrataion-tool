@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from rq import Retry
 from api.auth import load_locked_credentials, require_api_key
-from validation_tool.api.schemas import (
+from api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
     GetValidationResponse,
@@ -14,17 +14,17 @@ from validation_tool.api.schemas import (
     ValidationJobPublicStatus,
     ValidationResultRow,
 )
-from validation_tool.backend.csv_parser import parse_validations_csv
-from validation_tool.backend.supabase_jobs_store import (
+from backend.csv_parser import parse_validations_csv
+from backend.supabase_jobs_store import (
     ensure_jobs_table,
     get_job,
     get_pg_conn,
     get_result,
     upsert_job_state,
 )
-from validation_tool.backend.session_store import create_session
-from validation_tool.worker.queue import get_queue
-from validation_tool.worker.tasks import run_validation_task
+from backend.session_store import create_session
+from worker.queue import get_queue
+from worker.tasks import run_validation_task
 from fastapi.middleware.cors import CORSMiddleware
 
 from .validation_routes import router as validation_router
