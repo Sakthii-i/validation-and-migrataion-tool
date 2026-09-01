@@ -45,3 +45,5 @@ mapping_id,category,trino_syntax,databricks_sql_syntax,notes
 87,Date/Time Functions,CURRENT_TIME,CURRENT_TIMESTAMP(),
 88,Date/Time Functions,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP(),
 89,Date/Time Functions,FROM_UNIXTIME(epoch),TIMESTAMP_SECONDS(epoch),
+90,Data Types,DOUBLE,DOUBLE,Double precision
+91,Error Handling,TRY_CAST(col AS DOUBLE),TRY_CAST(col AS DOUBLE),Safe conversion to double
