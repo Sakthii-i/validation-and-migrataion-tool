@@ -4,11 +4,11 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from validation_tool.connections.bigquery import connect_bigquery
-from validation_tool.connections.databricks import connect_databricks
-from validation_tool.connections.snowflake import connect_snowflake
-from validation_tool.connections.trino import connect_trino
-from validation_tool.query_builder import (
+from connections.bigquery import connect_bigquery
+from connections.databricks import connect_databricks
+from connections.snowflake import connect_snowflake
+from connections.trino import connect_trino
+from query_builder import (
     build_numeric_stats_query,
     build_row_hash_query,
     build_schema_query,
@@ -16,7 +16,7 @@ from validation_tool.query_builder import (
     get_numeric_columns,
 )
 try:
-    from validation_tool.datatype_utils import (
+    from datatype_utils import (
         datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
     )
@@ -403,7 +403,7 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
                 raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
 
             if cat_cols:
-                from validation_tool.validation_core import validate_categorical_hash
+                from validation_core import validate_categorical_hash
                 hash_status = (
                     "PASS"
                     if validate_categorical_hash(

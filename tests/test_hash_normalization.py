@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from validation_tool.validation_engine import (
+from validation_engine import (
     _normalize_hash_scalar,
     normalize_column_list,
     normalize_hash_value,

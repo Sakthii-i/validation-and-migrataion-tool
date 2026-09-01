@@ -4,7 +4,7 @@ from datetime import datetime
 
 import psycopg2
 
-from validation_tool.connections.postgres import POSTGRES_CONFIG
+from connections.postgres import POSTGRES_CONFIG
 
 
 def get_pg_conn():

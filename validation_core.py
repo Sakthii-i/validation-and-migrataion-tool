@@ -17,7 +17,7 @@ import psycopg2
 from psycopg2.extensions import connection as PgConnection
 
 # Import query builders from existing file
-from .query_builder import (
+from query_builder import (
     build_shallow_query,
     build_schema_query,
     build_numeric_stats_query,
@@ -69,7 +69,7 @@ def create_databricks_connection(server_hostname: str, http_path: str, access_to
 
 def create_trino_connection(host=None, port=None, user=None, catalog=None, schema=None, http_scheme=None, password=None):
     """Create Trino DB-API connection."""
-    from validation_tool.connections.trino import connect_trino
+    from connections.trino import connect_trino
 
     return connect_trino(host, port, user, catalog, schema, http_scheme, password)
 
@@ -153,7 +153,7 @@ def generate_validation_record(validation_type, src, tgt, row_status, schema_sta
 def insert_validation_result(record: dict) -> str:
     """Insert record into Supabase and return validation_id."""
     try:
-        from validation_tool.backend import supabase_store
+        from backend import supabase_store
         
         # Map validation_core record format to supabase_store format
         supabase_record = {
@@ -535,7 +535,7 @@ def validate_categorical_hash(
     source_where: str = "1=1",
     target_where: str = "1=1",
 ) -> bool:
-    from .query_builder import build_categorical_hash_query
+    from query_builder import build_categorical_hash_query
 
     categorical_columns = normalize_column_list(categorical_columns)
     if not categorical_columns:

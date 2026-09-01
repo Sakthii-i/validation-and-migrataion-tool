@@ -1,7 +1,7 @@
 import redis
 from rq import Queue
 
-from validation_tool.backend.settings import redis_url
+from backend.settings import redis_url
 
 
 def get_queue() -> Queue:

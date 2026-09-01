@@ -1,26 +1,24 @@
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for snowflake / crypto)
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
 RUN apt-get update && apt-get install -y \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (better caching)
-COPY validation_tool/requirements.txt ./requirements.txt
-
-# Install Python dependencies
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
-COPY validation_tool ./validation_tool
+COPY . .
 
-# Expose FastAPI port
+# Fail the build here (not at Render deploy) if the app can't import
+RUN python -c "import api.main" || \
+    (echo "ERROR: api.main failed to import — check module paths above" && exit 1)
+
 EXPOSE 8000
 
-# Default to running the API (docker-compose can override per service)
-CMD ["python", "-m", "uvicorn", "validation_tool.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
