@@ -261,7 +261,7 @@ class RuleEngine:
 
                 if simple:
                     col_name = simple.group(2)
-                    select_qlines.append(f"    {expr} AS {col_name}")
+                    select_lines.append(f"    {expr} AS {col_name}")
                     group_by_exprs.append(expr)
                     left_expr = expr
                     if src_alias and '.' not in expr:
@@ -400,6 +400,10 @@ class RuleEngine:
             'TIMESTAMP_MILLIS',
             'TIMESTAMP_MICROS',
             'UNIX_TIMESTAMP',
+            # Keep the hand-written FARM_FINGERPRINT rule (which emits a warning
+            # comment about the hash algorithm mismatch) from being silently
+            # deleted by the generic CSV-driven override.
+            'FARM_FINGERPRINT',
         }
         builtins: List[Dict] = [
 
@@ -718,7 +722,12 @@ class RuleEngine:
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*DAY\s*,\s*([^,]+),\s*([^)]+)\)',
+                # Arg capture allows one level of nested parens (e.g. a
+                # DATE_TRUNC(...) call as an argument) so a comma inside a
+                # nested call isn't mistaken for the top-level separator —
+                # this form can also appear from sqlglot's own 3-arg DATEDIFF
+                # serialization of a 2-arg datediff(end, start) call.
+                'pattern': r'\bDATEDIFF\s*\(\s*DAY\s*,\s*((?:[^,()]|\([^()]*\))+?)\s*,\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'DATEDIFF(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
@@ -813,10 +822,17 @@ class RuleEngine:
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             {
-                # BQ EXTRACT(WEEK ...) is Sunday-based 0..53; WEEKOFYEAR is ISO Mon-based 1..53
-                # Use a formula that replicates BQ Sunday-based week numbering exactly from Edge Cases sheet
+                # BQ EXTRACT(WEEK ...) is Sunday-based 0..53, anchored to the year's
+                # FIRST SUNDAY (not Jan 1 itself). Days before the first Sunday are
+                # week 0. dayofweek() in Databricks is 1=Sun..7=Sat, so the offset
+                # in days from Jan 1 to the first Sunday is pmod(8 - dayofweek(Jan1), 7).
                 'pattern': r'\bEXTRACT\s*\(\s*WEEK\s+FROM\s+([^)]+)\)',
-                'replacement': r"floor(datediff(\1, date_trunc('year', \1)) / 7) + 1",
+                'replacement': (
+                    r"(CASE WHEN datediff(\1, date_trunc('year', \1)) "
+                    r"< pmod(8 - dayofweek(date_trunc('year', \1)), 7) THEN 0 "
+                    r"ELSE floor((datediff(\1, date_trunc('year', \1)) "
+                    r"- pmod(8 - dayofweek(date_trunc('year', \1)), 7)) / 7) + 1 END)"
+                ),
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             {
@@ -1135,9 +1151,13 @@ class RuleEngine:
             },
 
             # ── MATH ─────────────────────────────────────────────────────────
-            # LOG(x, base) → LOG(base, x)  ← arg order reversed in Databricks
+            # LOG(x, base) → LOG(base, x)  ← arg order reversed in Databricks.
+            # Allow one level of nested parens in the first arg (e.g. LOG(SQRT(x), 2))
+            # so the swap still fires instead of silently leaving BigQuery arg
+            # order in place (which would be evaluated with the wrong base/value
+            # under Databricks' LOG(base, x) semantics).
             {
-                'pattern': r'\bLOG\s*\(([^,()]+),\s*([^)]+)\)',
+                'pattern': r'\bLOG\s*\(\s*((?:[^,()]|\([^()]*\))+?)\s*,\s*([^)]+)\)',
                 'replacement': r'LOG(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 8,
             },
@@ -1147,9 +1167,20 @@ class RuleEngine:
                 'replacement': r'LN(\1)',
                 'flags': re.IGNORECASE, 'priority': 7,
             },
+            # TRUNC(x, d) → numeric truncation toward zero. Databricks/Spark has
+            # no scalar TRUNCATE() function (only the DDL statement TRUNCATE TABLE),
+            # so a bare rename produces an unresolvable function call. Emulate
+            # truncation with a sign-aware CAST/POWER expression instead.
             {
-                'pattern': r'(?<!\bDATE_)\bTRUNC\s*\(',
-                'replacement': r'TRUNCATE(',
+                'pattern': r'(?<!\bDATE_)\bTRUNC\s*\(\s*([^,)]+?)\s*,\s*([^)]+)\)',
+                'replacement': (
+                    r'(SIGN(\1) * FLOOR(ABS(\1) * POWER(10, \2)) / POWER(10, \2))'
+                ),
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'(?<!\bDATE_)\bTRUNC\s*\(\s*([^,)]+)\s*\)',
+                'replacement': r'(SIGN(\1) * FLOOR(ABS(\1)))',
                 'flags': re.IGNORECASE, 'priority': 8,
             },
             {
@@ -1391,12 +1422,9 @@ class RuleEngine:
                 'replacement': r'(\1 / \2)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
-            # DIV(a, b) → FLOOR(a / b)  (integer division)
-            {
-                'pattern': r'\bDIV\s*\(([^,]+),\s*([^)]+)\)',
-                'replacement': r'FLOOR(\1 / \2)',
-                'flags': re.IGNORECASE, 'priority': 9,
-            },
+            # DIV(a, b) → a DIV b  (BigQuery DIV truncates toward zero, matching
+            # Databricks' native truncating DIV operator; see the canonical rule
+            # above — FLOOR(a/b) rounds toward -inf and is wrong for negative operands)
             # SAFE_NEGATE(x) → TRY_SUBTRACT(0, x)
             {
                 'pattern': r'\bSAFE_NEGATE\s*\(([^)]+)\)',
@@ -1426,8 +1454,15 @@ class RuleEngine:
             # APPROX_COUNT_DISTINCT → APPROX_COUNT_DISTINCT (same)
             # APPROX_QUANTILES(x, n) → PERCENTILE_APPROX(x, array(0.25, 0.5, 0.75))
             {
+                # Spark's SEQUENCE() step must be integral/date/timestamp, so a
+                # fractional step (1.0/n) is invalid syntax — build an explicit
+                # array literal of quantile boundaries instead.
                 'pattern': r'\bAPPROX_QUANTILES\s*\(([^,]+),\s*(\d+)\s*\)',
-                'replacement': r'PERCENTILE_APPROX(\1, SEQUENCE(0, 1, 1.0/\2)) /* TODO: verify quantile buckets */',
+                'replacement': lambda m: (
+                    f"PERCENTILE_APPROX({m.group(1)}, array("
+                    + ", ".join(str(round(i / int(m.group(2)), 10)) for i in range(int(m.group(2)) + 1))
+                    + "))"
+                ),
                 'flags': re.IGNORECASE, 'priority': 8,
             },
             # APPROX_TOP_COUNT → APPROX_TOP_K (available in Databricks 2026)
@@ -2706,8 +2741,39 @@ class RuleEngine:
             sql, flags=re.IGNORECASE,
         )
 
-        # DATE(expr) -> to_date(expr)
-        sql = re.sub(r'\bDATE\s*\(([^)]+)\)', r'to_date(\1)', sql, flags=re.IGNORECASE)
+        # DATE(expr) -> to_date(expr). Matches parens manually (not `[^)]+`)
+        # so a nested call like DATE(TIMESTAMP_ADD(ts, INTERVAL 1 DAY)) isn't
+        # truncated mid-expression by stopping at the first close-paren.
+        def _rewrite_date_calls(query: str) -> str:
+            pat = re.compile(r'\bDATE\s*\(', re.IGNORECASE)
+            out = []
+            idx = 0
+            while True:
+                m = pat.search(query, idx)
+                if not m:
+                    out.append(query[idx:])
+                    break
+                start_paren = m.end() - 1
+                depth = 0
+                end_paren = -1
+                for i in range(start_paren, len(query)):
+                    if query[i] == '(':
+                        depth += 1
+                    elif query[i] == ')':
+                        depth -= 1
+                        if depth == 0:
+                            end_paren = i
+                            break
+                if end_paren == -1:
+                    out.append(query[idx:])
+                    break
+                inner = query[start_paren + 1:end_paren]
+                out.append(query[idx:m.start()])
+                out.append(f"to_date({inner})")
+                idx = end_paren + 1
+            return "".join(out)
+
+        sql = _rewrite_date_calls(sql)
 
         # Column/DDL type name remaps (comprehensive)
         sql = re.sub(r'\bBIGNUMERIC\b', 'DECIMAL(38,9)', sql, flags=re.IGNORECASE)
@@ -2716,7 +2782,10 @@ class RuleEngine:
         sql = re.sub(r'\bINT64\b', 'BIGINT', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bINTEGER\b', 'INT', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bBYTES\b', 'BINARY', sql, flags=re.IGNORECASE)
-        sql = re.sub(r'\bDATETIME\b(?!\s*\()', 'TIMESTAMP', sql, flags=re.IGNORECASE)
+        # BigQuery DATETIME is timezone-naive; Databricks TIMESTAMP is timezone-aware
+        # and can shift under tz conversion. TIMESTAMP_NTZ (DBR 13.3+) is the
+        # semantically correct, timezone-naive target.
+        sql = re.sub(r'\bDATETIME\b(?!\s*\()', 'TIMESTAMP_NTZ', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bBOOL\b', 'BOOLEAN', sql, flags=re.IGNORECASE)
 
         # JSON type → VARIANT (Databricks 2026 native semi-structured type)
@@ -3035,8 +3104,11 @@ class RuleEngine:
                 # If already has ROWS or RANGE specification, don't touch
                 if re.search(r'\b(?:ROWS|RANGE)\s+BETWEEN\b', over_content, re.IGNORECASE):
                     return m.group(0)
-                # Add default BigQuery-compatible frame
-                return f"{m.group(1)}{over_content} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+                # Add default BigQuery-compatible frame (full partition, matching
+                # BigQuery's actual default of RANGE BETWEEN UNBOUNDED PRECEDING
+                # AND UNBOUNDED FOLLOWING — not "current row", which would wrongly
+                # truncate the frame and change the result)
+                return f"{m.group(1)}{over_content} RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
             return pat.sub(_add_frame, query)
         sql = _enforce_window_frame(sql)
 

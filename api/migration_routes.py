@@ -123,6 +123,27 @@ def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
         )
 
 
+def _mysql_tz_table_columns(source_engine: str, translated_sql: str, session_id: str | None) -> dict[str, tuple[list[str], list[str]]]:
+    """
+    For a Trino-sourced query, find which referenced tables have MySQL `TIMESTAMP`-typed
+    columns, so the Databricks execution can correct them at the source (see
+    TranslatorService.apply_mysql_tz_source_correction). Thin wrapper around
+    TranslatorService.resolve_mysql_tz_table_columns that resolves `session_id` to the
+    session's source (Trino) connection. Returns {} if not applicable.
+    """
+    if not (session_id or "").strip():
+        return {}
+    try:
+        from validation_tool.api.react_routes import _get_session
+        from validation_tool.migration.translator_service import TranslatorService
+
+        session = _get_session(session_id)
+        conn = session.get("source_conn")
+        return TranslatorService.resolve_mysql_tz_table_columns(conn, source_engine, translated_sql)
+    except Exception:
+        return {}
+
+
 def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
     normalized_engine = (source_engine or "").strip().lower()
     if normalized_engine not in {"snowflake", "trino"} or not (source_sql or "").strip():
@@ -172,7 +193,11 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
         }
     finally:
         if cursor is not None:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
 
 
 def _repair_databricks_sql(sql: str, error: str, provider: str, model: str, api_key: str | None) -> tuple[str | None, str | None]:
@@ -674,6 +699,12 @@ def update_query_history(query_id: str, payload: dict) -> dict:
     return {"status": "ok"}
 
 
+@router.delete("/query-history/{query_id}")
+def delete_query_history(query_id: str, source_engine: str = "bigquery") -> dict:
+    supabase_store.delete_query_history(query_id, source_engine)
+    return {"status": "ok"}
+
+
 @router.post("/cache/clear", response_model=CacheClearResponse)
 def clear_cache() -> CacheClearResponse:
     components = service.components
@@ -725,7 +756,15 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             raise HTTPException(status_code=400, detail="Databricks config is required when run_in_databricks is true.")
         try:
             target_started = time.perf_counter()
-            execution = service.execute_databricks_sql(translated_sql, payload.databricks.model_dump())
+            mysql_tz_table_columns = _mysql_tz_table_columns(
+                payload.source_engine, translated_sql, payload.session_id
+            )
+            execution = service.execute_databricks_sql(
+                translated_sql,
+                payload.databricks.model_dump(),
+                source_engine=payload.source_engine,
+                mysql_tz_table_columns=mysql_tz_table_columns,
+            )
             target_latency_ms = int((time.perf_counter() - target_started) * 1000)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Databricks execution failed: {exc}") from exc
@@ -810,7 +849,10 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
 
     def _timed_databricks_execute(sql: str) -> dict:
         started = time.perf_counter()
-        execution = service.execute_databricks_sql(sql, dbx_config)
+        mysql_tz_table_columns = _mysql_tz_table_columns(payload.source_engine, sql, payload.session_id)
+        execution = service.execute_databricks_sql(
+            sql, dbx_config, source_engine=payload.source_engine, mysql_tz_table_columns=mysql_tz_table_columns
+        )
         if isinstance(execution, dict):
             execution["execution_time_ms"] = int((time.perf_counter() - started) * 1000)
         return execution
@@ -1051,7 +1093,13 @@ async def translate_csv(
 
                 if databricks_cfg is not None:
                     try:
-                        execution = service.execute_databricks_sql(translated_sql, databricks_cfg)
+                        mysql_tz_table_columns = _mysql_tz_table_columns(source_engine, translated_sql, session_id)
+                        execution = service.execute_databricks_sql(
+                            translated_sql,
+                            databricks_cfg,
+                            source_engine=source_engine,
+                            mysql_tz_table_columns=mysql_tz_table_columns,
+                        )
                     except Exception as exc:
                         execution = {"status": "FAILED", "error": str(exc)}
 

@@ -104,6 +104,7 @@ export const migrationAPI = {
   },
   listQueryHistory: (sourceEngine = 'bigquery') => api.get('/migration/query-history', { params: { source_engine: sourceEngine } }),
   updateQueryHistory: (queryId, payload) => api.patch(`/migration/query-history/${queryId}`, payload),
+  deleteQueryHistory: (queryId, sourceEngine) => api.delete(`/migration/query-history/${queryId}`, { params: { source_engine: sourceEngine } }),
   clearCache: () => api.post('/migration/cache/clear'),
   getNormalizedPreview: (sql) => api.post('/migration/preview/normalized', { sql }),
   getGitBranches: (payload, signal) => api.post('/migration/git/branches', payload, { signal }),

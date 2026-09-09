@@ -10,7 +10,14 @@ class TranslationCache:
     """Persistent cache for translated SQL with connection pooling."""
 
     # Bump this version when translation rules change to invalidate stale entries.
-    RULES_VERSION = "2"
+    # 2026-09-02: invalidates stale SAFE_CAST/FLOAT64 outputs that should now be
+    # TRY_CAST/DOUBLE in Databricks SQL.
+    # 2026-09-02b: invalidates stale Snowflake EXTRACT(... FROM ...) outputs that
+    # should now be YEAR()/MONTH()/DAY() etc. in Databricks SQL.
+    # 2026-09-02c: invalidates stale outputs from the full BigQuery/Snowflake/Trino
+    # rule audit fix pass (DIV, LAST_VALUE frame, ::CAST deletion, TOP n, DATEDIFF
+    # month/year, TRY(), nested-comma arg corruption, and more — see git history).
+    RULES_VERSION = "5"
     
     def __init__(self, db_path: str = "translation_cache.db", ttl_days: int = 30):
         self.db_path = db_path

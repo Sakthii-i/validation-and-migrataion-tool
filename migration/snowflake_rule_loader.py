@@ -123,7 +123,30 @@ class SnowflakeRuleEngine:
 
             return pat.sub(_repl, query)
 
+        # Mask string literals first so `word:word` text inside quotes (e.g.
+        # format strings like 'HH24:MI:SS') isn't mistaken for a colon-path
+        # accessor and corrupted.
+        def _mask_strings(query: str):
+            store: Dict[str, str] = {}
+            counter = [0]
+
+            def _repl(m: re.Match) -> str:
+                key = f"__STRLIT_{counter[0]}__"
+                store[key] = m.group(0)
+                counter[0] += 1
+                return key
+
+            masked = re.sub(r"'(?:[^'\\]|\\.)*'", _repl, query)
+            return masked, store
+
+        def _unmask_strings(query: str, store: Dict[str, str]) -> str:
+            for key, val in store.items():
+                query = query.replace(key, val)
+            return query
+
+        sql, _str_store = _mask_strings(sql)
         sql = _replace_colon_path(sql)
+        sql = _unmask_strings(sql, _str_store)
 
         # ── LATERAL FLATTEN(INPUT => col) → LATERAL VIEW EXPLODE(col) ───────
         def _replace_lateral_flatten(query: str) -> str:
@@ -171,12 +194,21 @@ class SnowflakeRuleEngine:
         )
 
         # ── TOP n → LIMIT n  (must be pre-AST to avoid parser confusion) ────
-        sql = re.sub(
-            r'\bSELECT\s+TOP\s+(\d+)\b',
-            r'SELECT',
-            sql, flags=re.IGNORECASE,
-        )
-        # Keep the LIMIT by appending; exact position fixed in apply_function_translation.
+        # LIMIT belongs at the end of the (outermost) SELECT, not where TOP
+        # appeared, so it can't just be substituted in place. Strip it out and
+        # re-append it. For the common single-`TOP`, single-statement case this
+        # is unambiguous; for multiple TOPs (nested subqueries) we can't safely
+        # guess the right scope for each, so we flag those with a TODO instead
+        # of silently dropping the row limit.
+        _top_matches = list(re.finditer(r'\bSELECT\s+TOP\s+(\d+)\b', sql, flags=re.IGNORECASE))
+        if len(_top_matches) == 1:
+            n = _top_matches[0].group(1)
+            sql = re.sub(r'\bSELECT\s+TOP\s+(\d+)\b', 'SELECT', sql, count=1, flags=re.IGNORECASE)
+            sql = sql.rstrip().rstrip(';') + f'\nLIMIT {n}'
+        elif len(_top_matches) > 1:
+            def _flag_top(m: re.Match) -> str:
+                return f"SELECT /* TODO: TOP {m.group(1)} removed; manually add LIMIT {m.group(1)} to this SELECT */"
+            sql = re.sub(r'\bSELECT\s+TOP\s+(\d+)\b', _flag_top, sql, flags=re.IGNORECASE)
 
         # ── SAMPLE(n ROWS) → TABLESAMPLE(n ROWS) ────────────────────────────
         sql = re.sub(
@@ -193,13 +225,9 @@ class SnowflakeRuleEngine:
         # ── MINUS → EXCEPT ───────────────────────────────────────────────────
         sql = re.sub(r'\bMINUS\b', 'EXCEPT', sql, flags=re.IGNORECASE)
 
-        # ── ILIKE → LOWER(col) LIKE LOWER(pattern) ──────────────────────────
-        sql = re.sub(
-            r'\bILIKE\b',
-            'LIKE /* TODO: ILIKE (case-insensitive LIKE) replaced with LIKE; '
-            'add LOWER() on both sides if case-insensitivity is required */',
-            sql, flags=re.IGNORECASE,
-        )
+        # NOTE: ILIKE — Databricks SQL supports ILIKE natively (case-insensitive
+        # match), so it's left unchanged rather than downgraded to LIKE, which
+        # would change match semantics.
 
         # ── Snowflake $n positional parameter → :param_n ────────────────────
         sql = re.sub(r'\$(\d+)\b', r':param_\1', sql)
@@ -251,14 +279,19 @@ class SnowflakeRuleEngine:
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
+                # Snowflake's bare NUMBER defaults to NUMBER(38,0); Databricks'
+                # bare DECIMAL defaults to DECIMAL(10,0) — must be explicit or
+                # precision is silently truncated.
                 'pattern': r'\bNUMBER\b(?!\s*\()',
-                'replacement': 'DECIMAL',
+                'replacement': 'DECIMAL(38,0)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
-            # BYTEINT → TINYINT
+            # BYTEINT → DECIMAL(38,0)  (Snowflake BYTEINT is a full-range integer
+            # alias for NUMBER(38,0), NOT a 1-byte type — Databricks TINYINT
+            # is a true 1-byte type (-128..127) and would overflow)
             {
                 'pattern': r'\bBYTEINT\b',
-                'replacement': 'TINYINT',
+                'replacement': 'DECIMAL(38,0)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             # FLOAT4 / FLOAT8 → DOUBLE
@@ -298,8 +331,8 @@ class SnowflakeRuleEngine:
             },
             # CHAR / CHARACTER (bare) → STRING
             {
-                'pattern': r'\bCHARACTER\b(?!\s*(?:_LENGTH|ISTICS|\()))',
-                'replacement': 'CHAR',
+                'pattern': r'\bCHARACTER\b(?!\s*(?:_LENGTH|ISTICS|\())',
+                'replacement': 'STRING',
                 'flags': re.IGNORECASE, 'priority': 8,
             },
             # VARBINARY → BINARY
@@ -395,8 +428,10 @@ class SnowflakeRuleEngine:
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             {
+                # Databricks INSTR has no 3-arg (start-position) overload;
+                # LOCATE(substr, str, start) does support a starting position.
                 'pattern': r'\bCHARINDEX\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'INSTR(\2, \1, \3)',
+                'replacement': r'LOCATE(\1, \2, \3)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             # POSITION(substr IN str) → LOCATE(substr, str)
@@ -417,16 +452,32 @@ class SnowflakeRuleEngine:
                 'replacement': r'ORD(',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
+            # REGEXP_LIKE(s, pat, flags) → s RLIKE '(?flags)' || pat
+            # Must be listed BEFORE the 2-arg rule (matched by higher priority)
+            # so the flags argument isn't swallowed into the pattern group.
+            {
+                'pattern': r"\bREGEXP_LIKE\s*\(([^,]+),\s*([^,]+),\s*'([a-zA-Z]+)'\s*\)",
+                'replacement': r"\1 RLIKE ('(?\3)' || \2)",
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
             # REGEXP_LIKE(s, pat) → s RLIKE pat
             {
                 'pattern': r'\bREGEXP_LIKE\s*\(([^,]+),\s*([^)]+)\)',
                 'replacement': r'\1 RLIKE \2',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
-            # REGEXP_SUBSTR(s, pat, pos, occ) → REGEXP_EXTRACT(s, pat, idx)
+            # REGEXP_SUBSTR(s, pat, pos, occ) — Snowflake's 4th arg is the match
+            # OCCURRENCE number, not a regex capture-group index (REGEXP_EXTRACT's
+            # 3rd arg). element_at(REGEXP_EXTRACT_ALL(...), occ) picks out the
+            # Nth whole match (1-based, matching Snowflake); the `pos` (start
+            # search position) argument has no direct Databricks equivalent and
+            # is dropped — flagged with a TODO.
             {
-                'pattern': r'\bREGEXP_SUBSTR\s*\(([^,]+),\s*([^,]+),\s*[^,]+,\s*([^)]+)\)',
-                'replacement': r'REGEXP_EXTRACT(\1, \2, \3)',
+                'pattern': r'\bREGEXP_SUBSTR\s*\(([^,]+),\s*([^,]+),\s*([^,]+),\s*([^)]+)\)',
+                'replacement': (
+                    r'element_at(REGEXP_EXTRACT_ALL(\1, \2), \4) '
+                    r'/* TODO: start position \3 not applied; searches from the beginning */'
+                ),
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             {
@@ -512,12 +563,10 @@ class SnowflakeRuleEngine:
                 'replacement': r'POWER(\1, 2)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
-            # CBRT(n) → POWER(n, 1.0/3)
-            {
-                'pattern': r'\bCBRT\s*\(([^)]+)\)',
-                'replacement': r'POWER(\1, 1.0/3)',
-                'flags': re.IGNORECASE, 'priority': 9,
-            },
+            # NOTE: CBRT — Databricks/Spark has a native CBRT() function that
+            # correctly handles negative inputs (CBRT(-8) = -2). Previously
+            # rewritten to POWER(n, 1.0/3), which returns NaN for negative n.
+            # Left unchanged; no rule needed.
             # HAVERSINE(lat1, lon1, lat2, lon2) → comment
             {
                 'pattern': r'\bHAVERSINE\s*\(([^)]+)\)',
@@ -596,102 +645,157 @@ class SnowflakeRuleEngine:
             # DATEADD(part, n, d) → appropriate Databricks form
             # For DAY → date_add; for MONTH → add_months; for YEAR → add_months * 12
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:DAY|DD)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:DAY|DD)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'date_add(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:MONTH|MM)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:MONTH|MM)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'add_months(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'add_months(\2, (\1) * 12)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:HOUR|HH)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(\2 + INTERVAL \1 HOURS)',
+                # `INTERVAL n HOURS` requires n to be a constant; multiplying an
+                # interval literal by an arbitrary expression works for both
+                # literals and columns (Spark day-time interval arithmetic).
+                'pattern': r'\bDATEADD\s*\(\s*(?:HOUR|HH)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 HOUR * (\1)))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:MINUTE|MI)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(\2 + INTERVAL \1 MINUTES)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:MINUTE|MI)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 MINUTE * (\1)))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:SECOND|SS)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(\2 + INTERVAL \1 SECONDS)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:SECOND|SS)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 SECOND * (\1)))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:WEEK|WK)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:WEEK|WK)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'date_add(\2, (\1) * 7)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEADD\s*\(\s*(?:QUARTER|QQ)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEADD\s*\(\s*(?:QUARTER|QQ)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'add_months(\2, (\1) * 3)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
-            # TIMESTAMPADD — alias of DATEADD
+            # TIMESTAMPADD — alias of DATEADD (same set of explicit per-unit
+            # rules; the old generic fallback naively appended "S" to whatever
+            # unit token was passed, e.g. QUARTER -> "QUARTERS", which isn't a
+            # valid Spark interval unit and is a hard syntax error)
             {
-                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:DAY|DD)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:DAY|DD)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'date_add(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:MONTH|MM)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:WEEK|WK)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'date_add(\2, (\1) * 7)',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:MONTH|MM)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'add_months(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bTIMESTAMPADD\s*\(\s*(\w+)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(\3 + INTERVAL \2 \1S)',
-                'flags': re.IGNORECASE, 'priority': 9,
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:QUARTER|QQ)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'add_months(\2, (\1) * 3)',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'add_months(\2, (\1) * 12)',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:HOUR|HH)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 HOUR * (\1)))',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:MINUTE|MI)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 MINUTE * (\1)))',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bTIMESTAMPADD\s*\(\s*(?:SECOND|SS)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(\2 + (INTERVAL 1 SECOND * (\1)))',
+                'flags': re.IGNORECASE, 'priority': 10,
             },
             # DATEDIFF(part, d1, d2) — Snowflake returns d2 - d1
             # Databricks DATEDIFF(end, start) for days; DATEDIFF(part, start, end) otherwise
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:DAY|DD)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:DAY|DD)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'datediff(\2, \1)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:MONTH|MM)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'CAST(FLOOR(MONTHS_BETWEEN(\2, \1)) AS INT)',
+                # Snowflake DATEDIFF(MONTH,...) counts calendar month-boundary
+                # crossings (year*12 + month delta), NOT prorated elapsed time —
+                # MONTHS_BETWEEN prorates by day-of-month and gives off-by-one
+                # results near month edges (e.g. Jan 31 -> Feb 1 should be 1,
+                # not 0).
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:MONTH|MM)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'((YEAR(\2) - YEAR(\1)) * 12 + (MONTH(\2) - MONTH(\1)))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'FLOOR(MONTHS_BETWEEN(\2, \1) / 12)',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:QUARTER|QQ)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'((YEAR(\2) - YEAR(\1)) * 4 + (QUARTER(\2) - QUARTER(\1)))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:HOUR|HH)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1)) / 3600',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'(YEAR(\2) - YEAR(\1))',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:MINUTE|MI)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1)) / 60',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:HOUR|HH)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'CAST(FLOOR((UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1)) / 3600) AS BIGINT)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:SECOND|SS)\s*,\s*([^,]+),\s*([^)]+)\)',
-                'replacement': r'(UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1))',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:MINUTE|MI)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'CAST(FLOOR((UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1)) / 60) AS BIGINT)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
-                'pattern': r'\bDATEDIFF\s*\(\s*(?:WEEK|WK)\s*,\s*([^,]+),\s*([^)]+)\)',
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:SECOND|SS)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
+                'replacement': r'CAST((UNIX_TIMESTAMP(\2) - UNIX_TIMESTAMP(\1)) AS BIGINT)',
+                'flags': re.IGNORECASE, 'priority': 10,
+            },
+            {
+                'pattern': r'\bDATEDIFF\s*\(\s*(?:WEEK|WK)\s*,\s*((?:[^,()]|\([^()]*\))+?),\s*((?:[^()]|\([^()]*\))+)\)',
                 'replacement': r'FLOOR(datediff(\2, \1) / 7)',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
-            # TO_CHAR(d, fmt) / TO_VARCHAR(d, fmt) → DATE_FORMAT(d, fmt)
+            # TO_CHAR(d, fmt) / TO_VARCHAR(d, fmt) → DATE_FORMAT(d, fmt), with the
+            # format string's tokens translated from Snowflake's vocabulary
+            # (YYYY, DD, HH24, MI, ...) to Databricks/Java's (yyyy, dd, HH, mm,
+            # ...) — a bare function rename left the original Snowflake tokens
+            # in place, which are mostly not valid (or mean something different)
+            # under Java's date-pattern syntax.
             {
+                'pattern': r"\bTO_(?:CHAR|VARCHAR)\s*\(([^,]+),\s*'([^']*)'\s*\)",
+                'replacement': lambda m: (
+                    f"DATE_FORMAT({m.group(1)}, '{SnowflakeRuleEngine._translate_date_format_tokens(m.group(2))}')"
+                ),
+                'flags': re.IGNORECASE, 'priority': 11,
+            },
+            {
+                # Non-literal (variable/column) format string — tokens can't be
+                # translated statically; flag for manual review.
                 'pattern': r'\bTO_(?:CHAR|VARCHAR)\s*\(([^,]+),\s*([^)]+)\)',
-                'replacement': r'DATE_FORMAT(\1, \2)',
+                'replacement': r'DATE_FORMAT(\1, \2) /* TODO: verify format tokens are Databricks (Java) style, not Snowflake style */',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             # TO_CHAR(x) → CAST(x AS STRING)
@@ -705,6 +809,95 @@ class SnowflakeRuleEngine:
             {
                 'pattern': r"\bDATE_TRUNC\s*\(\s*(YEAR|MONTH|DAY|WEEK|HOUR|MINUTE|SECOND|QUARTER)\s*,\s*([^)]+)\)",
                 'replacement': r"DATE_TRUNC('\1', \2)",
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            # EXTRACT(part FROM ts) / DATE_PART(part, ts) → dedicated Databricks unit function,
+            # matching the same convention already used for BigQuery/Trino sources.
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*YEAR\s+FROM\s+([^)]+)\)',
+                'replacement': r'YEAR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*QUARTER\s+FROM\s+([^)]+)\)',
+                'replacement': r'QUARTER(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*MONTH\s+FROM\s+([^)]+)\)',
+                'replacement': r'MONTH(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*WEEK\s+FROM\s+([^)]+)\)',
+                'replacement': r'WEEKOFYEAR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*DAY\s+FROM\s+([^)]+)\)',
+                'replacement': r'DAY(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                # Snowflake DAYOFWEEK/DOW is 0-6 (Sun=0); Databricks DAYOFWEEK()
+                # is 1-7 (Sun=1) — subtract 1 to match Snowflake's numbering.
+                'pattern': r'\bEXTRACT\s*\(\s*(?:DAYOFWEEK|DOW)\s+FROM\s+([^)]+)\)',
+                'replacement': r'(DAYOFWEEK(\1) - 1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*(?:DAYOFYEAR|DOY)\s+FROM\s+([^)]+)\)',
+                'replacement': r'DAYOFYEAR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*HOUR\s+FROM\s+([^)]+)\)',
+                'replacement': r'HOUR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*MINUTE\s+FROM\s+([^)]+)\)',
+                'replacement': r'MINUTE(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r'\bEXTRACT\s*\(\s*SECOND\s+FROM\s+([^)]+)\)',
+                'replacement': r'SECOND(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?YEAR'?\s*,\s*([^)]+)\)",
+                'replacement': r'YEAR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?QUARTER'?\s*,\s*([^)]+)\)",
+                'replacement': r'QUARTER(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?MONTH'?\s*,\s*([^)]+)\)",
+                'replacement': r'MONTH(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?DAY'?\s*,\s*([^)]+)\)",
+                'replacement': r'DAY(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?HOUR'?\s*,\s*([^)]+)\)",
+                'replacement': r'HOUR(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?MINUTE'?\s*,\s*([^)]+)\)",
+                'replacement': r'MINUTE(\1)',
+                'flags': re.IGNORECASE, 'priority': 9,
+            },
+            {
+                'pattern': r"\bDATE_PART\s*\(\s*'?SECOND'?\s*,\s*([^)]+)\)",
+                'replacement': r'SECOND(\1)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             # CONVERT_TIMEZONE(src_tz, tgt_tz, ts) → CONVERT_TIMEZONE(tgt_tz, src_tz, ts)
@@ -725,11 +918,37 @@ class SnowflakeRuleEngine:
 
             # ══ AGGREGATE FUNCTIONS ══════════════════════════════════════════
 
+            # LISTAGG(col, delim) WITHIN GROUP (ORDER BY x [ASC|DESC]) — must be
+            # handled BEFORE the plain 2-arg rule below (higher priority), or
+            # the generic rule stops at the first ')' and leaves a dangling,
+            # invalid "WITHIN GROUP (...)" clause attached to CONCAT_WS/COLLECT_LIST.
+            {
+                'pattern': (
+                    r'\bLISTAGG\s*\(\s*([^,]+?)\s*,\s*([^)]+?)\)\s*'
+                    r'WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^)]+?)\s*\)'
+                ),
+                'replacement': lambda m: SnowflakeRuleEngine._listagg_ordered(
+                    m.group(1), m.group(2), m.group(3)
+                ),
+                'flags': re.IGNORECASE, 'priority': 11,
+            },
             # LISTAGG(col, delim) → CONCAT_WS(delim, COLLECT_LIST(col))
             {
                 'pattern': r'\bLISTAGG\s*\(([^,]+),\s*([^)]+)\)',
                 'replacement': r'CONCAT_WS(\2, COLLECT_LIST(\1))',
                 'flags': re.IGNORECASE, 'priority': 9,
+            },
+            # ARRAY_AGG(col) WITHIN GROUP (ORDER BY x [ASC|DESC]) — must be
+            # handled before the bare-rename rule below, same reasoning as LISTAGG.
+            {
+                'pattern': (
+                    r'\bARRAY_AGG\s*\(\s*([^)]+?)\s*\)\s*'
+                    r'WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^)]+?)\s*\)'
+                ),
+                'replacement': lambda m: SnowflakeRuleEngine._ordered_collect_expr(
+                    m.group(1), m.group(2)
+                ),
+                'flags': re.IGNORECASE, 'priority': 11,
             },
             # ARRAY_AGG(col) → collect_list(col)
             {
@@ -855,12 +1074,12 @@ class SnowflakeRuleEngine:
 
             # ══ SEMI-STRUCTURED / JSON FUNCTIONS ════════════════════════════
 
-            # PARSE_JSON(s) → from_json(s, schema) — schema must be supplied by user
-            {
-                'pattern': r'\bPARSE_JSON\s*\(',
-                'replacement': r'from_json( /* TODO: provide schema string as second arg, e.g. from_json(col, \'MAP<STRING,STRING>\') */ ',
-                'flags': re.IGNORECASE, 'priority': 9,
-            },
+            # NOTE: PARSE_JSON(s) — Databricks has a native PARSE_JSON(string)
+            # function (DBR 15.3+) that returns VARIANT, matching Snowflake's
+            # PARSE_JSON semantics directly. Previously rewritten to
+            # from_json(s, <TODO schema>) which is guaranteed to fail to parse
+            # since the required schema argument was never supplied. Left
+            # unchanged — no rule needed.
             # GET(obj, key) → get_json_object(obj, '$.key')
             {
                 'pattern': r"\bGET\s*\(([^,]+),\s*'([^']+)'\s*\)",
@@ -952,8 +1171,11 @@ class SnowflakeRuleEngine:
             },
             # TO_JSON(variant) → TO_JSON(struct_col) — same name, keep with note
             {
-                'pattern': r'\bAS_VARCHAR\s*\(',
-                'replacement': r'CAST(',
+                # CAST(...) requires "AS type" — a bare rename of the opening
+                # token left invalid syntax; capture the argument (allowing one
+                # level of nested parens) and append AS STRING explicitly.
+                'pattern': r'\bAS_VARCHAR\s*\(\s*((?:[^()]|\([^()]*\))*)\s*\)',
+                'replacement': r'CAST(\1 AS STRING)',
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             # TO_ARRAY(val) → ARRAY(val)
@@ -1032,10 +1254,17 @@ class SnowflakeRuleEngine:
 
             # ══ DATA GENERATION ══════════════════════════════════════════════
 
-            # SEQ1/2/4/8() → MONOTONICALLY_INCREASING_ID()
+            # SEQ1/2/4/8() → MONOTONICALLY_INCREASING_ID(), flagged: Snowflake's
+            # SEQx generates a dense, gapless, deterministic sequence;
+            # monotonically_increasing_id() only guarantees monotonic + unique,
+            # not contiguous, and its values depend on partitioning — not a
+            # drop-in replacement wherever exact sequential values matter.
             {
                 'pattern': r'\bSEQ[1248]\s*\(\s*\)',
-                'replacement': r'MONOTONICALLY_INCREASING_ID()',
+                'replacement': (
+                    r'MONOTONICALLY_INCREASING_ID() /* TODO: not gapless/deterministic like '
+                    r'Snowflake SEQx; use ROW_NUMBER() OVER (ORDER BY <deterministic key>) instead */'
+                ),
                 'flags': re.IGNORECASE, 'priority': 9,
             },
             # UUID_STRING() → UUID()
@@ -1059,12 +1288,10 @@ class SnowflakeRuleEngine:
                 'replacement': r'CREATE TABLE /* NOTE: Snowflake TRANSIENT TABLE; no direct Databricks equivalent */ ',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
-            # CREATE TEMPORARY TABLE → CREATE TEMPORARY VIEW
-            {
-                'pattern': r'\bCREATE\s+(?:OR\s+REPLACE\s+)?TEMPORARY\s+TABLE\b',
-                'replacement': r'CREATE OR REPLACE TEMPORARY VIEW',
-                'flags': re.IGNORECASE, 'priority': 10,
-            },
+            # NOTE: CREATE TEMPORARY TABLE — Databricks supports real temporary
+            # tables natively; previously rewritten to TEMPORARY VIEW, which
+            # can't be the target of INSERT/UPDATE/DELETE and breaks any script
+            # that writes into the temp table afterward. Left unchanged.
             # CLUSTER BY → OPTIMIZE + ZORDER comment
             {
                 'pattern': r'\bCLUSTER\s+BY\s*\(([^)]+)\)',
@@ -1078,8 +1305,14 @@ class SnowflakeRuleEngine:
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             {
+                # Snowflake's OFFSET is SECONDS in the past, not a table
+                # version number — treating it as one is a category error.
+                # Convert to a timestamp and use TIMESTAMP AS OF instead.
                 'pattern': r'\bAT\s*\(\s*OFFSET\s*=>\s*([^)]+)\)',
-                'replacement': r'VERSION AS OF \1 /* NOTE: offset-based time travel approximated; verify version number */',
+                'replacement': (
+                    r"TIMESTAMP AS OF (current_timestamp() + (INTERVAL 1 SECOND * (\1)))"
+                    r" /* NOTE: Snowflake OFFSET is seconds relative to now (negative = past), converted to a timestamp */"
+                ),
                 'flags': re.IGNORECASE, 'priority': 10,
             },
             # BEFORE(statement => ...) / BEFORE(offset => ...)
@@ -1157,13 +1390,12 @@ class SnowflakeRuleEngine:
                 'replacement': r'SELECT /* TODO: move LIMIT \1 to end of query */',
                 'flags': re.IGNORECASE, 'priority': 10,
             },
-            # Snowflake double-colon cast ::type → CAST(expr AS type)
-            # Handled paren-aware in apply_function_translation; simple suffix:
-            {
-                'pattern': r'::(FLOAT|DOUBLE|INT|INTEGER|BIGINT|BOOLEAN|DATE|TIMESTAMP|STRING|VARCHAR|TEXT|BINARY)\b',
-                'replacement': lambda m: f' /* ::{m.group(1)} cast; wrap outer expr in CAST(... AS {m.group(1)}) */',
-                'flags': re.IGNORECASE, 'priority': 8,
-            },
+            # NOTE: Snowflake double-colon cast (::type) is handled paren-aware
+            # by _replace_double_colon_casts() in apply_function_translation.
+            # A rule was previously defined here too, but since apply_rules()
+            # runs BEFORE apply_function_translation(), it fired first and
+            # replaced the cast with a dead comment, deleting it before the
+            # real handler ever saw it. Do not re-add a ::TYPE rule here.
         ]
 
         builtins.sort(key=lambda r: r.get('priority', 0), reverse=True)
@@ -1259,6 +1491,66 @@ class SnowflakeRuleEngine:
                 start = i + 1
         parts.append(text[start:].strip())
         return [p for p in parts if p]
+
+    @staticmethod
+    def _ordered_collect_expr(col: str, order_expr: str, delim: Optional[str] = None) -> str:
+        """
+        Build a Databricks equivalent of `COLLECT_LIST(col) WITHIN GROUP (ORDER BY order_expr)`
+        (Spark has no such clause). Sorts a collected array of (key, value) structs
+        and optionally joins it with a delimiter (for LISTAGG).
+        ARRAY_SORT's default comparator sorts ascending by the struct's leading
+        field, so DESC is handled by reversing the sorted result.
+        """
+        order_expr = order_expr.strip()
+        descending = bool(re.search(r'\bDESC\b', order_expr, re.IGNORECASE))
+        sort_key = re.sub(
+            r'\s+(?:ASC|DESC)?\s*(?:NULLS\s+(?:FIRST|LAST))?\s*$', '', order_expr, flags=re.IGNORECASE
+        ).strip()
+        sorted_arr = f"ARRAY_SORT(COLLECT_LIST(STRUCT({sort_key} AS _k, {col} AS _v)))"
+        if descending:
+            sorted_arr = f"ARRAY_REVERSE({sorted_arr})"
+        values = f"TRANSFORM({sorted_arr}, _s -> _s._v)"
+        if delim is not None:
+            return f"CONCAT_WS({delim}, {values})"
+        return values
+
+    @staticmethod
+    def _listagg_ordered(col: str, delim: str, order_expr: str) -> str:
+        return SnowflakeRuleEngine._ordered_collect_expr(col.strip(), order_expr, delim.strip())
+
+    # Longest-token-first so e.g. 'HH24' is matched before the shorter 'HH'.
+    _DATE_FORMAT_TOKEN_MAP = [
+        ('YYYY', 'yyyy'), ('YYY', 'yyy'), ('YY', 'yy'),
+        ('MONTH', 'MMMM'), ('MON', 'MMM'), ('MM', 'MM'),
+        ('DDD', 'DDD'), ('DD', 'dd'),
+        ('DY', 'EEE'), ('DAY', 'EEEE'),
+        ('HH24', 'HH'), ('HH12', 'hh'), ('HH', 'hh'),
+        ('MI', 'mm'), ('SS', 'ss'),
+        ('FF9', 'SSSSSSSSS'), ('FF6', 'SSSSSS'), ('FF3', 'SSS'), ('FF', 'SSS'),
+        ('AM', 'a'), ('PM', 'a'),
+        ('TZH:TZM', 'XXX'), ('TZH', 'XX'),
+    ]
+
+    @staticmethod
+    def _translate_date_format_tokens(fmt: str) -> str:
+        """Translate Snowflake TO_CHAR/TO_VARCHAR date-format tokens (YYYY, DD,
+        HH24, MI, ...) into Databricks/Java date-pattern tokens (yyyy, dd, HH,
+        mm, ...). Longer tokens are matched first to avoid partial overlaps."""
+        out = []
+        i = 0
+        upper = fmt.upper()
+        while i < len(fmt):
+            matched = False
+            for src, dst in SnowflakeRuleEngine._DATE_FORMAT_TOKEN_MAP:
+                if upper.startswith(src, i):
+                    out.append(dst)
+                    i += len(src)
+                    matched = True
+                    break
+            if not matched:
+                out.append(fmt[i])
+                i += 1
+        return "".join(out)
 
     # ── apply_rules ──────────────────────────────────────────────────────────
 
@@ -1500,20 +1792,21 @@ class SnowflakeRuleEngine:
                 f"  SELECT {m.group('select')},\n"
                 f"    ROW_NUMBER() OVER ({m.group('over')}) AS _rn\n"
                 f"  FROM {m.group('from')}\n"
-                ") _qualify_wrap\nWHERE _rn = {m.group('n')}"
+                f") _qualify_wrap\nWHERE _rn = {m.group('n')}"
             )
         sql = _rewrite_qualify_full(sql)
 
         # ── Column / DDL type name normalisation ─────────────────────────────
-        sql = re.sub(r'\bNUMBER\b(?!\s*\()', 'DECIMAL', sql, flags=re.IGNORECASE)
+        sql = re.sub(r'\bNUMBER\b(?!\s*\()', 'DECIMAL(38,0)', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bFLOAT4\b', 'DOUBLE', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bFLOAT8\b', 'DOUBLE', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bDOUBLE\s+PRECISION\b', 'DOUBLE', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bDECFLOAT\b', 'DECIMAL(38, 18)', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bVARBINARY\b', 'BINARY', sql, flags=re.IGNORECASE)
-        sql = re.sub(r'\bBYTEINT\b', 'TINYINT', sql, flags=re.IGNORECASE)
+        sql = re.sub(r'\bBYTEINT\b', 'DECIMAL(38,0)', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bTIMESTAMP_LTZ\b', 'TIMESTAMP', sql, flags=re.IGNORECASE)
-        sql = re.sub(r'\bDATETIME\b(?!\s*\()', 'TIMESTAMP', sql, flags=re.IGNORECASE)
+        # Snowflake DATETIME is timezone-naive; Databricks TIMESTAMP is timezone-aware.
+        sql = re.sub(r'\bDATETIME\b(?!\s*\()', 'TIMESTAMP_NTZ', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\bBOOL\b', 'BOOLEAN', sql, flags=re.IGNORECASE)
 
         # INTEGER → INT (stand-alone DDL contexts)

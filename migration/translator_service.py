@@ -38,7 +38,7 @@ BASE_DIR = os.path.dirname(__file__)
 
 PROVIDER_MODEL_OPTIONS: Dict[str, List[str]] = {
     "OpenAI": ["gpt-5-nano", "gpt-5-mini", "gpt-4.1-mini", "gpt-4.1"],
-    "Gemini": ["gemini-2.5-flash", "gemini-2.5-pro"],
+    "Gemini": ["gemini-3.6-flash", "gemini-3.1-pro-preview"],
     "Claude": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest", "claude-3-opus-latest"],
 }
 
@@ -231,6 +231,34 @@ class TranslatorService:
         return stats.copy()
 
     @staticmethod
+    def _looks_like_bigquery_sql(sql: str) -> bool:
+        if not sql:
+            return False
+        bq_markers = [
+            r'\bSAFE_CAST\b',
+            r'\bFLOAT64\b',
+            r'\bINT64\b',
+            r'\bBOOL\b',
+            r'\bSTRUCT\s*\(',
+            r'\bARRAY_AGG\b',
+            r'\bGENERATE_DATE_ARRAY\b',
+            r'@\w+',
+            r'`[^`]+`',
+        ]
+        return any(re.search(pattern, sql, re.IGNORECASE) for pattern in bq_markers)
+
+    @staticmethod
+    def _get_rule_engine_for_source(source_engine: str, components: Dict[str, Any], sql: Optional[str] = None) -> Any:
+        source_key = (source_engine or "").strip().lower()
+        if sql and TranslatorService._looks_like_bigquery_sql(sql):
+            return components["rule_engine"]
+        if source_key == "snowflake":
+            return components["snowflake_rule_engine"]
+        if source_key == "trino":
+            return components["trino_rule_engine"]
+        return components["rule_engine"]
+
+    @staticmethod
     def _resolve_api_key(explicit_key: Optional[str], env_key: str) -> str:
         api_key = (explicit_key or "").strip() or os.environ.get(env_key, "").strip()
         return api_key
@@ -301,7 +329,168 @@ class TranslatorService:
         return raw
 
     @staticmethod
+    def _mysql_tz_correction_minutes() -> int:
+        """
+        Minutes to subtract from Databricks TIMESTAMP columns whose data originated
+        from a MySQL `TIMESTAMP` column (via Trino). MySQL's `TIMESTAMP` type silently
+        converts a literal wall-clock value to a UTC instant based on the MySQL
+        server's own timezone, while Databricks stores whatever literal value it was
+        given with no such conversion. Trino faithfully surfaces MySQL's converted
+        (correct) instant; Databricks does not, so the two disagree by exactly the
+        MySQL server's UTC offset. This does not touch the client's MySQL schema --
+        it only corrects what this tool displays/compares for Databricks results, and
+        is opt-in (see `_should_apply_mysql_tz_correction`) so it never touches
+        Databricks data that isn't actually sourced from a MySQL TIMESTAMP column.
+        Configure via MYSQL_SOURCE_TZ_OFFSET_MINUTES (e.g. 330 for IST); 0 disables it.
+        """
+        try:
+            return int(os.getenv("MYSQL_SOURCE_TZ_OFFSET_MINUTES", "0") or "0")
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _should_apply_mysql_tz_correction(source_engine: Optional[str]) -> bool:
+        return (source_engine or "").strip().lower() == "trino"
+
+    @staticmethod
+    def find_query_tables(sql: str, dialect: str = "databricks") -> List[Tuple[str, str, str]]:
+        """Return the distinct (catalog, schema, table) triples referenced in `sql`.
+        Used to look up which referenced tables' columns need MySQL-timezone correction."""
+        try:
+            tree = sqlglot.parse_one(sql, read=dialect)
+        except Exception:
+            return []
+        seen: Dict[Tuple[str, str, str], None] = {}
+        for table in tree.find_all(sqlglot.exp.Table):
+            catalog = table.catalog or ""
+            db = table.db or ""
+            name = table.name or ""
+            if catalog and db and name:
+                seen.setdefault((catalog, db, name), None)
+        return list(seen.keys())
+
+    @classmethod
+    def resolve_mysql_tz_table_columns(
+        cls,
+        conn: Any,
+        source_engine: Optional[str],
+        sql: str,
+    ) -> Dict[str, Tuple[List[str], List[str]]]:
+        """
+        Query `conn` (the Trino DB-API source connection) for the column types of every
+        table referenced in `sql`, returning {fqn: (all_columns, timestamp_columns)} for
+        use with `apply_mysql_tz_source_correction`. Shared by every code path that sends
+        a Trino-translated query to Databricks (the Query Converter's direct execute, and
+        Data Validation's CREATE TABLE AS materialization), so the correction is applied
+        consistently everywhere, not just wherever `execute_databricks_sql` is used.
+        Returns {} if not applicable (wrong source engine, correction disabled, no
+        connection, or lookup fails) -- callers should treat that as "nothing to correct".
+        """
+        if not cls._should_apply_mysql_tz_correction(source_engine):
+            return {}
+        if not cls._mysql_tz_correction_minutes():
+            return {}
+        if conn is None:
+            return {}
+        try:
+            tables = cls.find_query_tables(sql)
+            result: Dict[str, Tuple[List[str], List[str]]] = {}
+            for catalog, db, table in tables:
+                fqn = f"{catalog}.{db}.{table}"
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        f"SELECT column_name, data_type FROM {catalog}.information_schema.columns "
+                        f"WHERE table_schema = '{db}' AND table_name = '{table}' "
+                        f"ORDER BY ordinal_position"
+                    )
+                    rows = cursor.fetchall()
+                finally:
+                    cursor.close()
+                all_columns = [row[0] for row in rows]
+                timestamp_columns = [row[0] for row in rows if str(row[1]).lower().startswith("timestamp")]
+                if all_columns and timestamp_columns:
+                    result[fqn.lower()] = (all_columns, timestamp_columns)
+            return result
+        except Exception:
+            return {}
+
+    @staticmethod
+    def apply_mysql_tz_source_correction(
+        sql: str,
+        table_column_info: Dict[str, Tuple[List[str], List[str]]],
+        offset_minutes: int,
+        dialect: str = "databricks",
+    ) -> str:
+        """
+        Rewrite `sql` so that, for every table in `table_column_info` (keyed by lowercase
+        "catalog.schema.table", value is (all_column_names, columns_needing_correction)),
+        the flagged columns are corrected by subtracting `offset_minutes` right where the
+        table is read -- before any expression in the rest of the query (SELECT list,
+        WHERE, functions like UNIX_TIMESTAMP, etc.) can use the uncorrected value. This
+        fixes both direct column display AND anything computed from the column, unlike a
+        result-level correction.
+
+        Uses an explicit column list (not `SELECT * REPLACE`/`EXCEPT`, which Databricks
+        SQL does not support) so the generated SQL is guaranteed valid:
+
+        Example: FROM mysql.demo_db.employee_test  (all_columns=[id, last_login],
+        correct=[last_login])  becomes:
+            FROM (
+              SELECT id, last_login - INTERVAL '330' MINUTE AS last_login
+              FROM mysql.demo_db.employee_test
+            ) AS employee_test
+        """
+        if not table_column_info or not offset_minutes:
+            return sql
+        try:
+            tree = sqlglot.parse_one(sql, read=dialect)
+        except Exception:
+            return sql
+
+        def _fqn(table: sqlglot.exp.Table) -> str:
+            parts = [p for p in (table.catalog, table.db, table.name) if p]
+            return ".".join(parts).lower()
+
+        changed = False
+        for table in list(tree.find_all(sqlglot.exp.Table)):
+            info = table_column_info.get(_fqn(table))
+            if not info:
+                continue
+            all_columns, correct_columns = info
+            if not all_columns:
+                continue
+            correct_set = set(correct_columns)
+            select_exprs = []
+            for col in all_columns:
+                if col in correct_set:
+                    select_exprs.append(
+                        sqlglot.exp.alias_(
+                            sqlglot.exp.Sub(
+                                this=sqlglot.exp.column(col),
+                                expression=sqlglot.exp.Interval(
+                                    this=sqlglot.exp.Literal.string(str(offset_minutes)),
+                                    unit=sqlglot.exp.Var(this="MINUTE"),
+                                ),
+                            ),
+                            col,
+                        )
+                    )
+                else:
+                    select_exprs.append(sqlglot.exp.column(col))
+            inner = sqlglot.exp.select(*select_exprs).from_(table.copy())
+            alias_name = table.alias_or_name or table.name
+            corrected = sqlglot.exp.Subquery(this=inner, alias=sqlglot.exp.TableAlias(this=sqlglot.exp.to_identifier(alias_name)))
+            table.replace(corrected)
+            changed = True
+
+        if not changed:
+            return sql
+        return tree.sql(dialect=dialect)
+
+    @classmethod
     def _extract_rows(
+        cls,
         statement_resp: Dict[str, Any],
         max_rows: int,
         http_client: Optional[httpx.Client] = None,
@@ -310,6 +499,10 @@ class TranslatorService:
         manifest = statement_resp.get("manifest", {}) or {}
         schema = (manifest.get("schema", {}) or {}).get("columns", []) or []
         columns = [str(col.get("name", "")) for col in schema]
+        complex_type_indexes = {
+            i for i, col in enumerate(schema)
+            if str(col.get("type_name", "")).upper() in ("ARRAY", "STRUCT", "MAP")
+        }
 
         result = statement_resp.get("result", {}) or {}
         data_array = result.get("data_array", []) or []
@@ -331,10 +524,18 @@ class TranslatorService:
                     elif isinstance(link_payload, list):
                         data_array = link_payload
 
+        def _coerce(i: int, value: Any) -> Any:
+            if i in complex_type_indexes and isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return value
+            return value
+
         sample_limit = min(max_rows, 10)
         trimmed_rows = data_array[:sample_limit]
         rows = [
-            {columns[i] if i < len(columns) else f"col_{i}": value for i, value in enumerate(row)}
+            {columns[i] if i < len(columns) else f"col_{i}": _coerce(i, value) for i, value in enumerate(row)}
             for row in trimmed_rows
         ]
 
@@ -349,7 +550,13 @@ class TranslatorService:
             "truncated": len(data_array) > sample_limit or (isinstance(total_rows, int) and total_rows > sample_limit),
         }
 
-    def execute_databricks_sql(self, sql: str, databricks_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_databricks_sql(
+        self,
+        sql: str,
+        databricks_cfg: Dict[str, Any],
+        source_engine: Optional[str] = None,
+        mysql_tz_table_columns: Optional[Dict[str, Tuple[List[str], List[str]]]] = None,
+    ) -> Dict[str, Any]:
         host = self._normalize_databricks_host(databricks_cfg.get("host", ""))
         token = (databricks_cfg.get("token") or "").strip()
         warehouse_id = self._normalize_warehouse_id(databricks_cfg.get("warehouse_id", ""))
@@ -363,6 +570,11 @@ class TranslatorService:
         max_rows = int(databricks_cfg.get("max_rows", 200) or 200)
         catalog = (databricks_cfg.get("catalog") or "").strip() or None
         schema = (databricks_cfg.get("schema") or "").strip() or None
+
+        if mysql_tz_table_columns and self._should_apply_mysql_tz_correction(source_engine):
+            offset_minutes = self._mysql_tz_correction_minutes()
+            if offset_minutes:
+                sql = self.apply_mysql_tz_source_correction(sql, mysql_tz_table_columns, offset_minutes)
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -565,7 +777,17 @@ class TranslatorService:
                     "error": message,
                 }
 
-            extracted = self._extract_rows(statement_data, max_rows=max_rows, http_client=client, headers=headers)
+            # NOTE: no result-level timestamp correction here -- when mysql_tz_table_columns
+            # was provided, `sql` was already corrected at the source above, so the returned
+            # rows (including anything computed from the corrected columns, e.g.
+            # UNIX_TIMESTAMP(last_login)) are already correct. Applying a second correction
+            # here would double-subtract the offset.
+            extracted = self._extract_rows(
+                statement_data,
+                max_rows=max_rows,
+                http_client=client,
+                headers=headers,
+            )
 
             return {
                 "status": final_status,
@@ -616,14 +838,12 @@ class TranslatorService:
         components = self.components
         client = self.get_llm_client(provider, api_key) if use_llm else None
         source_key = (source_engine or "").strip().lower()
-        is_snowflake = source_key == "snowflake"
-        is_trino = source_key == "trino"
-        if is_snowflake:
-            rule_engine = components["snowflake_rule_engine"]
-        elif is_trino:
-            rule_engine = components["trino_rule_engine"]
-        else:
-            rule_engine = components["rule_engine"]
+        input_is_bigquery_like = self._looks_like_bigquery_sql(bq_sql)
+        is_snowflake = source_key == "snowflake" and not input_is_bigquery_like
+        is_trino = source_key == "trino" and not input_is_bigquery_like
+        if input_is_bigquery_like:
+            source_key = "bigquery"
+        rule_engine = self._get_rule_engine_for_source(source_key, components, bq_sql)
 
         stats: Dict[str, Any] = {
             "steps": [],
@@ -644,8 +864,88 @@ class TranslatorService:
             )
             return sql_text
 
+        def _simplify_hash_functions(sql_text: str) -> str:
+            # Collapse UNHEX(MD5(ENCODE(x, 'utf-8'))) -> MD5(x), and same for SHA2,
+            # so the result is a plain hex string instead of a binary value.
+            # Uses balanced-paren scanning (not regex) so it handles arbitrarily
+            # nested args like ENCODE(CONCAT(a, '|', CAST(b AS STRING)), 'utf-8').
+            def _match_paren(text: str, open_idx: int) -> int:
+                depth = 0
+                for i in range(open_idx, len(text)):
+                    if text[i] == '(':
+                        depth += 1
+                    elif text[i] == ')':
+                        depth -= 1
+                        if depth == 0:
+                            return i
+                return -1
+
+            def _split_top_level(text: str) -> list[str]:
+                args, depth, current = [], 0, []
+                for ch in text:
+                    if ch == '(':
+                        depth += 1
+                        current.append(ch)
+                    elif ch == ')':
+                        depth -= 1
+                        current.append(ch)
+                    elif ch == ',' and depth == 0:
+                        args.append(''.join(current).strip())
+                        current = []
+                    else:
+                        current.append(ch)
+                if current:
+                    args.append(''.join(current).strip())
+                return args
+
+            head_re = re.compile(r'\bUNHEX\s*\(\s*(MD5|SHA2)\s*\(\s*ENCODE\s*\(', re.IGNORECASE)
+            out = []
+            pos = 0
+            while True:
+                m = head_re.search(sql_text, pos)
+                if not m:
+                    out.append(sql_text[pos:])
+                    break
+                func = m.group(1).upper()
+                unhex_open = sql_text.index('(', m.start())
+                unhex_close = _match_paren(sql_text, unhex_open)
+                if unhex_close == -1:
+                    out.append(sql_text[pos:])
+                    break
+
+                inner = sql_text[unhex_open + 1:unhex_close]
+                inner_open = inner.find('(')
+                inner_close = _match_paren(inner, inner_open)
+                replacement = None
+                if inner_open != -1 and inner_close == len(inner.rstrip()) - 1:
+                    inner_args = _split_top_level(inner[inner_open + 1:inner_close])
+                    encode_expr = inner_args[0].strip() if inner_args else ""
+                    enc_m = re.match(r'(?i)^ENCODE\s*\(', encode_expr)
+                    if enc_m:
+                        enc_open = encode_expr.index('(')
+                        enc_close = _match_paren(encode_expr, enc_open)
+                        enc_args = _split_top_level(encode_expr[enc_open + 1:enc_close])
+                        if len(enc_args) == 2 and re.match(r"(?i)^'utf-?8'$", enc_args[1].strip()):
+                            original_arg = enc_args[0].strip()
+                            if func == "MD5":
+                                replacement = f"MD5({original_arg})"
+                            else:
+                                extra = ', '.join(a.strip() for a in inner_args[1:])
+                                replacement = f"SHA2({original_arg}, {extra})"
+
+                out.append(sql_text[pos:m.start()])
+                out.append(replacement if replacement is not None else sql_text[m.start():unhex_close + 1])
+                pos = unhex_close + 1
+
+            return ''.join(out)
+
         def _post_llm_cleanup(sql_text: str) -> str:
             sql_text = _repair_common_llm_mistakes(sql_text)
+            if is_trino:
+                cleaned = rule_engine.apply_rules(sql_text)
+                cleaned = rule_engine.apply_function_translation(cleaned)
+                cleaned = _simplify_hash_functions(cleaned)
+                return cleaned
             cleaned = rule_engine.apply_rules(sql_text)
             cleaned = rule_engine.apply_function_translation(cleaned)
             cleaned = _rewrite_struct_with_as(cleaned)
@@ -754,7 +1054,7 @@ class TranslatorService:
                 return False
             return len(n) < max(1200, int(len(o) * 0.35))
 
-        cache_version = ":v2026_05_15_struct_named_v2"
+        cache_version = ":v2026_09_08a_hash_and_engine_detect_fixes"
         source_key = (source_engine or "").strip().lower() or "bigquery"
         cache_suffix = f":shared:{source_key}{cache_version}"
         cached = components["cache"].get(bq_sql + cache_suffix)
@@ -779,7 +1079,8 @@ class TranslatorService:
         if is_transaction:
             stats["steps"].append("Multi-statement transaction detected (Databricks 2026)")
 
-        chunks = components["chunker"].chunk_query(normalized)
+        chunk_dialect = source_key if source_key in {"bigquery", "snowflake", "trino"} else "bigquery"
+        chunks = components["chunker"].chunk_query(normalized, dialect=chunk_dialect)
         stats["chunks"] = len(chunks)
         order = components["chunker"].get_translation_order(chunks)
         chunk_map = {c.id: c for c in chunks}
@@ -800,7 +1101,8 @@ class TranslatorService:
                 continue
 
             input_sql = rule_engine.apply_pre_ast_translation(chunk.sql) if (is_snowflake or is_trino) else chunk.sql
-            t, transpile_err = self._transpile_to_databricks(input_sql, source_engine)
+            transpile_source = source_key if source_key in {"bigquery", "snowflake", "trino"} else "bigquery"
+            t, transpile_err = self._transpile_to_databricks(input_sql, transpile_source)
             if transpile_err:
                 # Keep deterministic behavior robust for noisy/Jinja-heavy inputs:
                 # if direct sqlglot transpile fails, fall back to legacy AST/regex path.
@@ -816,11 +1118,15 @@ class TranslatorService:
                         f"Chunk {chunk_id}: sqlglot transpile failed -> legacy deterministic fallback applied"
                     )
 
-            t = rule_engine.apply_rules(t)
-            t = rule_engine.apply_function_translation(t)
-            t = ExpressionOptimizer.optimize(t)
-            if is_snowflake:
-                t = _rewrite_struct_with_as(t)
+            if is_trino:
+                t = rule_engine.apply_rules(t)
+                t = rule_engine.apply_function_translation(t)
+            else:
+                t = rule_engine.apply_rules(t)
+                t = rule_engine.apply_function_translation(t)
+                t = ExpressionOptimizer.optimize(t)
+                if is_snowflake:
+                    t = _rewrite_struct_with_as(t)
 
             # ── Per-chunk: only fix parse errors / validation failures ──
             # Proactive LLM migration is done ONCE on the full assembled
@@ -902,7 +1208,7 @@ class TranslatorService:
             prompt = LLMFixerPrompt.create_proactive_migration_prompt(assembled, llm_context)
             llm_result, err = self._llm_fix_with_prompt(prompt, client, model, provider=provider)
             if err:
-                stats["errors"].append(f"Proactive LLM migration failed: {err}")
+                stats["steps"].append(f"Proactive {provider} migration skipped: {err}")
             elif llm_result.strip():
                 if _is_suspiciously_short_llm_output(assembled, llm_result):
                     stats["errors"].append(

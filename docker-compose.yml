@@ -36,6 +36,7 @@ services:
       - TRINO_PORT=${TRINO_PORT:-8080}
       - TRINO_USER=${TRINO_USER:-admin}
       - TRINO_HTTP_SCHEME=${TRINO_HTTP_SCHEME:-http}
+      - MYSQL_SOURCE_TZ_OFFSET_MINUTES=${MYSQL_SOURCE_TZ_OFFSET_MINUTES:-0}
     ports:
       - "8000:8000"
     depends_on:
@@ -67,6 +68,8 @@ services:
     depends_on:
       - redis
       - trino
+    volumes:
+      - ..:/app
 
   frontend:
     build:
@@ -78,6 +81,6 @@ services:
       - VITE_API_URL=http://api:8000
     depends_on:
       - api
-#    volumes:
-#      - ./frontend:/app
-#      - /app/node_modules
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules

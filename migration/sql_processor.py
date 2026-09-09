@@ -39,7 +39,7 @@ class SQLPreprocessor:
         r"\bCOUNTIF\s*\(",
         r"\bAPPROX_QUANTILES\s*\(",
         r"\bGENERATE_(?:ARRAY|DATE_ARRAY|TIMESTAMP_ARRAY)\s*\(",
-        r"\bFORMAT_(?:DATE|TIMESTAMP|DATETIME)\s*\(",
+        r"\bFORMAT_(?:DATE|TIMESTAMP)\s*\(",
         r"\bPARSE_(?:DATE|TIMESTAMP|DATETIME)\s*\(",
         r"\bTO_JSON_STRING\s*\(",
         r"\bJSON_EXTRACT_(?:SCALAR|ARRAY)\s*\(",
@@ -75,16 +75,23 @@ class SQLPreprocessor:
 
     _TRINO_HINTS = [
         r"\bCARDINALITY\s*\(",
-        r"\bDATE_ADD\s*\(\s*'(?:day|month|year|hour|minute|second)'",
-        r"\bDATE_DIFF\s*\(\s*'(?:day|month|year|hour|minute|second)'",
+        r"\bDATE_ADD\s*\(\s*'(?:day|week|month|quarter|year|hour|minute|second)'",
+        r"\bDATE_DIFF\s*\(\s*'(?:day|week|month|quarter|year|hour|minute|second)'",
         r"\bFROM_UNIXTIME\s*\(",
         r"\bTO_UNIXTIME\s*\(",
+        r"\bFORMAT_DATETIME\s*\(",
+        r"\bDATE_PARSE\s*\(",
         r"\bUNNEST\s*\(",
         r"\bWITH\s+ORDINALITY\b",
         r"\bTRY\s*\(",
         r"\bIPADDRESS\b",
         r"\bUUID\b",
         r"\bJSON_PARSE\s*\(",
+        r"\bJSON_EXTRACT_(?:SCALAR|ARRAY)\s*\(",
+        r"\bTO_HEX\s*\(",
+        r"\bFROM_HEX\s*\(",
+        r"\bTO_UTF8\s*\(",
+        r"\bFROM_UTF8\s*\(",
     ]
 
     @staticmethod
@@ -313,10 +320,16 @@ class QueryChunker:
         self.max_chunk_size = max_chunk_size
         self._logger = logging.getLogger(__name__)
 
-    def chunk_query(self, sql: str) -> List[QueryChunk]:
+    def chunk_query(self, sql: str, dialect: str = "bigquery") -> List[QueryChunk]:
         """
         Parse SQL and split into CTE chunks + main query.
         Each chunk contains ONLY its own SQL, not the full query.
+
+        `dialect` must match the SQL's actual source dialect (bigquery,
+        snowflake, trino, ...) — re-serializing with the wrong dialect
+        silently rewrites source-native syntax (e.g. TRY_CAST/DOUBLE) into
+        that dialect's equivalents (e.g. BigQuery's SAFE_CAST/FLOAT64)
+        before translation even starts.
         """
         # Scripting blocks (DECLARE, IF/THEN, LOOP, etc.) cannot be chunked
         if SQLPreprocessor.is_scripting_block(sql):
@@ -336,7 +349,7 @@ class QueryChunker:
         # Use parse() instead of parse_one() so multi-statement SQL is not
         # silently truncated to the first statement.
         try:
-            trees = sqlglot.parse(sql, read="bigquery")
+            trees = sqlglot.parse(sql, read=dialect)
             trees = [t for t in trees if t is not None]
             if len(trees) == 0:
                 return [QueryChunk(id="main", sql=sql, dependencies=[], chunk_type="main")]
@@ -346,7 +359,7 @@ class QueryChunker:
                 for idx, stmt_tree in enumerate(trees):
                     chunks.append(QueryChunk(
                         id=f"stmt_{idx}",
-                        sql=stmt_tree.sql(dialect="bigquery", pretty=True),
+                        sql=stmt_tree.sql(dialect=dialect, pretty=True),
                         dependencies=[],
                         chunk_type="main",
                         original_node=stmt_tree,
@@ -367,7 +380,7 @@ class QueryChunker:
 
             # Safety check for single-tree parse: if regenerated SQL is
             # significantly shorter, the parser silently dropped content.
-            regenerated = tree.sql(dialect="bigquery", pretty=True)
+            regenerated = tree.sql(dialect=dialect, pretty=True)
             if len(sql.strip()) > 2000 and len(regenerated) < len(sql.strip()) * 0.6:
                 self._logger.warning(
                     "Single-tree AST regeneration lost content (%d -> %d chars). "
@@ -391,7 +404,7 @@ class QueryChunker:
                 cte_name = cte.alias
                 cte_names.append(cte_name)
                 # Get just the CTE body SQL (not the full WITH clause)
-                cte_body_sql = cte.this.sql(dialect="bigquery", pretty=True) if cte.this else ""
+                cte_body_sql = cte.this.sql(dialect=dialect, pretty=True) if cte.this else ""
                 if len(cte_body_sql) > self.max_chunk_size:
                     # Split oversized CTE on UNION ALL boundaries
                     sub_parts = self._split_on_union(cte_body_sql)
@@ -401,7 +414,7 @@ class QueryChunker:
                             cte_name, len(sub_parts), len(cte_body_sql),
                         )
                         for j, part in enumerate(sub_parts):
-                            part_deps = self._find_cte_dependencies(part, cte_names[:-1])
+                            part_deps = self._find_cte_dependencies(part, cte_names[:-1], dialect)
                             chunks.append(QueryChunk(
                                 id=f"cte_{i}_{cte_name}_part{j}",
                                 sql=part,
@@ -417,7 +430,7 @@ class QueryChunker:
                             "but cannot be split further",
                             cte_name, len(cte_body_sql), self.max_chunk_size,
                         )
-                deps = self._find_cte_dependencies(cte_body_sql, cte_names[:-1])
+                deps = self._find_cte_dependencies(cte_body_sql, cte_names[:-1], dialect)
                 chunks.append(QueryChunk(
                     id=f"cte_{i}_{cte_name}",
                     sql=cte_body_sql,
@@ -433,8 +446,8 @@ class QueryChunker:
         if main_tree.args.get("with") or main_tree.args.get("with_"):
             main_tree.args.pop("with", None)
             main_tree.args.pop("with_", None)
-        main_sql = main_tree.sql(dialect="bigquery", pretty=True)
-        main_deps = self._find_cte_dependencies(main_sql, cte_names)
+        main_sql = main_tree.sql(dialect=dialect, pretty=True)
+        main_deps = self._find_cte_dependencies(main_sql, cte_names, dialect)
 
         chunks.append(QueryChunk(
             id="main",
@@ -500,7 +513,7 @@ class QueryChunker:
             parts.append(tail)
         return parts if len(parts) > 1 else [sql]
 
-    def _find_cte_dependencies(self, sql: str, known_ctes: List[str]) -> List[str]:
+    def _find_cte_dependencies(self, sql: str, known_ctes: List[str], dialect: str = "bigquery") -> List[str]:
         """
         Return the subset of known_ctes that are actually referenced in sql.
         Uses sqlglot to find table references, falling back to improved regex.
@@ -510,7 +523,7 @@ class QueryChunker:
 
         # Try AST-based detection first (accurate, no false positives)
         try:
-            tree = sqlglot.parse_one(sql, read="bigquery")
+            tree = sqlglot.parse_one(sql, read=dialect)
             referenced_tables = {
                 t.name.lower()
                 for t in tree.find_all(exp.Table)

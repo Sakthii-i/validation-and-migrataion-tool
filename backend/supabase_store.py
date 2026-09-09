@@ -402,24 +402,56 @@ def update_query_history(query_id: str, source_engine: str | None, updates: dict
                 logger.error("Supabase query history fallback update failed: %s", fallback_e)
 
 
+def delete_query_history(query_id: str, source_engine: str | None) -> None:
+    if not is_enabled() or not query_id:
+        return
+    table = _query_table_for_engine(source_engine)
+    try:
+        _request(
+            "DELETE",
+            f"{_endpoint(table)}?query_id=eq.{query_id}",
+            headers=_headers("return=minimal"),
+        )
+    except Exception as e:
+        logger.error("Supabase query history delete failed: %s", e)
+        if table != SUPABASE_SNOWFLAKE_QUERY_TABLE:
+            try:
+                _request(
+                    "DELETE",
+                    f"{_endpoint(SUPABASE_SNOWFLAKE_QUERY_TABLE)}?query_id=eq.{query_id}",
+                    headers=_headers("return=minimal"),
+                )
+            except Exception as fallback_e:
+                logger.error("Supabase query history fallback delete failed: %s", fallback_e)
+
+
 def list_query_history(source_engine: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
     if not is_enabled():
         return []
     table = _query_table_for_engine(source_engine)
-    query = urlencode({
+    wanted = (source_engine or "").strip().lower()
+    params = {
         "select": "query_id,query_name,source_engine,run_by,last_ran_ts,source_latency_ms,target_latency_ms,migration_mode,validation_status,pushed_to_git,reviewers,source_sql,translated_sql,details",
         "order": "last_ran_ts.desc",
         "limit": str(limit),
-    })
+    }
+    if wanted:
+        # Filter by the source_engine column explicitly rather than relying
+        # solely on per-engine table routing — if two engines' tables happen
+        # to be the same underlying Supabase table (e.g. a legacy setup that
+        # predates the per-engine split), table routing alone silently mixes
+        # rows from every engine together.
+        params["source_engine"] = f"eq.{wanted}"
+    query = urlencode(params)
     try:
-        return _request("GET", f"{_endpoint(table)}?{query}", headers=_headers()) or []
+        rows = _request("GET", f"{_endpoint(table)}?{query}", headers=_headers()) or []
+        return [row for row in rows if not wanted or str(row.get("source_engine") or "").strip().lower() == wanted]
     except Exception as e:
         logger.error("Supabase query history list failed: %s", e)
         if table == SUPABASE_SNOWFLAKE_QUERY_TABLE:
             return []
         try:
             rows = _request("GET", f"{_endpoint(SUPABASE_SNOWFLAKE_QUERY_TABLE)}?{query}", headers=_headers()) or []
-            wanted = (source_engine or "").strip().lower()
             return [row for row in rows if not wanted or str(row.get("source_engine") or "").strip().lower() == wanted]
         except Exception as fallback_e:
             logger.error("Supabase query history fallback list failed: %s", fallback_e)
