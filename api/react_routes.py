@@ -717,6 +717,24 @@ def _materialize_databricks_query_to_table(sess: dict, session_id: str, sql_text
     if not sql_text:
         raise HTTPException(status_code=400, detail="Target SQL is required")
 
+    # Correct MySQL TIMESTAMP columns at the source before Databricks materializes this
+    # query, so both the raw column AND anything computed from it (UNIX_TIMESTAMP, etc.)
+    # come out consistent with Trino. Without this, this materialization path (used by
+    # Data Validation) would bypass the same correction applied to the Query Converter's
+    # direct execute path in TranslatorService.execute_databricks_sql.
+    try:
+        from validation_tool.migration.translator_service import TranslatorService
+
+        table_columns = TranslatorService.resolve_mysql_tz_table_columns(
+            sess.get("source_conn"), sess.get("engine"), sql_text
+        )
+        if table_columns:
+            sql_text = TranslatorService.apply_mysql_tz_source_correction(
+                sql_text, table_columns, TranslatorService._mysql_tz_correction_minutes()
+            )
+    except Exception:
+        pass
+
     suffix = uuid.uuid4().hex[:10]
     table_name = f"qc_tgt_{session_id.replace('-', '')[:10]}_{suffix}"
     catalog = _DBX_TEMP_CATALOG

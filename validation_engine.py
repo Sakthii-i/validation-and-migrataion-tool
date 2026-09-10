@@ -82,7 +82,11 @@ def execute_query(engine, conn, query):
 
 
 def normalize_result(row: dict):
-    return {k.lower(): v for k, v in row.items()}
+    def _safe(v):
+        if isinstance(v, (bytes, bytearray)):
+            return v.hex()
+        return v
+    return {k.lower(): _safe(v) for k, v in row.items()}
 
 
 def normalize_where_input(where_value, default="1=1"):

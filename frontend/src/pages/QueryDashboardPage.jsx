@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BarChart3, Eye, RefreshCw, X } from 'lucide-react';
+import { BarChart3, Eye, RefreshCw, Trash2, X } from 'lucide-react';
 import { migrationAPI } from '../services/api';
 import { useConnection } from '../context/ConnectionContext';
 import StatusBadge from '../components/StatusBadge';
@@ -18,6 +18,7 @@ export default function QueryDashboardPage() {
   const [detailRow, setDetailRow] = useState(null);
   const [runMessage, setRunMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const fetchStats = async () => {
     setLoading(true);
@@ -40,6 +41,21 @@ export default function QueryDashboardPage() {
   useEffect(() => {
     fetchStats();
   }, [sourceEngine]);
+
+  const handleDelete = async (row) => {
+    if (!window.confirm(`Delete query "${row.query_name || row.query_id}" from this engine's history? This cannot be undone.`)) {
+      return;
+    }
+    setDeletingId(row.query_id);
+    try {
+      await migrationAPI.deleteQueryHistory(row.query_id, (sourceEngine || '').toLowerCase());
+      setQueries((prev) => prev.filter((q) => q.query_id !== row.query_id));
+    } catch {
+      window.alert('Failed to delete this query. Please try again.');
+    } finally {
+      setDeletingId('');
+    }
+  };
 
   const formatIstDateTime = (value) => {
     if (!value) return '-';
@@ -133,6 +149,15 @@ export default function QueryDashboardPage() {
                         <div className="flex items-center gap-1">
                           <button className="btn btn-outline btn-sm" type="button" title="View query details" onClick={() => setDetailRow(row)}>
                             <Eye size={14} />
+                          </button>
+                          <button
+                            className="btn btn-outline btn-sm text-red-600"
+                            type="button"
+                            title="Delete this query from history"
+                            onClick={() => handleDelete(row)}
+                            disabled={deletingId === row.query_id}
+                          >
+                            <Trash2 size={14} />
                           </button>
                         </div>
                       </td>

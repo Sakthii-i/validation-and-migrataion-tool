@@ -41,3 +41,4 @@ htmlcov/
 
 # Generated translation cache
 migration/translation_cache.db
+*.db

@@ -127,6 +127,7 @@ export default function QueryConverterSection() {
   const [gitUploadMessage, setGitUploadMessage] = useState('');
   const fileInputRef = useRef(null);
   const abortRef = useRef(null);
+  const dataValidationPanelRef = useRef(null);
 
   const [complexity, setComplexity] = useState(null);
   const [querySessionId] = useState(() => getOrCreateQuerySessionId());
@@ -166,6 +167,12 @@ export default function QueryConverterSection() {
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (showDataValidation) {
+      dataValidationPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [showDataValidation]);
 
   useEffect(() => {
     clearOutput();
@@ -732,33 +739,45 @@ export default function QueryConverterSection() {
     try {
       const collectedResults = [];
       const validationRecords = [];
+      const rowErrors = [];
       for (const { row, index } of validRows) {
-        const res = await validationAPI.runQuery({
-          session_id: sessionId,
-          validation_type: validationSettings.validationType,
-          run_by: user?.username || undefined,
-          settings: toPayloadSettings(validationSettings),
-          source_sql: row.original_sql,
-          target_sql: row.translated_sql,
-        });
-        const validationData = res.data;
-        collectedResults.push({
-          row: row.row_index + 1,
-          query: row.query_index + 1,
-          result: validationData,
-        });
-        validationRecords.push(...(validationData.results || []));
-        setCsvResults((prev) => prev.map((item, itemIndex) => (
-          itemIndex === index ? { ...item, query_validation: validationData, query_validation_error: '' } : item
-        )));
-        if (row.query_id) {
-          await migrationAPI.updateQueryHistory(row.query_id, {
-            source_engine: sourceEngine.toLowerCase(),
-            validation_status: 'VALIDATED',
+        try {
+          const res = await validationAPI.runQuery({
+            session_id: sessionId,
+            validation_type: validationSettings.validationType,
+            run_by: user?.username || undefined,
+            settings: toPayloadSettings(validationSettings),
+            source_sql: row.original_sql,
+            target_sql: row.translated_sql,
           });
+          const validationData = res.data;
+          collectedResults.push({
+            row: row.row_index + 1,
+            query: row.query_index + 1,
+            result: validationData,
+          });
+          validationRecords.push(...(validationData.results || []));
+          setCsvResults((prev) => prev.map((item, itemIndex) => (
+            itemIndex === index ? { ...item, query_validation: validationData, query_validation_error: '' } : item
+          )));
+          if (row.query_id) {
+            await migrationAPI.updateQueryHistory(row.query_id, {
+              source_engine: sourceEngine.toLowerCase(),
+              validation_status: 'VALIDATED',
+            });
+          }
+        } catch (rowErr) {
+          const message = rowErr.response?.data?.detail || rowErr.message || 'Failed to run validation.';
+          rowErrors.push(`Row ${row.row_index + 1}, query ${row.query_index + 1}: ${message}`);
+          setCsvResults((prev) => prev.map((item, itemIndex) => (
+            itemIndex === index ? { ...item, query_validation_error: message } : item
+          )));
         }
       }
       setQueryValidationResults({ results: validationRecords, csv_results: collectedResults });
+      if (rowErrors.length) {
+        setQueryValidationError(rowErrors.join('\n'));
+      }
     } catch (err) {
       setQueryValidationError(err.response?.data?.detail || err.message || 'Failed to run validation.');
     } finally {
@@ -1105,7 +1124,7 @@ export default function QueryConverterSection() {
             </div>
 
             {showDataValidation && (
-              <div className="space-y-4">
+              <div className="space-y-4" ref={dataValidationPanelRef}>
                 {!sessionId && (
                   <div className="alert alert-info">
                     Load {sourceLabel} credentials from Run Validation to enable query validation.
@@ -1238,6 +1257,8 @@ export default function QueryConverterSection() {
                           <td>
                             {row.query_validation ? (
                               <StatusBadge status={validationSummaryStatus(row.query_validation)} />
+                            ) : row.query_validation_error ? (
+                              <span className="text-xs text-red-600" title={row.query_validation_error}>FAILED</span>
                             ) : (
                               <span className="text-xs text-gray-400">-</span>
                             )}
@@ -1249,7 +1270,7 @@ export default function QueryConverterSection() {
                 </div>
 
                 {showDataValidation && (
-                  <div className="space-y-4">
+                  <div className="space-y-4" ref={dataValidationPanelRef}>
                     {!sessionId && (
                       <div className="alert alert-info">
                         Load {sourceLabel} credentials from Run Validation to enable query validation.
@@ -1415,7 +1436,7 @@ export default function QueryConverterSection() {
             </div>
 
             {showDataValidation && (
-              <div className="space-y-4">
+              <div className="space-y-4" ref={dataValidationPanelRef}>
                 {!sessionId && (
                   <div className="alert alert-info">
                     Load {sourceLabel} credentials from Run Validation to enable query validation.
@@ -2281,11 +2302,10 @@ function CacheMetric({ title, value }) {
 }
 
 function ResultDetails({ validation, suggestions, finalError, execution, explanation, cacheHit, sourceLabel = 'Source' }) {
-  if (!validation && !finalError && !execution && !explanation && !cacheHit) return null;
+  if (!validation && !finalError && !execution && !explanation) return null;
 
   return (
     <div className="space-y-3">
-      {cacheHit && <div className="alert alert-info">This translation was taken from cache.</div>}
       {validation && (
         validation.is_valid
           ? <div className="alert alert-success">SQL validated for Databricks dialect.</div>
@@ -2357,7 +2377,13 @@ function ResultTable({ title, result }) {
             <tbody>
               {rows.map((row, rowIndex) => (
                 <tr key={rowIndex}>
-                  {columns.map((column) => <td key={column}>{row[column] === null || row[column] === undefined ? '<null>' : String(row[column])}</td>)}
+                  {columns.map((column) => {
+                    const value = row[column];
+                    const display = value === null || value === undefined
+                      ? '<null>'
+                      : (Array.isArray(value) ? value.join(',') : String(value));
+                    return <td key={column}>{display}</td>;
+                  })}
                 </tr>
               ))}
             </tbody>
