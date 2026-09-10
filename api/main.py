@@ -4,10 +4,11 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from rq import Retry
 
-from validation_tool.api.auth import load_locked_credentials, require_api_key
-from validation_tool.api.schemas import (
+from .auth import load_locked_credentials, require_api_key
+from .schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
     GetValidationResponse,
@@ -15,18 +16,17 @@ from validation_tool.api.schemas import (
     ValidationJobPublicStatus,
     ValidationResultRow,
 )
-from validation_tool.backend.csv_parser import parse_validations_csv
-from validation_tool.backend.supabase_jobs_store import (
+from ..backend.csv_parser import parse_validations_csv
+from ..backend.supabase_jobs_store import (
     ensure_jobs_table,
     get_job,
     get_pg_conn,
     get_result,
     upsert_job_state,
 )
-from validation_tool.backend.session_store import create_session
-from validation_tool.worker.queue import get_queue
-from validation_tool.worker.tasks import run_validation_task
-from fastapi.middleware.cors import CORSMiddleware
+from ..backend.session_store import create_session
+from ..worker.queue import get_queue
+from ..worker.tasks import run_validation_task
 
 from .validation_routes import router as validation_router
 from .react_routes import router as react_router
@@ -77,8 +77,20 @@ def create_session_endpoint(req: CreateSessionRequest):
         else:
             source_payload = req.source
             target_payload = req.target.model_dump() if req.target else {}
+    elif source_engine == "redshift":
+        # Redshift does not require stored credentials for the normal flow.
+        # Keep this block commented for future reuse if a secure credential model is needed later.
+        # if req.credential_password:
+        #     locked = load_locked_credentials(req.credential_password)
+        #     source_payload = locked.get("redshift", req.source)
+        #     target_payload = locked["databricks"]
+        # else:
+        #     source_payload = req.source
+        #     target_payload = req.target.model_dump() if req.target else {}
+        source_payload = req.source
+        target_payload = req.target.model_dump() if req.target else {}
     else:
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, trino, or redshift")
 
     payload = {
         "source_engine": source_engine,

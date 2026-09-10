@@ -69,9 +69,16 @@ def create_databricks_connection(server_hostname: str, http_path: str, access_to
 
 def create_trino_connection(host=None, port=None, user=None, catalog=None, schema=None, http_scheme=None, password=None):
     """Create Trino DB-API connection."""
-    from validation_tool.connections.trino import connect_trino
+    from .connections.trino import connect_trino
 
     return connect_trino(host, port, user, catalog, schema, http_scheme, password)
+
+
+def create_redshift_connection(host=None, port=None, database=None, user=None, password=None, schema=None):
+    """Create Redshift PostgreSQL connection."""
+    from .connections.redshift import connect_redshift
+
+    return connect_redshift(host, port, database, user, password, schema)
 
 def get_dashboard_postgres_conn() -> PgConnection:
     """Return a psycopg2 connection to the Postgres dashboard DB."""
@@ -153,7 +160,7 @@ def generate_validation_record(validation_type, src, tgt, row_status, schema_sta
 def insert_validation_result(record: dict) -> str:
     """Insert record into Supabase and return validation_id."""
     try:
-        from validation_tool.backend import supabase_store
+        from .backend import supabase_store
         
         # Map validation_core record format to supabase_store format
         supabase_record = {
@@ -184,7 +191,7 @@ def execute_query(engine: str, conn, query: str) -> List[dict]:
             job = conn.query(query)
             rows = list(job.result())
             return [dict(row) for row in rows]
-        elif engine in ["databricks", "snowflake", "trino"]:
+        elif engine in ["databricks", "snowflake", "trino", "redshift"]:
             cur = conn.cursor()
             cur.execute(query)
             cols = [c[0] for c in cur.description]

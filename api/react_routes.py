@@ -20,12 +20,13 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 # ── Internal imports ──
-from validation_tool.connections.bigquery import connect_bigquery
-from validation_tool.connections.databricks import connect_databricks
-from validation_tool.connections.snowflake import connect_snowflake
-from validation_tool.connections.trino import connect_trino
-from validation_tool.metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
-from validation_tool.query_builder import (
+from ..connections.bigquery import connect_bigquery
+from ..connections.databricks import connect_databricks
+from ..connections.redshift import connect_redshift
+from ..connections.snowflake import connect_snowflake
+from ..connections.trino import connect_trino
+from ..metadata.catalog_fetcher import get_catalogs, get_schemas, get_tables
+from ..query_builder import (
     build_schema_query,
     build_shallow_query,
     build_numeric_stats_query,
@@ -35,12 +36,12 @@ from validation_tool.query_builder import (
     build_categorical_hash_samples_query,
     build_row_hash_mismatch_rows_query_v2,
 )
-from validation_tool.backend import supabase_store
-from validation_tool.backend.email_service import send_validation_failure_email
-from validation_tool.backend.session_store import update_query_stats
-from validation_tool.migration.sql_processor import SQLPreprocessor
-from validation_tool.validation_engine import ValidationGuardError, _normalize_hash_scalar, _row_hash_from_values
-from validation_tool.datatype_utils import canonicalize_compatible_type, datatypes_compatible
+from ..backend import supabase_store
+from ..backend.email_service import send_validation_failure_email
+from ..backend.session_store import update_query_stats
+from ..migration.sql_processor import SQLPreprocessor
+from ..validation_engine import ValidationGuardError, _normalize_hash_scalar, _row_hash_from_values
+from ..datatype_utils import canonicalize_compatible_type, datatypes_compatible
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -73,7 +74,7 @@ def _date_range(date_filter, start_date=None, end_date=None):
 
 
 def _row_count_for_table(engine: str, conn, catalog: str, schema: str, table: str) -> int:
-    from validation_tool.validation_engine import execute_query, normalize_result
+    from ..validation_engine import execute_query, normalize_result
 
     query = build_shallow_query(engine, catalog, schema, table, {"row_count": True})
     rows = execute_query(engine, conn, query)
@@ -102,19 +103,12 @@ def _normalize_primary_keys(value) -> list[str]:
 
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
-    if normalized_engine not in ("bigquery", "snowflake", "trino"):
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
+    if normalized_engine not in ("bigquery", "snowflake", "trino", "redshift"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, trino, or redshift")
 
-    detected = SQLPreprocessor.detect_source_engine(sql)
-    expected = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}[normalized_engine]
-    if detected in ("unknown", "ambiguous"):
-        return
-    if detected != normalized_engine:
-        actual = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}.get(detected, detected)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Selected source engine is {expected}, but the SQL looks like {actual}.",
-        )
+    # Redshift and Snowflake deliberately share much syntax. The explicitly
+    # selected engine is authoritative; detection remains advisory only.
+    return
 
 # ── Active connections store (in-memory, per-process) ──
 _sessions = {}
@@ -143,9 +137,9 @@ class RevokeRequest(BaseModel):
 
 @router.post("/auth/login")
 def auth_login(req: LoginRequest):
-    from validation_tool.backend.auth_config import ADMIN_USERNAME, ADMIN_PASSWORD_HASH
-    from validation_tool.backend.auth_crypto import verify_password
-    from validation_tool.backend.supabase_auth_store import get_password_hash
+    from ..backend.auth_config import ADMIN_USERNAME, ADMIN_PASSWORD_HASH
+    from ..backend.auth_crypto import verify_password
+    from ..backend.supabase_auth_store import get_password_hash
 
     if req.role == "admin":
         if req.username.strip() != ADMIN_USERNAME:
@@ -166,7 +160,7 @@ def auth_login(req: LoginRequest):
 
 @router.get("/auth/users")
 def auth_list_users():
-    from validation_tool.backend.auth_service import list_authorized_user_details
+    from ..backend.auth_service import list_authorized_user_details
     try:
         return {"users": list_authorized_user_details()}
     except Exception:
@@ -174,7 +168,7 @@ def auth_list_users():
 
 @router.post("/auth/grant")
 def auth_grant(req: GrantRequest):
-    from validation_tool.backend.auth_service import grant_user_access
+    from ..backend.auth_service import grant_user_access
     try:
         grant_user_access(
             req.username,
@@ -188,7 +182,7 @@ def auth_grant(req: GrantRequest):
 
 @router.post("/auth/revoke")
 def auth_revoke(req: RevokeRequest):
-    from validation_tool.backend.auth_service import revoke_user_access
+    from ..backend.auth_service import revoke_user_access
     result = revoke_user_access(req.username)
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
@@ -280,7 +274,7 @@ def establish_connection(req: ConnectRequest):
     session_id = str(uuid.uuid4())
 
     try:
-        from validation_tool.api.auth import load_locked_credentials
+        from .auth import load_locked_credentials
         
         if req.use_stored_credentials:
             file_password = (req.file_password or "").strip() or _backend_credential_password()
@@ -328,6 +322,21 @@ def establish_connection(req: ConnectRequest):
                     trino_creds.get("http_scheme"),
                     trino_creds.get("password"),
                 )
+            elif engine == "Redshift":
+                rs_creds = creds.get("redshift", {}) if isinstance(creds, dict) else {}
+                source_conn = connect_redshift(
+                    rs_creds.get("host"),
+                    rs_creds.get("port"),
+                    rs_creds.get("database"),
+                    rs_creds.get("user"),
+                    rs_creds.get("password"),
+                    rs_creds.get("schema"),
+                )
+                if source_conn is None:
+                    return {
+                        "status": "skipped",
+                        "message": "Redshift conversion does not require a live connection. Add host, database, user, and password only when you want to establish a real Redshift connection.",
+                    }
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
 
@@ -358,6 +367,20 @@ def establish_connection(req: ConnectRequest):
                     req.source.get("http_scheme"),
                     req.source.get("password"),
                 )
+            elif engine == "Redshift":
+                source_conn = connect_redshift(
+                    req.source.get("host"),
+                    req.source.get("port"),
+                    req.source.get("database"),
+                    req.source.get("user"),
+                    req.source.get("password"),
+                    req.source.get("schema"),
+                )
+                if source_conn is None:
+                    return {
+                        "status": "skipped",
+                        "message": "Redshift conversion does not require a live connection. Add host, database, user, and password only when you want to establish a real Redshift connection.",
+                    }
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported engine: {engine}")
 
@@ -419,6 +442,10 @@ def close_connection(session_id: Optional[str] = None):
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 cur.close()
             elif eng == "trino":
+                cur = sess["source_conn"].cursor()
+                cur.execute(f"DROP TABLE IF EXISTS {table}")
+                cur.close()
+            elif eng == "redshift":
                 cur = sess["source_conn"].cursor()
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 cur.close()
@@ -642,6 +669,45 @@ def _materialize_source_query_to_table(sess: dict, session_id: str, sql_text: st
         _ensure_session_temp_list(sess).append({"engine": "trino", "table": fqn})
         return fqn
 
+    if engine == "redshift":
+        catalog = os.getenv("REDSHIFT_TEMP_DATABASE") or (getattr(source_conn, "dsn", "") or "").split("dbname=")[-1].split(" ")[0] if hasattr(source_conn, "dsn") else None
+        schema = os.getenv("REDSHIFT_TEMP_SCHEMA") or None
+        if not schema:
+            try:
+                cur = source_conn.cursor()
+                cur.execute("SELECT current_database(), current_schema()")
+                row = cur.fetchone()
+                if row:
+                    catalog = catalog or (row[0] if row else None)
+                    schema = schema or (row[1] if row else None)
+                cur.close()
+            except Exception:
+                pass
+        if not catalog or not schema:
+            match = re.search(r"\b([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\b", sql_text)
+            if match:
+                catalog = catalog or match.group(1)
+                schema = schema or match.group(2)
+        if not catalog or not schema:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Redshift session has no current database/schema for query validation temp tables. "
+                    "Set REDSHIFT_TEMP_DATABASE and REDSHIFT_TEMP_SCHEMA or use fully-qualified source tables."
+                ),
+            )
+        fqn = f"{catalog}.{schema}.{table_name}"
+        ddl = f"CREATE TABLE {fqn} AS {sql_text}"
+        try:
+            cur = source_conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS {fqn}")
+            cur.execute(ddl)
+            cur.close()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to materialize Redshift source query: {exc}") from exc
+        _ensure_session_temp_list(sess).append({"engine": "redshift", "table": fqn})
+        return fqn
+
     raise HTTPException(status_code=400, detail=f"Unsupported session source engine: {engine}")
 
 
@@ -789,9 +855,9 @@ def get_row_count_endpoint(req: RowCountRequest):
     engine = sess["engine"] if req.target == "source" else "Databricks"
     conn = sess["source_conn"] if req.target == "source" else sess["target_conn"]
     try:
-        from validation_tool.query_builder import build_shallow_query
-        from validation_tool.validation_core import execute_query
-        from validation_tool.backend.validators import normalize_result
+        from ..query_builder import build_shallow_query
+        from ..validation_core import execute_query
+        from ..backend.validators import normalize_result
         query = build_shallow_query(engine, req.catalog, req.schema_name, req.table_name, {"row_count": True})
         res = normalize_result(execute_query(engine, conn, query)[0])
         return {"row_count": int(res.get("row_count", 0))}
@@ -817,7 +883,7 @@ def run_validation(req: RunValidationRequest):
     source_conn = sess["source_conn"]
     target_conn = sess["target_conn"]
 
-    from validation_tool.validation_engine import (
+    from ..validation_engine import (
         parse_table_path, run_row_count, run_schema_validation,
         run_numeric_validation, run_row_hash_validation,
         run_checks_in_order, generate_validation_record,
@@ -1593,7 +1659,7 @@ def view_schema(req: SchemaViewRequest):
                 if key_path:
                     conn = connect_bigquery(catalog, key_path, "US")
             elif engine == "snowflake":
-                from validation_tool.api.auth import load_locked_credentials
+                from .auth import load_locked_credentials
                 file_password = (req.file_password or "").strip() or _backend_credential_password()
                 creds = load_locked_credentials(file_password)
                 sf_creds = creds["snowflake"]
@@ -1614,7 +1680,7 @@ def view_schema(req: SchemaViewRequest):
 
     query = build_schema_query(engine, catalog, schema, table)
     try:
-        from validation_tool.validation_engine import execute_query, normalize_result
+        from ..validation_engine import execute_query, normalize_result
         schema_raw = execute_query(engine, conn, query)
         rows = [normalize_result(r) for r in schema_raw]
         return {"columns": rows}

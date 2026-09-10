@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import redis
 
-from validation_tool.backend import supabase_store
-from validation_tool.backend.settings import redis_url, session_ttl_seconds
+from . import supabase_store
+from .settings import redis_url, session_ttl_seconds
 
 
 EMPTY_QUERY_STATS = {

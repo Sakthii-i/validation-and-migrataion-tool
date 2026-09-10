@@ -17,6 +17,7 @@ from ..validation_core import (
     create_bigquery_connection,
     create_snowflake_connection,
     create_trino_connection,
+    create_redshift_connection,
     create_databricks_connection,
 )
 from ..query_builder import build_shallow_query
@@ -51,7 +52,7 @@ def _table_fqn(src: dict) -> str:
 
 @router.get("/results/{validation_id}")
 async def get_validation_result(validation_id: str, _ = Depends(require_api_key)):
-    from validation_tool.backend import supabase_store
+    from ..backend import supabase_store
     try:
         row = supabase_store.get_result_by_id(validation_id)
         if not row:
@@ -95,6 +96,8 @@ async def validate(
             source_conn = create_snowflake_connection(**source_config)
         elif source_engine == "trino":
             source_conn = create_trino_connection(**source_config)
+        elif source_engine == "redshift":
+            source_conn = create_redshift_connection(**source_config)
         else:
             raise ValueError(f"Unsupported source engine: {source_engine}")
 

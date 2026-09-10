@@ -125,6 +125,7 @@ export default function BQSchemaViewerPage() {
                 <option value="bigquery">BigQuery</option>
                 <option value="snowflake">Snowflake</option>
                 <option value="trino">Trino</option>
+                <option value="redshift">Redshift</option>
               </select>
             </div>
           </div>

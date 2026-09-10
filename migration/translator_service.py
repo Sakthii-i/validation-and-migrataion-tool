@@ -26,10 +26,11 @@ except Exception:
     Anthropic = None
 
 from .ast_transformer import BigQueryToDatabricksTransformer, ExpressionOptimizer
+from .redshift_rule_loader import build_redshift_engine
 from .rule_engine import RuleEngine
 from .snowflake_rule_loader import SnowflakeRuleEngine, build_engine_from_csv
 from .trino_rule_loader import build_trino_engine
-from .sql_processor import ExpressionCache, QueryChunker, SQLPreprocessor
+from .sql_processor import ExpressionCache, QueryChunk, QueryChunker, SQLPreprocessor
 from .translation_cache import TranslationCache
 from .complexity_analyzer import QueryComplexityAnalyzer
 from .validator import LLMFixerPrompt, SQLValidator
@@ -173,6 +174,7 @@ class TranslatorService:
         if snowflake_engine is None:
             snowflake_engine = SnowflakeRuleEngine([], [])
         trino_engine = build_trino_engine()
+        redshift_engine = build_redshift_engine()
         return {
             "preprocessor": SQLPreprocessor(),
             "chunker": QueryChunker(max_chunk_size=500),
@@ -180,6 +182,7 @@ class TranslatorService:
             "rule_engine": RuleEngine(rules_list, edge_cases),
             "snowflake_rule_engine": snowflake_engine,
             "trino_rule_engine": trino_engine,
+            "redshift_rule_engine": redshift_engine,
             "cache": TranslationCache(db_path=cache_db_path),
             "validator": SQLValidator(),
             "expr_cache": ExpressionCache(),
@@ -243,6 +246,8 @@ class TranslatorService:
             dialect = "snowflake"
         elif source_key == "trino":
             dialect = "trino"
+        elif source_key == "redshift":
+            dialect = "redshift"
         else:
             dialect = "bigquery"
         try:
@@ -618,10 +623,13 @@ class TranslatorService:
         source_key = (source_engine or "").strip().lower()
         is_snowflake = source_key == "snowflake"
         is_trino = source_key == "trino"
+        is_redshift = source_key == "redshift"
         if is_snowflake:
             rule_engine = components["snowflake_rule_engine"]
         elif is_trino:
             rule_engine = components["trino_rule_engine"]
+        elif is_redshift:
+            rule_engine = components["redshift_rule_engine"]
         else:
             rule_engine = components["rule_engine"]
 
@@ -642,6 +650,12 @@ class TranslatorService:
                 sql_text,
                 flags=re.IGNORECASE,
             )
+            sql_text = re.sub(
+                r"\bCASE\s+WHEN\s+NOT\s+(.+?)\s+IS\s+NULL\b",
+                lambda m: "CASE WHEN " + m.group(1).strip() + " IS NOT NULL",
+                sql_text,
+                flags=re.IGNORECASE,
+            )
             return sql_text
 
         def _post_llm_cleanup(sql_text: str) -> str:
@@ -653,6 +667,9 @@ class TranslatorService:
             cleaned = _rewrite_struct_with_as(cleaned)
             cleaned = _repair_common_llm_mistakes(cleaned)
             cleaned = _rewrite_struct_with_as(cleaned)
+            if is_redshift:
+                cleaned = re.sub(r"\bDATE_ADD\s*\(\s*HOUR\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+                                 r"TIMESTAMPADD(HOUR, \1, \2)", cleaned, flags=re.IGNORECASE)
             return cleaned
 
         def _rewrite_struct_with_as(sql_text: str) -> str:
@@ -754,7 +771,7 @@ class TranslatorService:
                 return False
             return len(n) < max(1200, int(len(o) * 0.35))
 
-        cache_version = ":v2026_05_15_struct_named_v2"
+        cache_version = ":v2026_09_03_redshift_json_ddl_v9"
         source_key = (source_engine or "").strip().lower() or "bigquery"
         cache_suffix = f":shared:{source_key}{cache_version}"
         cached = components["cache"].get(bq_sql + cache_suffix)
@@ -779,7 +796,15 @@ class TranslatorService:
         if is_transaction:
             stats["steps"].append("Multi-statement transaction detected (Databricks 2026)")
 
-        chunks = components["chunker"].chunk_query(normalized)
+        # Redshift PartiQL syntax must be protected before generic chunking;
+        # otherwise a parser can silently discard its implicit unnest source.
+        chunk_input = rule_engine.apply_pre_ast_translation(normalized) if is_redshift else normalized
+        # QueryChunker renders through the BigQuery dialect, which converts
+        # DECIMAL(p,s) into unparameterized NUMERIC before Redshift parsing.
+        # Keep Redshift statements intact; sqlglot's Redshift reader handles
+        # CTEs and multi-statement input directly.
+        chunks = ([QueryChunk(id="main", sql=chunk_input, dependencies=[], chunk_type="main")]
+                  if is_redshift else components["chunker"].chunk_query(chunk_input))
         stats["chunks"] = len(chunks)
         order = components["chunker"].get_translation_order(chunks)
         chunk_map = {c.id: c for c in chunks}
@@ -799,12 +824,18 @@ class TranslatorService:
                 translated_map[chunk_id] = cached_expr
                 continue
 
-            input_sql = rule_engine.apply_pre_ast_translation(chunk.sql) if (is_snowflake or is_trino) else chunk.sql
+            # Redshift input was preprocessed before chunking above. Applying
+            # its string rules a second time can corrupt already-translated
+            # expressions (especially format strings and JSON paths).
+            input_sql = (
+                chunk.sql if is_redshift
+                else rule_engine.apply_pre_ast_translation(chunk.sql) if (is_snowflake or is_trino) else chunk.sql
+            )
             t, transpile_err = self._transpile_to_databricks(input_sql, source_engine)
             if transpile_err:
                 # Keep deterministic behavior robust for noisy/Jinja-heavy inputs:
                 # if direct sqlglot transpile fails, fall back to legacy AST/regex path.
-                if is_snowflake or is_trino:
+                if is_snowflake or is_trino or is_redshift:
                     t = rule_engine.apply_pre_ast_translation(chunk.sql)
                     stats["steps"].append(
                         f"Chunk {chunk_id}: sqlglot transpile failed -> {source_key} rules fallback applied"
@@ -817,8 +848,41 @@ class TranslatorService:
                     )
 
             t = rule_engine.apply_rules(t)
+            # Final guardrail for Redshift/Trino date functions after sqlglot fallback.
+            # Databricks expects DATE_ADD(date, n) and DATEDIFF(end, start), not
+            # DATE_ADD(unit, n, date) or DATEDIFF(unit, start, end).
+            t = re.sub(r"\bGETDATE\b", "CURRENT_TIMESTAMP()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bSYSDATE\b", "CURRENT_TIMESTAMP()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_DATE\b(?!\s*\()", "CURRENT_DATE()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_TIMESTAMP\b(?!\s*\()", "CURRENT_TIMESTAMP()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_TIMESTAMP\s*\(\s*,\s*([^)]*?)\s*\)", "CURRENT_TIMESTAMP(\1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_DATE\s*\(\s*,\s*([^)]*?)\s*\)", "CURRENT_DATE()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEADD\s*\(\s*(?:MONTH|MM|month|mm)\s*,\s*([^,]+)\s*,\s*(?:GETDATE|CURRENT_TIMESTAMP)\s*(?:\(\s*\))?\s*\)", r"ADD_MONTHS(CURRENT_DATE(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEDIFF\s*\(\s*(?:DAY|DD|day|dd)\s*,\s*([^,]+)\s*,\s*(?:GETDATE|CURRENT_TIMESTAMP)\s*(?:\(\s*\))?\s*\)", r"DATEDIFF(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEADD\s*\(\s*(?:DAY|DD|day|dd)\s*,\s*([^,]+)\s*,\s*([^)]+)\)", r"DATE_ADD(\2, \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEADD\s*\(\s*(?:MONTH|MM|month|mm)\s*,\s*([^,]+)\s*,\s*([^)]+)\)", r"ADD_MONTHS(\2, \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEDIFF\s*\(\s*(?:DAY|DD|day|dd)\s*,\s*([^,]+)\s*,\s*([^)]+)\)", r"DATEDIFF(\2, \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bADD_MONTHS\s*\(\s*CURRENT_DATE\s*(?:\(\s*\))?\s*,\s*([^)]*?)\s*\)", r"ADD_MONTHS(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bADD_MONTHS\s*\(\s*CURRENT_TIMESTAMP\s*(?:\(\s*\))?\s*,\s*([^)]*?)\s*\)",r"ADD_MONTHS(CURRENT_TIMESTAMP(), \1)",t,flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_DATE\s*\(\s*\)\s*\(\s*,", "CURRENT_DATE(),", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_DATE\b(?!\s*\()", "CURRENT_DATE()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bCURRENT_TIMESTAMP\b(?!\s*\()", "CURRENT_TIMESTAMP()", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEDIFF\s*\(\s*(?:DAY|DD)\s*,\s*([^,]+?)\s*,\s*CURRENT_DATE\s*\)", r"DATEDIFF(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bDATEDIFF\s*\(\s*(?:DAY|DD)\s*,\s*([^,]+?)\s*,\s*CURRENT_DATE\s*\(\s*\)\s*\)", r"DATEDIFF(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bADD_MONTHS\s*\(\s*CURRENT_DATE\s*,\s*([^)]*?)\s*\)", r"ADD_MONTHS(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bADD_MONTHS\s*\(\s*CURRENT_TIMESTAMP\s*,\s*([^)]*?)\s*\)", r"ADD_MONTHS(CURRENT_TIMESTAMP(), \1)", t, flags=re.IGNORECASE)
+            if is_redshift:
+                # sqlglot may render TIMESTAMPADD(HOUR, n, ts) as the
+                # incompatible three-argument DATE_ADD form.
+                t = re.sub(r"\bDATE_ADD\s*\(\s*HOUR\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+                           r"TIMESTAMPADD(HOUR, \1, \2)", t, flags=re.IGNORECASE)
             t = rule_engine.apply_function_translation(t)
             t = ExpressionOptimizer.optimize(t)
+            if is_redshift:
+                # ExpressionOptimizer can also re-render TIMESTAMPADD as the
+                # three-argument DATE_ADD form, so repair after optimization.
+                t = re.sub(r"\bDATE_ADD\s*\(\s*HOUR\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+                           r"TIMESTAMPADD(HOUR, \1, \2)", t, flags=re.IGNORECASE)
             if is_snowflake:
                 t = _rewrite_struct_with_as(t)
 
@@ -867,7 +931,7 @@ class TranslatorService:
             components["expr_cache"].set(cache_key, t)
             translated_map[chunk_id] = t
 
-        source_dialect = "snowflake" if is_snowflake else ("trino" if is_trino else "bigquery")
+        source_dialect = "snowflake" if is_snowflake else ("trino" if is_trino else ("redshift" if is_redshift else "bigquery"))
         stats["steps"].append(f"Translated {len(order)} chunk(s) via sqlglot (read={source_dialect}, write=databricks); {stats['llm_calls']} LLM call(s)")
 
         assembled = components["chunker"].reassemble(chunks, translated_map)

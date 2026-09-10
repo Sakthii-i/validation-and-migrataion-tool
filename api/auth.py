@@ -141,6 +141,18 @@ def load_locked_credentials(file_password: str | None) -> dict:
         "password": (values.get("trino.password") or "").strip() or None,
     }
 
+    # Redshift is intentionally credential-free in the normal flow.
+    # Keep this block available below for future reuse if we ever need to store
+    # Redshift credentials in the encrypted bundle again.
+    # redshift = {
+    #     "host": (values.get("redshift.host") or "").strip() or None,
+    #     "port": (values.get("redshift.port") or "").strip() or None,
+    #     "database": (values.get("redshift.database") or "").strip() or None,
+    #     "user": (values.get("redshift.user") or "").strip() or None,
+    #     "password": (values.get("redshift.password") or "").strip() or None,
+    #     "schema": (values.get("redshift.schema") or "").strip() or None,
+    # }
+
     result = {
         "databricks": {
             "server_hostname": _required(values, "databricks.server_hostname"),
@@ -152,4 +164,6 @@ def load_locked_credentials(file_password: str | None) -> dict:
         result["snowflake"] = snowflake
     if any(v for v in trino.values()):
         result["trino"] = trino
+    # if any(v for v in redshift.values()):
+    #     result["redshift"] = redshift
     return result

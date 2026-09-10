@@ -1,0 +1,101 @@
+mapping_id,category,redshift_syntax,databricks_sql_syntax,notes
+1,Data Types,SMALLINT,SMALLINT,16-bit integer
+2,Data Types,INTEGER / INT,INT,32-bit integer
+3,Data Types,BIGINT,BIGINT,64-bit integer
+4,Data Types,"DECIMAL(p,s) / NUMERIC(p,s)","DECIMAL(p,s)",Equivalent
+5,Data Types,REAL,FLOAT,Single precision
+6,Data Types,DOUBLE PRECISION,DOUBLE,Double precision
+7,Data Types,"VARCHAR(n)",STRING,DBX has no length limit; length not enforced
+8,Data Types,CHAR(n),STRING,No fixed-length string type in DBX
+9,Data Types,BOOLEAN,BOOLEAN,Equivalent
+10,Data Types,DATE,DATE,Equivalent
+11,Data Types,TIMESTAMP,TIMESTAMP,Equivalent
+12,Data Types,TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE,TIMESTAMP,DBX TIMESTAMP is always tz-aware internally; review offset handling
+13,Data Types,TIME,STRING,No native TIME type in DBX
+14,Data Types,SUPER,VARIANT / STRING,Use GET_JSON_OBJECT/FROM_JSON or VARIANT type on supported runtimes
+15,Data Types,HLLSKETCH,BINARY,Serialized blob; consider APPROX_COUNT_DISTINCT instead
+16,Data Types,GEOMETRY,STRING,No native geometry type; consider WKT string or Delta + H3
+17,Data Types,GEOGRAPHY,STRING,No native geography type
+18,Data Types,VARBYTE,BINARY,Variable-length binary
+19,Complex Types,"customer.address STRUCT-like SUPER field",STRUCT<...>,SUPER nested fields map to STRUCT when schema is known
+20,Complex Types,SUPER array element,ARRAY<...>,Requires schema inference via FROM_JSON/SCHEMA_OF_JSON
+21,Error Handling,"col::INTEGER (implicit fail on bad cast)","TRY_CAST(col AS INT)",Use TRY_CAST for null-safe casting instead of unsafe ::
+22,Error Handling,ISNUMERIC(expr),"expr RLIKE '^[0-9]+$'" ,No direct ISNUMERIC; approximate with regex or TRY_CAST IS NOT NULL
+23,Error Handling,NVL(expr, default),COALESCE(expr, default),Direct equivalent
+24,Error Handling,NVL2(expr, val_if_not_null, val_if_null),"CASE WHEN expr IS NOT NULL THEN val_if_not_null ELSE val_if_null END",No native NVL2 in DBX
+25,Error Handling,"NULLIF(expr1, expr2)","NULLIF(expr1, expr2)",Direct equivalent
+26,Array/SUPER Functions,CARDINALITY(array),SIZE(array),Direct equivalent
+27,Array/SUPER Functions,ARRAY_CONCAT(a1,a2),CONCAT(a1,a2),Works on arrays in DBX
+28,Array/SUPER Functions,ARRAY_FLATTEN(a),FLATTEN(a),Direct equivalent
+29,Array/SUPER Functions,"SPLIT_TO_ARRAY(str, delim)","SPLIT(str, delim)",Direct equivalent
+30,Array/SUPER Functions,SUBARRAY(arr, start, len),"SLICE(arr, start, len)",Direct equivalent
+31,Explode / Lateral View,"FROM t, t.super_array AS item (PartiQL unnest)","LATERAL VIEW EXPLODE(t.array_col) t2 AS item",Redshift PartiQL implicit cross-join unnest -> LATERAL VIEW EXPLODE
+32,Explode / Lateral View,"JSON_PARSE + iteration over SUPER array","EXPLODE(FROM_JSON(col, schema))",Requires explicit schema
+33,Date/Time Functions,GETDATE(),CURRENT_TIMESTAMP(),Current timestamp
+34,Date/Time Functions,SYSDATE,CURRENT_TIMESTAMP(),Current timestamp (transaction start time in Redshift)
+35,Date/Time Functions,CURRENT_DATE,CURRENT_DATE(),Direct equivalent
+36,Date/Time Functions,"EXTRACT(YEAR FROM dt)",YEAR(dt),Direct equivalent
+37,Date/Time Functions,"EXTRACT(QUARTER FROM dt)",QUARTER(dt),Direct equivalent
+38,Date/Time Functions,"EXTRACT(MONTH FROM dt)",MONTH(dt),Direct equivalent
+39,Date/Time Functions,"EXTRACT(WEEK FROM dt)",WEEKOFYEAR(dt),Direct equivalent
+40,Date/Time Functions,"EXTRACT(DOW FROM dt)",DAYOFWEEK(dt),Numbering convention differs; verify 0/1-based offset
+41,Date/Time Functions,"EXTRACT(DOY FROM dt)",DAYOFYEAR(dt),Direct equivalent
+42,Date/Time Functions,"EXTRACT(HOUR FROM ts)",HOUR(ts),Direct equivalent
+43,Date/Time Functions,"DATE_PART(quarter, dt)","DATE_PART('quarter', dt)",Redshift accepts bare keyword; DBX requires quoted string literal
+44,Date/Time Functions,"DATEADD(day, 7, dt)","DATE_ADD(dt, 7)",Unit-specific function in Redshift -> single generic function in DBX (days)
+45,Date/Time Functions,"DATEADD(month, 1, dt)","ADD_MONTHS(dt, 1)",Use ADD_MONTHS for month unit
+46,Date/Time Functions,"DATEADD(year, 1, dt)","ADD_MONTHS(dt, 12)",No YEAR unit in DATE_ADD; multiply months by 12
+47,Date/Time Functions,"DATEADD(week, 2, dt)","DATE_ADD(dt, 14)",Convert week unit to days (multiply by 7)
+48,Date/Time Functions,"DATEDIFF(day, d1, d2)","DATEDIFF(d2, d1)",Argument order reversed; Redshift is (unit, start, end) vs DBX (end, start) for days
+49,Date/Time Functions,"DATEDIFF(month, d1, d2)","CAST(MONTHS_BETWEEN(d2, d1) AS INT)",No native month-unit DATEDIFF in DBX
+50,Date/Time Functions,DATE_TRUNC('month', ts),DATE_TRUNC('MONTH', ts),Direct equivalent; DBX unit literal typically uppercase
+51,Date/Time Functions,"TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS')","DATE_FORMAT(ts, 'yyyy-MM-dd HH:mm:ss')",Function name and pattern tokens both differ (case-sensitive Java pattern in DBX)
+52,Date/Time Functions,"TO_DATE(str, 'MM/DD/YYYY')","TO_DATE(str, 'MM/dd/yyyy')",Pattern token case differs
+53,Date/Time Functions,"TO_TIMESTAMP(str, 'YYYY-MM-DD HH24:MI:SS')","TO_TIMESTAMP(str, 'yyyy-MM-dd HH:mm:ss')",Pattern token case differs
+54,Date/Time Functions,"CONVERT_TIMEZONE('UTC','America/New_York', ts)","FROM_UTC_TIMESTAMP(ts, 'America/New_York')",Only direct when source tz is UTC; else use TO_UTC_TIMESTAMP first
+55,Date/Time Functions,TRUNC(ts),DATE(ts),Truncate timestamp to date
+56,Date/Time Functions,LAST_DAY(dt),LAST_DAY(dt),Direct equivalent
+57,Date/Time Functions,"FROM_UNIXTIME(epoch) equivalent: TIMESTAMP 'epoch' + epoch_col * INTERVAL '1 second'",TIMESTAMP_SECONDS(epoch),Redshift has no direct FROM_UNIXTIME; common idiom shown maps to single DBX function
+58,String Functions,"col1 || col2",CONCAT(col1, col2),Both support ||; CONCAT preferred for null-safety review
+59,String Functions,"LISTAGG(col, ',') WITHIN GROUP (ORDER BY col2)","ARRAY_JOIN(SORT_ARRAY(COLLECT_LIST(col)), ',')",No direct ordered string-agg in DBX; reconstruct via array collect + sort + join
+60,String Functions,"LISTAGG(DISTINCT col, ',')","ARRAY_JOIN(COLLECT_SET(col), ',')",Distinct variant maps to COLLECT_SET
+61,String Functions,STRPOS(str, substr),INSTR(str, substr),Direct equivalent
+62,String Functions,"SPLIT_PART(str, delim, n)","SPLIT_PART(str, delim, n)",Direct equivalent (same signature)
+63,String Functions,LEN(str) / LENGTH(str),LENGTH(str),Direct equivalent
+64,String Functions,"REGEXP_SUBSTR(str, pattern)","REGEXP_EXTRACT(str, pattern, 1)",DBX requires explicit capture group index
+65,String Functions,"REGEXP_REPLACE(str, pattern, repl)","REGEXP_REPLACE(str, pattern, repl)",Direct equivalent
+66,String Functions,"REGEXP_COUNT(str, pattern)","SIZE(REGEXP_EXTRACT_ALL(str, pattern, 0))",No direct count function; compose via extract_all + size
+67,String Functions,"DECODE(expr, val1, res1, val2, res2, default)","CASE expr WHEN val1 THEN res1 WHEN val2 THEN res2 ELSE default END",No DECODE function in DBX
+68,String Functions,"LPAD(str, len, pad)","LPAD(str, len, pad)",Direct equivalent
+69,String Functions,INITCAP(str),INITCAP(str),Direct equivalent
+70,String Functions,"TRANSLATE(str, from_chars, to_chars)","TRANSLATE(str, from_chars, to_chars)",Direct equivalent
+71,String Functions,MD5(str),MD5(str),Direct equivalent
+72,String Functions,"str::VARCHAR / CAST(str AS VARCHAR)","CAST(str AS STRING)",VARCHAR/CHAR cast target renamed to STRING
+73,JSON Functions,"JSON_EXTRACT_PATH_TEXT(json, 'key1', 'key2')","GET_JSON_OBJECT(json, '$.key1.key2')",Multi-arg path args -> single JSONPath string
+74,JSON Functions,"JSON_EXTRACT_ARRAY_ELEMENT_TEXT(json, idx)","GET_JSON_OBJECT(json, '$[idx]')",Array index folded into JSONPath
+75,JSON Functions,JSON_ARRAY_LENGTH(json),"SIZE(FROM_JSON(json, 'array<string>'))",No direct length function; requires schema-cast first
+76,JSON Functions,IS_VALID_JSON(str),"FROM_JSON(str, schema) IS NOT NULL (wrap in TRY where needed)",No boolean validity check function; approximate via parse success
+77,Aggregate Functions,"APPROXIMATE COUNT(DISTINCT col)",APPROX_COUNT_DISTINCT(col),Redshift keyword syntax -> DBX function call
+78,Aggregate Functions,MEDIAN(col),"PERCENTILE(col, 0.5)",No MEDIAN function in DBX
+79,Aggregate Functions,"PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY col)","PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY col)",Direct equivalent
+80,Aggregate Functions,STDDEV_SAMP(col),STDDEV_SAMP(col),Direct equivalent
+81,Aggregate Functions,VAR_POP(col),VAR_POP(col),Direct equivalent
+82,Aggregate Functions,"ADMIN.APPROXIMATE_PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY col)","PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY col)",Schema-qualified Redshift admin function -> standard DBX function
+83,Window Functions,"RANK() OVER (...)","RANK() OVER (...)",Direct equivalent
+84,Window Functions,"ROW_NUMBER() OVER (...)","ROW_NUMBER() OVER (...)",Direct equivalent
+85,Window Functions,"LAG(col, n, default) OVER (...)","LAG(col, n, default) OVER (...)",Direct equivalent
+86,Window Functions,"NTILE(n) OVER (...)","NTILE(n) OVER (...)",Direct equivalent
+87,DDL / Table Properties,"DISTKEY(col)",CLUSTER BY (col),Distribution key -> Delta liquid clustering key (semantics differ; no true distribution concept in DBX)
+88,DDL / Table Properties,"SORTKEY(col1, col2)","CLUSTER BY (col1, col2)",Sort key folded into clustering columns
+89,DDL / Table Properties,DISTSTYLE ALL,No equivalent,DBX has no broadcast-all distribution style; remove/no-op
+90,DDL / Table Properties,"col INT IDENTITY(1,1)","col BIGINT GENERATED ALWAYS AS IDENTITY",Identity column; DBX requires BIGINT
+91,DDL / Table Properties,CREATE TEMP TABLE ... AS,CREATE OR REPLACE TEMPORARY VIEW ... AS,No storage-backed session temp table in DBX; use temp view
+92,DDL / Table Properties,VACUUM tablename,OPTIMIZE tablename,Different semantics: Redshift reclaims/re-sorts space; DBX compacts small files
+93,DDL / Table Properties,ANALYZE tablename,ANALYZE TABLE tablename COMPUTE STATISTICS,Direct equivalent purpose
+94,DDL / Table Properties,UNLOAD ('query') TO 's3://...',COPY INTO / df.write on external location,No single equivalent statement; typically rewritten as COPY INTO or a write operation
+95,DDL / Table Properties,COPY tablename FROM 's3://...',COPY INTO tablename FROM 's3://...',Similar concept, different syntax/options
+96,System Catalog,stl_query,system.query.history,No 1:1 mapping; column names differ (userid->executed_by, querytxt->statement_text, etc.)
+97,System Catalog,svv_table_info,system.information_schema.tables + DESCRIBE DETAIL,No direct equivalent; size/row stats require DESCRIBE DETAIL per table
+98,System Catalog,"information_schema.columns (schema='public')","information_schema.columns (schema='default')",information_schema pass-through but default schema name differs (public -> default)
+99,Type Casting,expr::TYPE,CAST(expr AS TYPE),Postfix :: cast operator -> CAST() function call
+100,Type Casting,expr::VARCHAR::DATE,CAST(CAST(expr AS STRING) AS DATE),Chained casts preserved as nested CAST calls

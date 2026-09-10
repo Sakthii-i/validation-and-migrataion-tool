@@ -164,8 +164,6 @@ class SQLValidator:
          "FROM_BASE64() — should be unbase64()"),
         (re.compile(r'\bNET\.\w+\s*\(', re.IGNORECASE),
          "NET.* functions — not available in Databricks"),
-        (re.compile(r'\bSTRUCT\s*\([^)]*\bAS\b', re.IGNORECASE),
-         "STRUCT(x AS field) — Databricks uses NAMED_STRUCT or STRUCT<field:type>"),
         (re.compile(r'\bARRAY_AGG\s*\(', re.IGNORECASE),
          "ARRAY_AGG() — should be COLLECT_LIST() or COLLECT_SET()"),
         (re.compile(r'\bSTRING_AGG\s*\(', re.IGNORECASE),

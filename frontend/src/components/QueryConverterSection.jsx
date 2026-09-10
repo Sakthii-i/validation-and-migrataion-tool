@@ -268,8 +268,9 @@ export default function QueryConverterSection() {
 
   const isSnowflake = sourceEngine === 'Snowflake';
   const isTrino = sourceEngine === 'Trino';
+  const isRedshift = sourceEngine === 'Redshift';
   const requiresSourceConnection = isSnowflake || isTrino;
-  const sourceLabel = isSnowflake ? 'Snowflake' : isTrino ? 'Trino' : 'BigQuery';
+  const sourceLabel = isSnowflake ? 'Snowflake' : isTrino ? 'Trino' : isRedshift ? 'Redshift' : 'BigQuery';
   const titleText = `${sourceLabel} to Databricks Query Converter`;
   const inputLabel = `Input SQL (${sourceLabel})`;
   const inputPlaceholder = `Paste your ${sourceLabel} SQL here...`;

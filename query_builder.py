@@ -4,7 +4,7 @@ def qualify_table(engine, catalog, schema, table):
     if engine == "bigquery":
         return f"`{catalog}.{schema}.{table}`"
 
-    if engine in ["databricks", "snowflake", "trino"]:
+    if engine in ["databricks", "snowflake", "trino", "redshift"]:
         return f"{catalog}.{schema}.{table}"
 
     raise ValueError(f"Unsupported engine: {engine}")
@@ -90,6 +90,18 @@ def build_schema_query(engine, catalog, schema, table):
         FROM {catalog}.information_schema.columns
                 WHERE lower(table_schema) = lower('{schema}')
                     AND lower(table_name) = lower('{table}')
+        ORDER BY ordinal_position
+        """
+
+    if engine == "redshift":
+        return f"""
+        SELECT
+            column_name,
+            data_type,
+            is_nullable
+        FROM information_schema.columns
+        WHERE lower(table_schema) = lower('{schema}')
+          AND lower(table_name) = lower('{table}')
         ORDER BY ordinal_position
         """
 
@@ -407,6 +419,8 @@ def _value_expr(engine: str, col: dict | str) -> str:
         return f"COALESCE(TRIM(TO_VARCHAR({col_ref})), {null_token})"
     if engine == "trino":
         return f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)), {null_token})"
+    if engine == "redshift":
+        return f"COALESCE(TRIM(CAST({col_ref} AS VARCHAR)), {null_token})"
 
     return f"COALESCE(TRIM(CAST({col_ref} AS STRING)), {null_token})"
 
@@ -437,6 +451,8 @@ def _row_signature_expr(engine: str, columns) -> str:
             expr = f"({expr} || '|' || {p})"
         return expr
     if engine == "trino":
+        return concat_with_delim("CONCAT")
+    if engine == "redshift":
         return concat_with_delim("CONCAT")
 
     return "CONCAT(" + ", '||', ".join(parts) + ")"
@@ -807,6 +823,19 @@ def build_row_hash_query_v2(
                     {concat_expr}
                 )
             )))) AS hash_value
+        FROM {table_fqn}
+        WHERE {where_sql}
+        ORDER BY hash_value
+        """.strip()
+
+    if engine == "redshift":
+        return f"""
+        SELECT
+            UPPER(MD5(
+                CONCAT_WS('|',
+                    {concat_expr}
+                )
+            )) AS hash_value
         FROM {table_fqn}
         WHERE {where_sql}
         ORDER BY hash_value

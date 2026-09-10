@@ -17,6 +17,8 @@ export function ConnectionProvider({ children }) {
     sf_account: '', sf_user: '', sf_password: '', sf_warehouse: '', sf_role: '',
     // Trino
     trino_host: '', trino_port: '8080', trino_user: 'admin', trino_catalog: '', trino_schema: '', trino_http_scheme: 'http', trino_password: '',
+    // Redshift
+    redshift_host: '', redshift_port: '5439', redshift_database: '', redshift_user: '', redshift_password: '', redshift_schema: '',
   });
 
   // Target credentials (Databricks)
@@ -29,6 +31,23 @@ export function ConnectionProvider({ children }) {
   const connect = async () => {
     setConnectionStatus('connecting');
     setError(null);
+
+    if (sourceEngine === 'Redshift') {
+      const hasLiveConnectionConfig = Boolean(
+        sourceCreds.redshift_host &&
+        sourceCreds.redshift_database &&
+        sourceCreds.redshift_user &&
+        sourceCreds.redshift_password
+      );
+
+      if (!hasLiveConnectionConfig) {
+        setConnectionStatus('disconnected');
+        const msg = 'Redshift conversion does not require a live connection. Add host, database, user, and password only when you want to establish a real Redshift connection.';
+        setError(msg);
+        return { status: 'skipped', message: msg };
+      }
+    }
+
     try {
       const payload = {
         source_engine: sourceEngine,
@@ -50,7 +69,16 @@ export function ConnectionProvider({ children }) {
                 http_scheme: sourceCreds.trino_http_scheme,
                 password: sourceCreds.trino_password,
               }
-            : {},
+            : sourceEngine === 'Redshift'
+              ? {
+                  host: sourceCreds.redshift_host,
+                  port: sourceCreds.redshift_port,
+                  database: sourceCreds.redshift_database,
+                  user: sourceCreds.redshift_user,
+                  password: sourceCreds.redshift_password,
+                  schema: sourceCreds.redshift_schema,
+                }
+              : {},
         target: {},
       };
       const res = await connectionAPI.connect(payload);

@@ -1,7 +1,7 @@
 """RQ worker entrypoint.
 
 Run:
-  python -m validation_tool.worker.run_worker
+  python -m worker.run_worker
 """
 
 import os
@@ -10,7 +10,7 @@ import multiprocessing as mp
 import redis
 from rq import Worker
 
-from validation_tool.backend.settings import redis_url
+from ..backend.settings import redis_url
 
 
 def _run_one_worker() -> None:

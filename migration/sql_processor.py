@@ -49,6 +49,15 @@ class SQLPreprocessor:
         r"\bSELECT\s+AS\s+STRUCT\b",
     ]
 
+    _REDSHIFT_HINTS = [
+        r"\bNVL2\s*\(",
+        r"\bIIF\s*\(",
+        r"\bLISTAGG\s*\(",
+        r"\bSIMILAR\s+TO\b",
+        r"\bDATE_TRUNC\s*\(",
+        r"\bCURRENT_SCHEMA\s*\(",
+    ]
+
     _SNOWFLAKE_HINTS = [
         r"::\s*[A-Za-z_][A-Za-z0-9_]*",  # Snowflake cast
         r"\bMD5_HEX\s*\(",
@@ -69,7 +78,6 @@ class SQLPreprocessor:
         r"\bSEQ[248]\s*\(",
         r"\bCURRENT_(?:DATABASE|SCHEMA|ROLE|WAREHOUSE)\s*\(",
         r"\bZEROIFNULL\s*\(",
-        r"\bNVL2\s*\(",
         r"\bIFF\s*\(",
     ]
 
@@ -123,19 +131,23 @@ class SQLPreprocessor:
 
         bq_score = _score(SQLPreprocessor._BQ_HINTS)
         sf_score = _score(SQLPreprocessor._SNOWFLAKE_HINTS)
+        redshift_score = _score(SQLPreprocessor._REDSHIFT_HINTS)
         trino_score = _score(SQLPreprocessor._TRINO_HINTS)
 
         bq_parse = SQLPreprocessor._can_parse(cleaned, "bigquery")
         sf_parse = SQLPreprocessor._can_parse(cleaned, "snowflake")
+        redshift_parse = SQLPreprocessor._can_parse(cleaned, "redshift")
         trino_parse = SQLPreprocessor._can_parse(cleaned, "trino")
         if bq_parse and not sf_parse:
             bq_score += 1
         elif sf_parse and not bq_parse:
             sf_score += 1
-        if trino_parse and not bq_parse and not sf_parse:
+        if redshift_parse and not sf_parse and not bq_parse:
+            redshift_score += 1
+        if trino_parse and not bq_parse and not sf_parse and not redshift_parse:
             trino_score += 1
 
-        scores = {"bigquery": bq_score, "snowflake": sf_score, "trino": trino_score}
+        scores = {"bigquery": bq_score, "snowflake": sf_score, "redshift": redshift_score, "trino": trino_score}
         if max(scores.values()) == 0:
             return "unknown"
         winners = [engine for engine, score in scores.items() if score == max(scores.values())]

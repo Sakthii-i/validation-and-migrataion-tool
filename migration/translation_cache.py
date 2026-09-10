@@ -10,7 +10,8 @@ class TranslationCache:
     """Persistent cache for translated SQL with connection pooling."""
 
     # Bump this version when translation rules change to invalidate stale entries.
-    RULES_VERSION = "2"
+    # This includes the Redshift NVL2 detection/translation fix.
+    RULES_VERSION = "3"
     
     def __init__(self, db_path: str = "translation_cache.db", ttl_days: int = 30):
         self.db_path = db_path

@@ -4,11 +4,11 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from validation_tool.connections.bigquery import connect_bigquery
-from validation_tool.connections.databricks import connect_databricks
-from validation_tool.connections.snowflake import connect_snowflake
-from validation_tool.connections.trino import connect_trino
-from validation_tool.query_builder import (
+from ..connections.bigquery import connect_bigquery
+from ..connections.databricks import connect_databricks
+from ..connections.snowflake import connect_snowflake
+from ..connections.trino import connect_trino
+from ..query_builder import (
     build_numeric_stats_query,
     build_row_hash_query,
     build_schema_query,
@@ -16,7 +16,7 @@ from validation_tool.query_builder import (
     get_numeric_columns,
 )
 try:
-    from validation_tool.datatype_utils import (
+    from ..datatype_utils import (
         datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
     )
@@ -304,7 +304,7 @@ def validate_hash(
 
 def run_validation_job(session_payload: dict, row: dict) -> dict:
     source_engine = str(session_payload.get("source_engine") or "").lower()
-    if source_engine not in {"bigquery", "snowflake", "trino"}:
+    if source_engine not in {"bigquery", "snowflake", "trino", "redshift"}:
         raise ValueError("Unsupported source_engine in session")
 
     target = session_payload.get("target") or {}
@@ -327,6 +327,16 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
                 source.get("password"),
                 source.get("warehouse"),
                 source.get("role"),
+            )
+        elif source_engine == "redshift":
+            from ..connections.redshift import connect_redshift
+            source_conn = connect_redshift(
+                source.get("host"),
+                source.get("port"),
+                source.get("database"),
+                source.get("user"),
+                source.get("password"),
+                source.get("schema"),
             )
         else:
             source_conn = connect_trino(
@@ -403,7 +413,7 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
                 raise ValueError("Table has > 1,000,000 rows. Categorical Columns are required to optimize hash validation. Please select 1 or 2 categorical columns.")
 
             if cat_cols:
-                from validation_tool.validation_core import validate_categorical_hash
+                from ..validation_core import validate_categorical_hash
                 hash_status = (
                     "PASS"
                     if validate_categorical_hash(
@@ -458,7 +468,7 @@ def run_validation_job(session_payload: dict, row: dict) -> dict:
             pass
 
         try:
-            if source_engine in {"snowflake", "trino"} and source_conn is not None:
+            if source_engine in {"snowflake", "trino", "redshift"} and source_conn is not None:
                 source_conn.close()
         except Exception:
             pass

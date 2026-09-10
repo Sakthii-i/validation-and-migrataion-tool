@@ -18,6 +18,15 @@ class SourceCredentialsSnowflake(BaseModel):
     role: str | None = None
 
 
+class SourceCredentialsRedshift(BaseModel):
+    host: str
+    port: int | str = 5439
+    database: str
+    user: str
+    password: str
+    schema: str | None = None
+
+
 class TargetCredentialsDatabricks(BaseModel):
     server_hostname: str
     http_path: str
@@ -25,7 +34,7 @@ class TargetCredentialsDatabricks(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    source_engine: str = Field(..., description="bigquery, snowflake, or trino")
+    source_engine: str = Field(..., description="bigquery, snowflake, trino, or redshift")
     credential_password: str = Field(default="", description="password to unlock credential.txt")
     source: dict = Field(default_factory=dict)
     target: TargetCredentialsDatabricks | None = None

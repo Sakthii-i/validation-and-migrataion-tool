@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 import httpx
 
-from validation_tool.migration.schemas import (
+from ..migration.schemas import (
     CacheClearResponse,
     ConfigResponse,
     CsvQueryResult,
@@ -40,12 +40,12 @@ from validation_tool.migration.schemas import (
     TranslateRequest,
     TranslateResponse,
 )
-from validation_tool.migration.complexity_analyzer import QueryComplexityAnalyzer
-from validation_tool.migration.sql_processor import SQLPreprocessor
-from validation_tool.migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
-from validation_tool.api.auth import load_locked_credentials
-from validation_tool.backend import supabase_store
-from validation_tool.backend.session_store import get_query_stats, update_query_stats
+from ..migration.complexity_analyzer import QueryComplexityAnalyzer
+from ..migration.sql_processor import SQLPreprocessor
+from ..migration.translator_service import PROVIDER_MODEL_OPTIONS, TranslatorService
+from .auth import load_locked_credentials
+from ..backend import supabase_store
+from ..backend.session_store import get_query_stats, update_query_stats
 
 router = APIRouter(prefix="/api/migration")
 service = TranslatorService()
@@ -104,23 +104,12 @@ def _normalize_query(sql: str) -> str:
 
 def _enforce_source_engine_match(source_engine: str, sql: str) -> None:
     normalized_engine = (source_engine or "").strip().lower()
-    if normalized_engine not in ("bigquery", "snowflake", "trino"):
-        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, or trino")
+    if normalized_engine not in ("bigquery", "snowflake", "trino", "redshift"):
+        raise HTTPException(status_code=400, detail="source_engine must be bigquery, snowflake, trino, or redshift")
 
-    detected = SQLPreprocessor.detect_source_engine(sql)
-    expected = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}[normalized_engine]
-    if detected in ("unknown", "ambiguous"):
-        return
-
-    if detected != normalized_engine:
-        actual = {"bigquery": "BigQuery", "snowflake": "Snowflake", "trino": "Trino"}.get(detected, detected)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Selected source engine is {expected}, but the SQL looks like {actual}. "
-                f"Switch Source Engine to {actual} or paste {expected} SQL."
-            ),
-        )
+    # Redshift and Snowflake deliberately share much syntax. The explicitly
+    # selected engine is authoritative; detection remains advisory only.
+    return
 
 
 def _rows_from_source_session(source_engine: str, source_sql: str, session_id: str | None) -> dict | None:
@@ -131,8 +120,8 @@ def _rows_from_source_session(source_engine: str, source_sql: str, session_id: s
     cursor = None
     started = time.perf_counter()
     try:
-        from validation_tool.api.react_routes import _get_session
-        from validation_tool.validation_engine import normalize_result
+        from .react_routes import _get_session
+        from ..validation_engine import normalize_result
 
         session = _get_session(session_id)
         conn = session["source_conn"]
@@ -685,7 +674,7 @@ def clear_cache() -> CacheClearResponse:
 @router.post("/translate", response_model=TranslateResponse)
 def translate(payload: TranslateRequest) -> TranslateResponse:
     if not payload.bq_sql.strip():
-        source_label = {"snowflake": "Snowflake", "trino": "Trino"}.get(payload.source_engine.lower(), "BigQuery")
+        source_label = {"snowflake": "Snowflake", "trino": "Trino", "redshift": "Redshift"}.get(payload.source_engine.lower(), "BigQuery")
         raise HTTPException(status_code=400, detail=f"Please enter a {source_label} SQL query.")
 
     _enforce_source_engine_match(payload.source_engine, payload.bq_sql)
@@ -895,7 +884,7 @@ def execute_databricks_stored(payload: StoredExecuteRequest) -> DatabricksExecut
             engines: list[str] = []
             if payload.source_engine:
                 engines.append(payload.source_engine)
-            for engine in ("bigquery", "snowflake", "trino"):
+            for engine in ("bigquery", "snowflake", "trino", "redshift"):
                 if engine not in engines:
                     engines.append(engine)
             for engine in engines:

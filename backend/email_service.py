@@ -6,8 +6,8 @@ import smtplib
 from email.message import EmailMessage
 from typing import Any
 
-from validation_tool.backend.auth_config import ADMIN_EMAIL, ADMIN_USERNAME
-from validation_tool.backend.supabase_auth_store import get_user
+from .auth_config import ADMIN_EMAIL, ADMIN_USERNAME
+from .supabase_auth_store import get_user
 
 logger = logging.getLogger(__name__)
 

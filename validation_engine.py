@@ -16,16 +16,29 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 import psycopg2
 
-from validation_tool.connections.postgres import POSTGRES_CONFIG
-from validation_tool.query_builder import (
-    build_shallow_query,
-    build_schema_query,
-    build_numeric_stats_query,
-    build_row_value_query_v2,
-    get_numeric_columns,
-)
 try:
-    from validation_tool.datatype_utils import (
+    from .connections.postgres import POSTGRES_CONFIG
+except ImportError:
+    from connections.postgres import POSTGRES_CONFIG
+
+try:
+    from .query_builder import (
+        build_shallow_query,
+        build_schema_query,
+        build_numeric_stats_query,
+        build_row_value_query_v2,
+        get_numeric_columns,
+    )
+except ImportError:
+    from query_builder import (
+        build_shallow_query,
+        build_schema_query,
+        build_numeric_stats_query,
+        build_row_value_query_v2,
+        get_numeric_columns,
+    )
+try:
+    from .datatype_utils import (
         datatypes_compatible,
         normalize_datatype as canonical_normalize_datatype,
     )
@@ -50,7 +63,7 @@ def execute_query(engine, conn, query):
     if engine == "bigquery":
         job = conn.query(query)
         return [dict(row) for row in job.result()]
-    elif engine in ["databricks", "snowflake", "trino"]:
+    elif engine in ["databricks", "snowflake", "trino", "redshift"]:
         cur = conn.cursor()
         cur.execute(query)
         cols = [c[0] for c in cur.description]
@@ -143,7 +156,11 @@ def _normalize_hash_scalar(value):
         parts = []
         for key in sorted(value.keys(), key=lambda item: str(item).strip().lower()):
             normalized_key = str(key).strip()
-            normalized_value = _normalize_hash_scalar(value[key])
+            raw_value = value[key]
+            if isinstance(raw_value, str):
+                normalized_value = json.dumps(raw_value, ensure_ascii=False, separators=(',', ':'))
+            else:
+                normalized_value = _normalize_hash_scalar(raw_value)
             parts.append(f"{json.dumps(normalized_key, ensure_ascii=False, separators=(',', ':'))}:{normalized_value}")
         return f"{{{','.join(parts)}}}"
 
@@ -445,7 +462,7 @@ def run_row_hash_validation(
     source_where="1=1", target_where="1=1",
     categorical_columns=None
 ):
-    from validation_tool.query_builder import build_shallow_query
+    from .query_builder import build_shallow_query
     # 1. Enforce 1M row limit
     metrics_shallow = {"row_count": True}
     src_count_query = build_shallow_query(engine, src["catalog"], src["schema"], src["table"], metrics_shallow, where_clause=normalize_where_input(source_where))
@@ -461,7 +478,7 @@ def run_row_hash_validation(
         )
 
     if cat_cols:
-        from validation_tool.validation_core import validate_categorical_hash
+        from .validation_core import validate_categorical_hash
         return validate_categorical_hash(
             engine,
             source_conn,
