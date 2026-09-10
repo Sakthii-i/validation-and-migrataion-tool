@@ -20,6 +20,13 @@ def get_catalogs(engine, conn):
         cur.close()
         return rows
 
+    elif engine == "Redshift":
+        cur = conn.cursor()
+        cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows
+
 
 def get_schemas(engine, conn, catalog):
     if engine == "BigQuery":
@@ -38,6 +45,13 @@ def get_schemas(engine, conn, catalog):
     elif engine == "Trino":
         cur = conn.cursor()
         cur.execute(f"SHOW SCHEMAS FROM {catalog}")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows
+
+    elif engine == "Redshift":
+        cur = conn.cursor()
+        cur.execute("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT LIKE 'pg_%' AND schema_name NOT IN ('information_schema') ORDER BY schema_name")
         rows = [row[0] for row in cur.fetchall()]
         cur.close()
         return rows
@@ -61,6 +75,13 @@ def get_tables(engine, conn, catalog, schema):
     elif engine == "Trino":
         cur = conn.cursor()
         cur.execute(f"SHOW TABLES FROM {catalog}.{schema}")
+        rows = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return rows
+
+    elif engine == "Redshift":
+        cur = conn.cursor()
+        cur.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name", (schema,))
         rows = [row[0] for row in cur.fetchall()]
         cur.close()
         return rows

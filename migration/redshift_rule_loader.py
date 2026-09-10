@@ -357,7 +357,7 @@ class RedshiftRuleEngine(TrinoRuleEngine):
         # its example placeholders (for example ``TO_DATE(str, format)``)
         # can match inside already-valid format strings. Apply only explicit,
         # syntax-aware transformations below.
-        sql = self._rewrite_cross_join_unnest(sql)
+        sql = self._rewrite_cross_join_unnest_static(sql)
         sql = self._rewrite_extract(sql)
         sql = self._normalize_legacy_date_calls(sql)
         sql = re.sub(
