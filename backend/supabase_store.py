@@ -23,6 +23,8 @@ SUPABASE_BQ_QUERY_TABLE = (os.getenv("SUPABASE_BQ_QUERY_TABLE") or "query_histor
 SUPABASE_SNOWFLAKE_QUERY_TABLE = (os.getenv("SUPABASE_SNOWFLAKE_QUERY_TABLE") or "query_history_snowflake").strip()
 SUPABASE_TRINO_QUERY_TABLE = (os.getenv("SUPABASE_TRINO_QUERY_TABLE") or "query_history_trino").strip()
 SUPABASE_TRINO_RESULTS_TABLE = (os.getenv("SUPABASE_TRINO_RESULTS_TABLE") or "validation_results_trino").strip()
+SUPABASE_REDSHIFT_QUERY_TABLE = (os.getenv("SUPABASE_REDSHIFT_QUERY_TABLE") or "query_history_redshift").strip()
+SUPABASE_REDSHIFT_RESULTS_TABLE = (os.getenv("SUPABASE_REDSHIFT_RESULTS_TABLE") or "validation_results_redshift").strip()
 
 
 def is_enabled() -> bool:
@@ -50,6 +52,8 @@ def _results_table_for_engine(source_engine: str | None) -> str:
         return SUPABASE_BQ_RESULTS_TABLE
     if engine == "trino":
         return SUPABASE_TRINO_RESULTS_TABLE
+    if engine == "redshift":
+        return SUPABASE_REDSHIFT_RESULTS_TABLE
     return SUPABASE_TABLE
 
 
@@ -59,6 +63,8 @@ def _query_table_for_engine(source_engine: str | None) -> str:
         return SUPABASE_BQ_QUERY_TABLE
     if engine == "trino":
         return SUPABASE_TRINO_QUERY_TABLE
+    if engine == "redshift":
+        return SUPABASE_REDSHIFT_QUERY_TABLE
     return SUPABASE_SNOWFLAKE_QUERY_TABLE
 
 
